@@ -11,6 +11,7 @@
 
 import { allowsModel, hashKey, isUsable, overLimit } from '../keys.js';
 import { keyUsage } from '../usage.js';
+import { readAccount } from '../store.js';
 
 /** Pull a gateway key out of the request headers. */
 export function keyFromRequest(req) {
@@ -97,4 +98,64 @@ export function enforceModel(req, res, next) {
     'model_not_allowed',
     'permission_error',
   );
+}
+
+
+/**
+ * Accept **either** a session or an API key on a read-only dashboard route.
+ *
+ * The session is already resolved by `attachSession`, so a browser needs nothing
+ * extra. A script presenting one of its own `sk-` keys gets the same view, scoped
+ * to that key's owner — which is what a client without a cookie needs.
+ *
+ * The identity is never "everything": if neither credential is present the
+ * request is refused, because an unscoped usage query would expose every
+ * account's traffic.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ */
+export function allowKeyIdentity(db) {
+  const selectKey = db.prepare('SELECT * FROM api_keys WHERE key_hash = ?');
+  const touchKey = db.prepare('UPDATE api_keys SET last_used_at = ? WHERE id = ?');
+
+  return (req, res, next) => {
+    // A session already won; nothing to do.
+    if (req.account !== undefined) return next();
+
+    const presented = keyFromRequest(req);
+    if (presented === undefined || !presented.startsWith('sk-')) {
+      return apiError(
+        res,
+        401,
+        'Provide a session cookie or an API key ("Authorization: Bearer sk-…").',
+        'missing_credentials',
+        'authentication_error',
+      );
+    }
+
+    const row = selectKey.get(hashKey(presented));
+    if (row === undefined) {
+      return apiError(res, 401, 'Unknown API key.', 'invalid_api_key', 'authentication_error');
+    }
+    if (!isUsable(row)) {
+      const reason = row.revoked_at ? 'revoked' : 'expired';
+      return apiError(res, 401, `This API key is ${reason}.`, `key_${reason}`, 'authentication_error');
+    }
+
+    const account = readAccount(db, row.owner_username ?? '');
+    if (account === undefined) {
+      return apiError(
+        res,
+        503,
+        'The DeepAI account that owns this API key is not signed in.',
+        'deepai_signed_out',
+        'api_error',
+      );
+    }
+
+    req.gatewayKey = row;
+    req.account = account;
+    touchKey.run(Date.now(), row.id);
+    next();
+  };
 }

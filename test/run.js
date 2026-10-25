@@ -102,12 +102,14 @@ function asUser(base, session) {
   return async (path, init = {}) => {
     const hasBody = init.body !== undefined;
     const body = hasBody && typeof init.body !== 'string' ? JSON.stringify(init.body) : init.body;
+    const { anonymous = false, ...rest } = init;
     const headers = {
       ...(hasBody ? { 'content-type': 'application/json' } : {}),
-      ...session.headers,
-      ...(init.headers ?? {}),
+      // `anonymous: true` models a browser after /api/logout cleared its cookie.
+      ...(anonymous ? {} : session.headers),
+      ...(rest.headers ?? {}),
     };
-    const response = await fetch(`${base}${path}`, { ...init, body, headers });
+    const response = await fetch(`${base}${path}`, { ...rest, body, headers });
     const text = await response.text();
     let parsed;
     try {
@@ -602,16 +604,19 @@ await checkAsync('/v1/models only advertises the models a restricted key may use
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
 
+  // A key needs an owning account to be usable at all: the account is what pays.
+  saveAccount(fresh, { apiKey: 'owner-deepai-key', username: 'restricted-user', isPro: false });
+
   const allowed = ['glm-5.3-flash', 'deepseek-v4.1-flash'];
   const restricted = generateKey();
-  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, models_restricted)
-                 VALUES ('kr', 'restricted', ?, ?, ?, 'unlimited', ?, 1)`)
+  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, models_restricted, owner_username)
+                 VALUES ('kr', 'restricted', ?, ?, ?, 'unlimited', ?, 1, 'restricted-user')`)
     .run(restricted.prefix, restricted.hash, Date.now(), JSON.stringify(allowed));
 
   // A restricted key with nothing selected must see nothing at all.
   const empty = generateKey();
-  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, models_restricted)
-                 VALUES ('ke', 'empty', ?, ?, ?, 'unlimited', '[]', 1)`)
+  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, models_restricted, owner_username)
+                 VALUES ('ke', 'empty', ?, ?, ?, 'unlimited', '[]', 1, 'restricted-user')`)
     .run(empty.prefix, empty.hash, Date.now());
 
   try {
@@ -625,12 +630,19 @@ await checkAsync('/v1/models only advertises the models a restricted key may use
     }).then((res) => res.json());
     assert.equal(none.data.length, 0);
 
-    // The dashboard's own view is complete, but requires a session because the
-    // usage figures beside the catalog are per account.
+    // The usage figures beside the catalog are per account, so an identity is
+    // required — but never *nothing*, which would scope to every account.
     assert.equal((await fetch(`${base}/api/models`)).status, 401);
+    // A key identity is accepted, and scoped to that key's owner.
+    const viaKey = await fetch(`${base}/api/models`, { headers: { authorization: `Bearer ${restricted.plaintext}` } });
+    assert.equal(viaKey.status, 200);
+    assert.ok((await viaKey.json()).models.length >= 13);
+    // A session identity also works.
     const session = sessionFor(fresh, 'catalog-viewer');
     const dashboard = await asUser(base, session)('/api/models');
     assert.ok(dashboard.body.models.length >= 13);
+    // An unknown key is refused.
+    assert.equal((await fetch(`${base}/api/models`, { headers: { authorization: 'Bearer sk-nope' } })).status, 401);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -719,13 +731,33 @@ await checkAsync('the gateway refuses a sixth API key', async () => {
     assert.equal(listed.body.quota.max, 5);
     assert.equal(listed.body.quota.atLimit, true);
 
-    // Deleting one frees a slot.
-    await call(`/api/keys/${created[0].id}`, { method: 'DELETE' });
-    const after = await call('/api/keys', {
+    // Revoking frees a slot without destroying the key: it becomes a tombstone
+    // that can be restored, so it must not hold quota.
+    const revoked = await call(`/api/keys/${created[0].id}/revoke`, { method: 'POST' });
+    assert.equal(revoked.status, 200);
+    assert.notEqual(revoked.body.key.revokedAt, null);
+
+    const afterRevoke = await call('/api/keys');
+    assert.equal(afterRevoke.body.quota.used, 4, 'a revoked key does not count against the cap');
+    assert.equal(afterRevoke.body.quota.archived, 1);
+    assert.equal(afterRevoke.body.quota.atLimit, false);
+    // The revoked key is still listed, so its history is visible.
+    assert.ok(afterRevoke.body.keys.some((k) => k.id === created[0].id));
+
+    const replacement = await call('/api/keys', {
       method: 'POST',
       body: { name: 'replacement', limitWindow: 'unlimited', modelsRestricted: false },
     });
-    assert.equal(after.status, 201);
+    assert.equal(replacement.status, 201);
+
+    // Reaching the active cap again refuses a new key, and says to revoke.
+    for (let index = 0; index < 1; index += 1) {
+      await call('/api/keys', { method: 'POST', body: { name: `filler ${index}` } });
+    }
+    const full = await call('/api/keys', { method: 'POST', body: { name: 'over' } });
+    assert.equal(full.status, 409);
+    assert.equal(full.body.code, 'key_limit_reached');
+    assert.match(full.body.error, /Revoke one/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -760,9 +792,10 @@ await checkAsync('a key records its DeepAI owner and unrestricted keys allow eve
     const logout = await call('/api/logout', { method: 'POST' });
     assert.equal(logout.status, 200);
     assert.match(String(logout.headers.get('set-cookie')), /deepai_gateway_session=;/);
-    const account = await call('/api/account');
+    // The browser no longer has a session, so it must send no cookie at all.
+    const account = await call('/api/account', { anonymous: true });
     assert.equal(account.body.signedIn, false, 'the cookie no longer resolves to an account');
-    assert.equal((await call('/api/keys')).status, 401, 'keys are per account');
+    assert.equal((await call('/api/keys', { anonymous: true })).status, 401, 'keys are per account');
     assert.notEqual(readAccount(fresh, 'owner-user'), undefined, 'the account row survives a logout');
     assert.equal(destroySession(fresh, session.token), false, 'the session was already destroyed');
 
@@ -1370,13 +1403,31 @@ await checkAsync('two accounts on one gateway never see each other', async () =>
     assert.equal((await asBob(`/api/keys/${alice1.body.key.id}/revoke`, { method: 'POST' })).status, 404);
     assert.equal((await asBob(`/api/keys/${alice1.body.key.id}`, { method: 'PATCH', body: { name: 'hijacked' } })).status, 404);
 
-    // Alice's keys are untouched by any of that.
+    // Deleting an active key is refused: revoking is the correct action while a
+    // key still exists, and one click must not destroy it.
+    const active = await asBob(`/api/keys/${alice1.body.key.id}`, { method: 'DELETE' });
+    assert.equal(active.status, 404, "another account's key stays invisible");
+
+    // Alice's own active key cannot be deleted either.
+    const refused = await asAlice(`/api/keys/${alice1.body.key.id}`, { method: 'DELETE' });
+    assert.equal(refused.status, 409);
+    assert.equal(refused.body.code, 'key_not_revoked');
+
+    // Once revoked, removal is allowed and frees the name.
+    await asAlice(`/api/keys/${alice1.body.key.id}/revoke`, { method: 'POST' });
+    const removed = await asAlice(`/api/keys/${alice1.body.key.id}`, { method: 'DELETE' });
+    assert.equal(removed.status, 200);
+    const afterRemoval = await asAlice('/api/keys');
+    assert.ok(!afterRemoval.body.keys.some((k) => k.id === alice1.body.key.id));
+
+    // Alice's remaining keys are untouched by any of that.
     const aliceAfter = await asAlice('/api/keys');
-    assert.deepEqual(aliceAfter.body.keys.map((k) => k.name).sort(), ['alice-1', 'alice-2']);
+    assert.deepEqual(aliceAfter.body.keys.map((k) => k.name).sort(), ['alice-2']);
     assert.ok(aliceAfter.body.keys.every((k) => k.revokedAt === null));
 
-    // Usage is scoped too: one row per owner.
-    record(fresh, { keyId: alice1.body.key.id, keyName: 'alice-1', owner: 'alice', model: 'glm-5.3-flash', inputTokens: 100, outputTokens: 10, totalTokens: 110, ok: true });
+    // Usage is scoped too: one row per owner. `alice-1` was deleted above, so
+    // attribute the rows to keys that still exist.
+    record(fresh, { keyId: alice2.body.key.id, keyName: 'alice-2', owner: 'alice', model: 'glm-5.3-flash', inputTokens: 100, outputTokens: 10, totalTokens: 110, ok: true });
     record(fresh, { keyId: bob1.body.key.id, keyName: 'bob-1', owner: 'bob', model: 'kimi-k3', inputTokens: 7, outputTokens: 3, totalTokens: 10, ok: true });
 
     const aliceSummary = (await asAlice('/api/usage/summary')).body;

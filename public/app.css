@@ -25,6 +25,12 @@
   --badge-amber-bg: #fff8ec; --badge-amber-tx: #b45309;
   --badge-violet-bg: #f5edff; --badge-violet-tx: #7928ca;
 
+  /* Destructive actions: red text on a faint red wash. */
+  --danger-ink: #c81e1e;
+  --danger-tint: rgba(238, 0, 0, .07);
+  --danger-tint-strong: rgba(238, 0, 0, .13);
+  --danger-edge: rgba(238, 0, 0, .28);
+
   --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "Roboto Mono", Menlo, Monaco, Consolas, monospace;
 
@@ -54,6 +60,12 @@
   --badge-amber-bg: #3a2a0e; --badge-amber-tx: #fbbf24;
   --badge-violet-bg: #2a1740; --badge-violet-tx: #c4a5ff;
 
+  /* Lighter ink and a stronger wash, so the pair stays legible on black. */
+  --danger-ink: #ff8a8a;
+  --danger-tint: rgba(255, 122, 122, .12);
+  --danger-tint-strong: rgba(255, 122, 122, .2);
+  --danger-edge: rgba(255, 122, 122, .35);
+
   --ring: 0 0 0 1px rgba(255, 255, 255, .1), 0 2px 2px rgba(0, 0, 0, .4);
   --shadow-pop: 0 0 0 1px rgba(255, 255, 255, .1), 0 8px 24px rgba(0, 0, 0, .6);
 }
@@ -78,6 +90,12 @@
     --badge-green-bg: #0e2f1c; --badge-green-tx: #4ade80;
     --badge-amber-bg: #3a2a0e; --badge-amber-tx: #fbbf24;
     --badge-violet-bg: #2a1740; --badge-violet-tx: #c4a5ff;
+
+  /* Lighter ink and a stronger wash, so the pair stays legible on black. */
+  --danger-ink: #ff8a8a;
+  --danger-tint: rgba(255, 122, 122, .12);
+  --danger-tint-strong: rgba(255, 122, 122, .2);
+  --danger-edge: rgba(255, 122, 122, .35);
   
     --ring: 0 0 0 1px rgba(255, 255, 255, .1), 0 2px 2px rgba(0, 0, 0, .4);
     --shadow-pop: 0 0 0 1px rgba(255, 255, 255, .1), 0 8px 24px rgba(0, 0, 0, .6);
@@ -191,6 +209,18 @@ code, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .btn--ghost:hover:not(:disabled) { background: var(--bg-inset); color: var(--ink); }
 .btn--danger { background: var(--error); color: #fff; border-color: var(--error); }
 .btn--danger:hover:not(:disabled) { opacity: .88; }
+
+/* Revoke and Remove: red enough to read as destructive, quiet enough not to
+   compete with the primary action. A translucent tint keeps the row calm. */
+.btn--danger-ghost {
+  background: var(--danger-tint);
+  color: var(--danger-ink);
+  border-color: var(--danger-edge);
+}
+.btn--danger-ghost:hover:not(:disabled) {
+  background: var(--danger-tint-strong);
+  border-color: var(--danger-ink);
+}
 
 /* The one auth control in the top bar: a plain "Sign in" when signed out, and
    an unmissable filled "Sign out" when signed in. */

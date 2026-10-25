@@ -945,6 +945,9 @@ async function renderKeys() {
     return `<span class="tiny muted">${key.allowedModels.length} allowed</span>`;
   };
 
+  const active = keys.filter((key) => key.revokedAt === null);
+  const archived = keys.filter((key) => key.revokedAt !== null);
+
   const row = (key) => `
     <tr>
       <td>
@@ -961,9 +964,9 @@ async function renderKeys() {
         <div class="row" style="gap:6px">
           <button class="btn btn--secondary btn--sm" data-action="edit" data-id="${esc(key.id)}">Edit</button>
           ${key.revokedAt === null
-            ? `<button class="btn btn--ghost btn--sm" data-action="revoke" data-id="${esc(key.id)}">Revoke</button>`
-            : `<button class="btn btn--ghost btn--sm" data-action="restore" data-id="${esc(key.id)}">Restore</button>`}
-          <button class="btn btn--ghost btn--sm" data-action="delete" data-id="${esc(key.id)}">Delete</button>
+            ? `<button class="btn btn--danger-ghost btn--sm" data-action="revoke" data-id="${esc(key.id)}">Revoke</button>`
+            : `<button class="btn btn--secondary btn--sm" data-action="restore" data-id="${esc(key.id)}">Restore</button>
+               <button class="btn btn--danger-ghost btn--sm" data-action="purge" data-id="${esc(key.id)}">Remove</button>`}
         </div>
       </td>
     </tr>`;
@@ -976,12 +979,12 @@ async function renderKeys() {
 
     <div class="stack">
       <div class="row row--between">
-        <span class="eyebrow">${keys.length} of ${quota.max} keys used</span>
-        <button class="btn btn--primary" id="new-key" ${quota.atLimit ? 'disabled title="Delete a key first"' : ''}>Create key</button>
+        <span class="eyebrow">${active.length} of ${quota.max} keys in use${archived.length > 0 ? ` · ${archived.length} revoked` : ''}</span>
+        <button class="btn btn--primary" id="new-key" ${quota.atLimit ? 'disabled title="Revoke a key first"' : ''}>Create key</button>
       </div>
 
       ${quota.atLimit
-        ? '<div class="note note--warning">The gateway allows at most ' + quota.max + ' API keys. Delete one to create another.</div>'
+        ? `<div class="note note--warning">This account holds the maximum of ${quota.max} active keys. Revoke one to create another.</div>`
         : ''}
 
       <div class="card card--flush">
@@ -997,10 +1000,32 @@ async function renderKeys() {
                     ? 'Create one to start sending requests.'
                     : 'Log in to create one.'
                 }</div></td></tr>`
-              : keys.map(row).join('')}</tbody>
+              : (active.length === 0
+                  ? '<tr><td colspan="8"><div class="empty"><div class="empty__title">No active keys</div>Restore one below, or create a new key.</div></td></tr>'
+                  : active.map(row).join(''))}</tbody>
           </table>
         </div>
       </div>
+
+      ${archived.length === 0 ? '' : `
+        <div class="card card--flush">
+          <div class="card__head">
+            <div>
+              <div class="card__title">Revoked</div>
+              <div class="card__sub">Kept so their history stays attributable. Restore one, or remove it for good.</div>
+            </div>
+            <span class="badge badge--gray">${archived.length}</span>
+          </div>
+          <div class="table-wrap">
+            <table class="table">
+              <thead><tr>
+                <th>Key</th><th>Owner</th><th>Status</th><th>Expires</th><th>Models</th><th>Limits</th>
+                <th class="hide-sm">Last used</th><th></th>
+              </tr></thead>
+              <tbody>${archived.map(row).join('')}</tbody>
+            </table>
+          </div>
+        </div>`}
 
       <div class="card">
         <div class="eyebrow">Authenticate</div>
@@ -1021,16 +1046,38 @@ async function renderKeys() {
       const id = button.dataset.id;
       const action = button.dataset.action;
       const key = keys.find((item) => item.id === id);
-      if (action === 'edit') return openKeyModal(key, renderKeys);
-      if (action === 'delete') {
-        if (!confirm(`Delete the key "${key.name}"? Its usage history stays, but the key stops working immediately.`)) return;
-        await api(`/keys/${id}`, { method: 'DELETE' });
-        toast('Key deleted');
+      if (action === 'edit') {
+        openKeyModal(key, renderKeys);
+        return;
+      }
+
+      if (action === 'revoke') {
+        if (!confirm(
+          `Revoke the key "${key.name}"?\n\n`
+          + 'It stops working immediately and frees a key slot. You can restore it later; '
+          + 'its usage history is kept either way.',
+        )) return;
+        await api(`/keys/${id}/revoke`, { method: 'POST' });
+        toast('Key revoked');
         return renderKeys();
       }
-      await api(`/keys/${id}/${action}`, { method: 'POST' });
-      toast(action === 'revoke' ? 'Key revoked' : 'Key restored');
-      renderKeys();
+
+      if (action === 'restore') {
+        await api(`/keys/${id}/restore`, { method: 'POST' });
+        toast('Key restored');
+        return renderKeys();
+      }
+
+      if (action === 'purge') {
+        if (!confirm(
+          `Remove the revoked key "${key.name}" permanently?\n\n`
+          + 'The key record and its name are deleted. Usage already recorded keeps its history '
+          + 'and its key name. This cannot be undone.',
+        )) return;
+        await api(`/keys/${id}`, { method: 'DELETE' });
+        toast('Revoked key removed');
+        return renderKeys();
+      }
     });
   });
 }

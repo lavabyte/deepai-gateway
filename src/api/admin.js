@@ -39,6 +39,7 @@ import {
   setSetting,
 } from '../store.js';
 import { requireSession, publicAccount } from '../middleware/session.js';
+import { allowKeyIdentity } from '../middleware/auth.js';
 import {
   estimateSavings,
   pricingStatus,
@@ -115,9 +116,7 @@ export function adminRouter(db, runtime) {
         ? 'glm-5.3-flash'
         : getSetting(db, account.username, 'default_model', 'glm-5.3-flash'),
       balanceLow: isBalanceLow(account?.allowance),
-      keyQuota: account === undefined
-        ? { used: 0, max: MAX_KEYS, remaining: MAX_KEYS, atLimit: false }
-        : keyQuota(db, account.username),
+      keyQuota: keyQuota(db, account?.username),
     });
   });
 
@@ -207,8 +206,15 @@ export function adminRouter(db, runtime) {
     if (quota.atLimit) {
       return res.status(409).json({
         ok: false,
-        error: `The gateway allows at most ${MAX_KEYS} API keys. Delete one before creating another.`,
+        error: `The gateway allows at most ${MAX_KEYS} active API keys. Revoke one before creating another.`,
         code: 'key_limit_reached',
+      });
+    }
+    if (quota.rowsFull) {
+      return res.status(409).json({
+        ok: false,
+        error: `This account holds ${quota.rowLimit} key records, including revoked ones. Remove an archived key.`,
+        code: 'key_row_limit_reached',
       });
     }
 
@@ -314,11 +320,26 @@ export function adminRouter(db, runtime) {
     return res.json({ key: publicKey(updated, keyUsage(db, updated.id, updated.limit_window)) });
   });
 
+  /**
+   * Permanently remove a key that has already been revoked.
+   *
+   * Only reachable for a revoked key, and only from the Archived section: while
+   * an active key exists, revoking it is the correct action and a single click
+   * must not be able to destroy it. Deletion also frees the name so it can be
+   * reused.
+   */
   router.delete('/keys/:id', (req, res) => {
     const row = ownedKey(req, res);
     if (row === undefined) return undefined;
+    if (row.revoked_at === null) {
+      return res.status(409).json({
+        ok: false,
+        error: 'Revoke this key before removing it.',
+        code: 'key_not_revoked',
+      });
+    }
     db.prepare('DELETE FROM api_keys WHERE id = ?').run(row.id);
-    runtime.log?.(`deleted API key "${row.name}"`);
+    runtime.log?.(`removed revoked API key "${row.name}"`);
     return res.json({ ok: true });
   });
 
@@ -436,10 +457,16 @@ export function adminRouter(db, runtime) {
 
   /* ----------------------------------------------------------------- models */
 
-  router.get('/models', requireSession, async (req, res) => {
+  /**
+   * The model catalog with this account's usage beside it.
+   *
+   * The catalog itself is public; the usage figures are not, so the identity is
+   * required. Either credential works: a dashboard session, or one of the
+   * caller's own `sk-` keys (scoped to that key's owner). What is never allowed
+   * is no identity at all — that would mean an unscoped usage query.
+   */
+  router.get('/models', allowKeyIdentity(db), async (req, res) => {
     try {
-      // The catalog is public data, but the usage figures beside it are not:
-      // this must be scoped to the session's account, never "all accounts".
       const owner = req.account.username;
       const models = await loadCatalog(AbortSignal.timeout(10_000));
       const monthSince = startOfMonth();

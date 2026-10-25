@@ -68,7 +68,7 @@ Only what genuinely has to be:
 | `/healthz` | Public, and returns **only** `{"ok":true}` — a liveness probe must not become a directory of users |
 | `/api/pricing` | Public: OpenRouter publishes these rates. The status is projected so upstream error detail stays internal |
 | `/v1/models` | Requires an API key, scoped to what that key may use |
-| `/api/models` | Requires a session: the catalog is public but the usage figures beside it are per account |
+| `/api/models` | The catalog is public, the usage figures beside it are per account, so an identity is required: **a session cookie or one of your own `sk-` keys** |
 | everything else under `/api` | Requires a session |
 | `/api/pricing/refresh` | Requires a session: it performs an outbound network call |
 
@@ -140,9 +140,26 @@ The gateway allows **at most 5 keys**. Create keys with:
 The form hides anything that does not apply, so it only ever shows decisions
 that matter.
 
-Plus revoke, restore, edit and delete. Limits are enforced per key inside the
-key's own window; a key over its limit gets HTTP 429. Every key records the
-DeepAI account that owns it.
+The cap counts **active** keys, so revoking one frees a slot without destroying it.
+
+### Revoke, restore, remove
+
+There is no plain "delete". A key is either working or revoked:
+
+| Action | Effect |
+| --- | --- |
+| **Revoke** | The key stops working immediately and frees its slot. The row stays, so the history and the name survive |
+| **Restore** | Puts a revoked key back to work, with its original limits and name intact |
+| **Remove** | Permanently deletes an *already revoked* key. Only offered in the Revoked section |
+
+Deleting an active key is refused with `409 key_not_revoked`: while a key exists,
+revoking is the correct action and a single click must not destroy it. Removal is
+for tidying up tombstones, and it frees the name for reuse. Usage already recorded
+keeps its history either way — those rows carry `key_name` and their `key_id`
+becomes `NULL`.
+
+Limits are enforced per key inside its own window; a key over its limit gets
+HTTP 429. Every key records the DeepAI account that owns it.
 
 ## Routing
 
@@ -188,9 +205,27 @@ The dashboard's **Export CSV** button uses the same endpoint.
 
 ## How keys are stored
 
-A key is shown **once**, at creation. Only a SHA-256 hash is persisted, so a
-database leak does not hand out working credentials. Keys look like
-`sk-` followed by 40 hex characters.
+A key is shown **once**, at creation. The row keeps only:
+
+| Column | Contents | Purpose |
+| --- | --- | --- |
+| `prefix` | `sk-` + the first 8 hex characters | So the dashboard can show *which* key this is |
+| `key_hash` | SHA-256 of the full key | Lookup at request time |
+
+The plaintext key exists in the creation response and nowhere else — it is never
+written to the database, never logged, and never returned by a later read. There
+is no "show key again" button because the value is genuinely gone.
+
+Verified against the raw database bytes: a `sk-…` value is absent from the file,
+and neither the stored prefix nor the stored hash can be used as a key (both give
+`401`). A stolen database therefore does not hand out working gateway keys.
+
+Keys look like `sk-` followed by 40 hex characters.
+
+The one credential that *is* stored recoverably is the **DeepAI account key**,
+because it is what the gateway replays upstream on every request. It is the same
+secret the DeepAI desktop app keeps on disk; protecting that file is what
+protects the account.
 
 Each key also stores its **owner**: the DeepAI username, and a hash of the
 DeepAI key that was signed in when it was created. The owner — not the current
@@ -255,7 +290,8 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | `POST` | `/api/account/refresh` | Re-read the Theos balance |
 | `GET` `POST` | `/api/keys` | List / create |
 | `PATCH` `DELETE` | `/api/keys/:id` | Edit / delete |
-| `POST` | `/api/keys/:id/revoke` · `/restore` | Toggle usability |
+| `POST` | `/api/keys/:id/revoke` · `/restore` | Revoke / restore a key |
+| `DELETE` | `/api/keys/:id` | Permanently remove an already-revoked key (`409` if active) |
 | `GET` | `/api/usage/summary` | Today / month / all-time totals, daily series, money saved |
 | `GET` | `/api/usage/export` | Download the history (`?format=csv\|json`, `?range=`, `?keyId=`) |
 | `GET` | `/api/pricing` | The live price table and its provenance (public) |
@@ -394,7 +430,8 @@ and no external database. The only runtime dependency is Express.
 ## Limits
 
 - Text only. Image inputs are not forwarded.
-- At most 5 gateway keys **per account**.
+- At most 5 **active** gateway keys per account, plus a tombstone bound of 100
+  rows per account.
 - The dashboard has no password: authentication *is* the DeepAI login. Anyone
   who can reach the port and complete a DeepAI login gets their own account.
 - The Responses route has no stop-sequence field, so `stop` is dropped for
