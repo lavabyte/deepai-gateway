@@ -11,3 +11,6 @@ data/
 
 # Local overrides.
 .env
+
+# Local database backups taken before schema migrations.
+backups/
