@@ -308,6 +308,9 @@ code, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .step__lead { margin-bottom: 8px; }
 .step__lead:last-of-type { margin-bottom: 0; }
 .step__aside { display: block; opacity: .75; font-size: 12px; }
+.step__list { margin: 0 0 2px; padding-left: 18px; }
+.step__list li { margin-bottom: 4px; }
+.step__list li:last-child { margin-bottom: 0; }
 /* Inside the warning tone the field must stay legible, so it opts out of the
    inherited colour and keeps its own surface. */
 .step .textarea, .step .input { background: var(--surface); color: var(--ink); }

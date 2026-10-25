@@ -156,7 +156,7 @@ function finishStep({ pending, remote }) {
           not load. Your sign-in is still waiting — nothing is lost.
         </p>
         <p class="step__lead">
-          Copy the address from that page and paste it below.
+          Paste that page's address below.
           <span class="step__aside">Need it again? Press Forward to return to that page.</span>
         </p>
         ${field}
@@ -164,14 +164,27 @@ function finishStep({ pending, remote }) {
   }
 
   if (remote) {
+    // The visitor's browser is not on the gateway's host, so this page is the last
+    // chance to explain two things before they leave: that the failure is normal,
+    // and that finishing does not have to mean copy-and-paste. Fixing the host in
+    // the address bar is the same rewrite the browser would have done for us — the
+    // gateway serves that path on its own origin, so it just works.
+    const host = (state.account?.origin ?? '').replace(/^https?:\/\//, '');
     return `
       <section class="note mt-3 step" id="finish-step" aria-labelledby="finish-title">
         <div class="step__title" id="finish-title">The last page may not load</div>
         <p class="step__lead">
           After you sign in, DeepAI sends your browser back to an address that only opens on the
-          server running this gateway. If that page does not load, <strong>that is expected</strong> —
-          copy its address, come back to this tab, and paste it below.
+          server running this gateway. If that page does not load, <strong>that is expected</strong>.
         </p>
+        <p class="step__lead">Two ways to finish — either is fine:</p>
+        <ul class="step__list">
+          <li>Paste that page's address below.</li>
+          <li>
+            Or, in the address bar, replace <code>127.0.0.1</code> with
+            <code>${esc(host)}</code> and press Enter.
+          </li>
+        </ul>
         ${field}
       </section>`;
   }

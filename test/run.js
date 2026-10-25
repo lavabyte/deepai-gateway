@@ -2064,6 +2064,12 @@ check('a pasted callback address yields its code and state', async () => {
   );
   // A bare query fragment is accepted too.
   assert.deepEqual(parseCallbackInput('?code=c&state=s'), { ok: true, code: 'c', state: 's' });
+  // Which host the visitor copied from is irrelevant: only the two parameters
+  // matter, so an address already fixed by hand parses just as well.
+  assert.deepEqual(
+    parseCallbackInput('http://gw.example.test:25912/auth-callback?code=c&state=s'),
+    { ok: true, code: 'c', state: 's' },
+  );
 
   /*
    * Each rejection names what to fix, because the visitor is shown it as an
@@ -2167,7 +2173,10 @@ await checkAsync('the sign-in step speaks to the visitor, not to the protocol', 
   const remote = await render(account({ origin: 'http://gw.example.test:25912', callbackUrl: 'http://127.0.0.1:25912/auth-callback' }));
   assert.match(remote, /The last page may not load/, 'the certain failure is explained up front');
   assert.match(remote, /that is expected/, 'the scary page is pre-framed as normal');
-  assert.match(remote, /paste it below/i, 'and the next action is stated');
+  assert.match(remote, /Paste that page's address below/, 'the paste route is stated');
+  // The no-paste route: the browser's own rewrite of the same address.
+  assert.match(remote, /replace <code>127\.0\.0\.1<\/code> with\s*<code>gw\.example\.test:25912<\/code>/, 'the address-bar route names the real host');
+  assert.match(remote, /Two ways to finish/, 'both routes are offered as equal');
   assert.ok(!remote.includes('hidden'), 'the field is offered immediately on a public host');
   assert.match(remote, /<code>http:\/\/127\.0\.0\.1:25912<\/code>/, 'the address to look for is shown');
 
@@ -2385,6 +2394,61 @@ await checkAsync('a loopback callback the browser cannot open can be pasted back
     assert.equal(account.signedIn, true);
     assert.equal(account.username, 'pasted-user');
     assert.equal(runtime.pendingLogins.size, 0, 'a completed attempt is forgotten');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('fixing the host in the address bar finishes the sign-in', async () => {
+  /*
+   * The other way to "process" DeepAI's dead address: the browser's own rewrite.
+   * Its redirect points at `http://127.0.0.1:<port>/auth-callback`, and the
+   * gateway serves that exact path on its own origin, so replacing `127.0.0.1`
+   * with the public host turns the dead address into a working one — no paste, no
+   * extra endpoint. That only holds while a top-level GET still carries this
+   * browser's login cookie, which is what this check pins.
+   */
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const runtime = app.locals.runtime;
+
+  const realFetch = globalThis.fetch;
+  const http = (...args) => realFetch(...args);
+  try {
+    const started = await http(`${base}/api/login`, { method: 'POST' });
+    const cookie = String(started.headers.get('set-cookie') ?? '').split(';')[0];
+    const browser = runtime.pendingLogins.keys().next().value;
+    const { state } = runtime.pendingLogins.get(browser).flow;
+
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({ api_key: 'sk-from-bar', username: 'from-bar', is_pro: false }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+
+    // Exactly what the browser sends after the visitor edits the host and hits
+    // Enter: a plain navigation to /auth-callback carrying the login cookie.
+    const landed = await http(`${base}/auth-callback?code=one-shot&state=${state}`, { headers: { cookie } });
+    const body = await landed.text();
+    assert.equal(landed.status, 200, body);
+    assert.match(body, /Logged in to DeepAI/);
+
+    // It hands over a session, and the waiting attempt is gone.
+    const sessionCookie = String(landed.headers.get('set-cookie') ?? '').split(';')[0];
+    assert.match(sessionCookie, /deepai_gateway_session=/);
+    assert.equal(runtime.pendingLogins.size, 0);
+    const account = await http(`${base}/api/account`, { headers: { cookie: sessionCookie } }).then((r) => r.json());
+    assert.equal(account.signedIn, true);
+    assert.equal(account.username, 'from-bar');
+
+    // The rewritten address works on the alias too, since both point at the same
+    // handler — a visitor may well land on either spelling.
+    const alias = await http(`${base}/callback?code=c&state=s`);
+    assert.equal(alias.status, 410, 'the alias answers, it just has no attempt left');
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));

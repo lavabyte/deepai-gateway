@@ -111,26 +111,36 @@ as your origin, never where DeepAI sends the browser.
 The browser must run where `http://127.0.0.1:<port>` resolves to this gateway.
 There are two ways to arrange that:
 
-**1. Paste the address back (works from anywhere).** After signing in at DeepAI,
-the browser is sent to a `127.0.0.1` address and shows a connection error. The
-sign-in is not lost and the code in that address is still redeemable, so copy the
-address out of the browser's address bar and paste it into the dashboard.
+**1. Give the dead address a working host (works from anywhere).** After signing in
+at DeepAI, the browser is sent to `http://127.0.0.1:<port>/auth-callback?code=…`
+and shows a connection error. The sign-in is not lost — the code is still valid and
+the address is still in the address bar. Both of these finish it:
+
+- **Rewrite the host in the address bar.** Replace `127.0.0.1` with the host you
+  are browsing from (e.g. `id-jkt01.altare.global:25912`) and press Enter. The
+  gateway serves `/auth-callback` and `/callback` on its own origin, so this is the
+  same request DeepAI meant to make, with the host it should have used — it lands
+  on the real sign-in. No paste, nothing to install.
+- **Paste the address into the dashboard.** Same result, for when copy-and-paste is
+  easier than editing a URL. Which host the address names does not matter: only its
+  `code` and `state` are read.
 
 The dashboard does the explaining, so nobody has to know why the page failed:
 
 - On a browser that is *not* on the gateway's own host, the sign-in card says up
-  front that the last page may not load, and that copying the address back is the
-  way to finish. It shows the address to look for.
+  front that the last page may not load, and offers both routes above — naming the
+  real host to substitute, and showing the address to look for.
 - Once a sign-in is waiting, that becomes the only step on the card — **"One more
   step to finish"** — with the paste field already focused.
 - On `127.0.0.1` the redirect just works, so nothing is said at all beyond a quiet
   *"Signed in on DeepAI already? Paste the address it sent you"* escape hatch.
 
-The gateway then checks the address against the sign-in that this browser started
-— only that browser can finish it, and an address without a matching `state` is
-refused — and exchanges its code exactly as the callback route would. A paste that
-is cut off says so in as many words ("missing its second half"), and costs one of
-five tries rather than the sign-in itself.
+Either route goes through the same validation: the gateway checks the address
+against the sign-in that this browser started — only that browser can finish it, and
+an address without a matching `state` is refused — then exchanges its code exactly
+as the callback route would. A paste that is cut off says so in as many words
+("missing its second half"), and costs one of five tries rather than the sign-in
+itself.
 
 The dashboard shows the exact address to expect, and the gateway logs it at boot
 when `HOST` is not loopback.
