@@ -206,15 +206,8 @@ export function adminRouter(db, runtime) {
     if (quota.atLimit) {
       return res.status(409).json({
         ok: false,
-        error: `The gateway allows at most ${MAX_KEYS} active API keys. Revoke one before creating another.`,
+        error: `The gateway allows at most ${MAX_KEYS} API keys. Revoke one before creating another.`,
         code: 'key_limit_reached',
-      });
-    }
-    if (quota.rowsFull) {
-      return res.status(409).json({
-        ok: false,
-        error: `This account holds ${quota.rowLimit} key records, including revoked ones. Remove an archived key.`,
-        code: 'key_row_limit_reached',
       });
     }
 
@@ -303,44 +296,20 @@ export function adminRouter(db, runtime) {
     return res.json({ key: publicKey(updated, keyUsage(db, updated.id, updated.limit_window)) });
   });
 
+  /**
+   * Revoke a key: it is deleted outright.
+   *
+   * One destructive action, not two. The key stops working the instant this
+   * returns, its slot is freed, and its name can be reused. Usage already
+   * recorded keeps its history — those rows carry `key_name`, and the foreign key
+   * nulls their `key_id` — so revoking does not erase what the key spent.
+   */
   router.post('/keys/:id/revoke', (req, res) => {
     const row = ownedKey(req, res);
     if (row === undefined) return undefined;
-    db.prepare('UPDATE api_keys SET revoked_at = ? WHERE id = ?').run(Date.now(), row.id);
-    runtime.log?.(`revoked API key "${row.name}"`);
-    const updated = db.prepare('SELECT * FROM api_keys WHERE id = ?').get(row.id);
-    return res.json({ key: publicKey(updated, keyUsage(db, updated.id, updated.limit_window)) });
-  });
-
-  router.post('/keys/:id/restore', (req, res) => {
-    const row = ownedKey(req, res);
-    if (row === undefined) return undefined;
-    db.prepare('UPDATE api_keys SET revoked_at = NULL WHERE id = ?').run(row.id);
-    const updated = db.prepare('SELECT * FROM api_keys WHERE id = ?').get(row.id);
-    return res.json({ key: publicKey(updated, keyUsage(db, updated.id, updated.limit_window)) });
-  });
-
-  /**
-   * Permanently remove a key that has already been revoked.
-   *
-   * Only reachable for a revoked key, and only from the Archived section: while
-   * an active key exists, revoking it is the correct action and a single click
-   * must not be able to destroy it. Deletion also frees the name so it can be
-   * reused.
-   */
-  router.delete('/keys/:id', (req, res) => {
-    const row = ownedKey(req, res);
-    if (row === undefined) return undefined;
-    if (row.revoked_at === null) {
-      return res.status(409).json({
-        ok: false,
-        error: 'Revoke this key before removing it.',
-        code: 'key_not_revoked',
-      });
-    }
     db.prepare('DELETE FROM api_keys WHERE id = ?').run(row.id);
-    runtime.log?.(`removed revoked API key "${row.name}"`);
-    return res.json({ ok: true });
+    runtime.log?.(`revoked API key "${row.name}"`);
+    return res.json({ ok: true, revoked: { id: row.id, name: row.name } });
   });
 
   /* ------------------------------------------------------------------ usage */

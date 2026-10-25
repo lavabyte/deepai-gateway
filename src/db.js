@@ -15,8 +15,8 @@ import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-/** Bump when a migration below is added. */
-const SCHEMA_VERSION = 4;
+/** Current schema version. Bump when a migration below is added. */
+export const SCHEMA_VERSION = 5;
 
 /**
  * Open (creating if needed) the database at `file` and bring it to the current
@@ -48,6 +48,7 @@ export function openDatabase(file) {
   if (current < 2) migrateToV2(db);
   if (current < 3) migrateToV3(db);
   if (current < 4) migrateToV4(db);
+  if (current < 5) migrateToV5(db);
 
   if (current !== SCHEMA_VERSION) {
     db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
@@ -266,6 +267,24 @@ function migrateToV4(db) {
   if (accounts.length === 1) {
     db.prepare("UPDATE api_keys SET owner_username = ? WHERE owner_username = '' OR owner_username IS NULL")
       .run(accounts[0].username);
+  }
+}
+
+/**
+ * v5 — revoking a key now deletes it.
+ *
+ * Revoking used to keep the row as a restorable tombstone. That left two ways to
+ * end a key (revoke, then a separate remove) describing nearly the same thing,
+ * and the tombstones accumulated in the list. Revoke is the single destructive
+ * action now, so any tombstone from the old behaviour is cleared here.
+ *
+ * Usage rows are untouched: they carry `key_name` and their `key_id` is set to
+ * NULL by the foreign key, so history stays attributable to the name it had.
+ */
+function migrateToV5(db) {
+  const removed = db.prepare('DELETE FROM api_keys WHERE revoked_at IS NOT NULL').run();
+  if (Number(removed.changes) > 0) {
+    db.exec('CREATE INDEX IF NOT EXISTS api_keys_active ON api_keys (owner_username, revoked_at)');
   }
 }
 

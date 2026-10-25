@@ -140,23 +140,18 @@ The gateway allows **at most 5 keys**. Create keys with:
 The form hides anything that does not apply, so it only ever shows decisions
 that matter.
 
-The cap counts **active** keys, so revoking one frees a slot without destroying it.
+### Revoking a key deletes it
 
-### Revoke, restore, remove
+**Revoke** is the one destructive action, and it removes the key:
 
-There is no plain "delete". A key is either working or revoked:
+- the key stops working immediately (`401` on its next request);
+- its slot is freed, so a new key fits right away;
+- its name becomes reusable;
+- no tombstone is left behind.
 
-| Action | Effect |
-| --- | --- |
-| **Revoke** | The key stops working immediately and frees its slot. The row stays, so the history and the name survive |
-| **Restore** | Puts a revoked key back to work, with its original limits and name intact |
-| **Remove** | Permanently deletes an *already revoked* key. Only offered in the Revoked section |
-
-Deleting an active key is refused with `409 key_not_revoked`: while a key exists,
-revoking is the correct action and a single click must not destroy it. Removal is
-for tidying up tombstones, and it frees the name for reuse. Usage already recorded
-keeps its history either way — those rows carry `key_name` and their `key_id`
-becomes `NULL`.
+Usage already recorded keeps its history: those rows carry `key_name`, and the
+foreign key sets their `key_id` to `NULL`, so revoking does not erase what the key
+spent.
 
 Limits are enforced per key inside its own window; a key over its limit gets
 HTTP 429. Every key records the DeepAI account that owns it.
@@ -166,6 +161,24 @@ HTTP 429. Every key records the DeepAI account that owns it.
 Only `/` (and unknown page paths, so client-side routes survive a refresh)
 serves the dashboard. `/v1/*` and `/api/*` always answer with JSON, never HTML,
 so a client never receives a page it cannot parse.
+
+## Backups
+
+```bash
+npm run backup                      # -> backups/deepai-<timestamp>.db
+npm run backup -- --out /mnt/x --keep 50
+```
+
+**Do not back up with `cp data/deepai.db`.** The database runs in WAL mode, so
+recently committed rows live in `deepai.db-wal` until a checkpoint folds them in;
+copying only the `.db` file silently captures stale state. This is not
+theoretical — it happened during development: a key renamed in the live database
+still appeared under its old name in such a copy.
+
+The script uses `VACUUM INTO`, which writes a complete, checkpointed copy without
+blocking writers, refuses to overwrite an existing file, and prints what the
+backup actually holds (schema, accounts, keys, usage rows) so an empty or partial
+copy is obvious rather than silent.
 
 ## Persistence
 
@@ -290,8 +303,7 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | `POST` | `/api/account/refresh` | Re-read the Theos balance |
 | `GET` `POST` | `/api/keys` | List / create |
 | `PATCH` `DELETE` | `/api/keys/:id` | Edit / delete |
-| `POST` | `/api/keys/:id/revoke` · `/restore` | Revoke / restore a key |
-| `DELETE` | `/api/keys/:id` | Permanently remove an already-revoked key (`409` if active) |
+| `POST` | `/api/keys/:id/revoke` | Revoke a key: it is deleted |
 | `GET` | `/api/usage/summary` | Today / month / all-time totals, daily series, money saved |
 | `GET` | `/api/usage/export` | Download the history (`?format=csv\|json`, `?range=`, `?keyId=`) |
 | `GET` | `/api/pricing` | The live price table and its provenance (public) |
@@ -390,7 +402,7 @@ follow the OS by default, and a manual toggle.
 
 ```
 server.js               Express wiring, static hosting, error shaping
-src/db.js               SQLite schema and migrations (v4: accounts + sessions)
+src/db.js               SQLite schema and migrations (v4: accounts + sessions, v5: revoke deletes)
 src/keys.js             key generation, hashing, limit checks
 src/usage.js            usage recording and every aggregate query
 src/pricing.js          live OpenRouter prices, cache, and the savings estimate
@@ -398,6 +410,7 @@ src/store.js            account + settings persistence
 src/openai.js           OpenAI ⇄ DeepAI conversions
 src/middleware/auth.js  key authentication and limit enforcement
 src/middleware/session.js  session cookie resolution, per browser
+scripts/backup.js       WAL-safe database backup
 src/api/v1.js           /v1 OpenAI surface
 src/api/admin.js        /api dashboard surface
 src/deepai/catalog.js   model catalog with cache and offline snapshot
@@ -430,8 +443,7 @@ and no external database. The only runtime dependency is Express.
 ## Limits
 
 - Text only. Image inputs are not forwarded.
-- At most 5 **active** gateway keys per account, plus a tombstone bound of 100
-  rows per account.
+- At most 5 gateway keys per account.
 - The dashboard has no password: authentication *is* the DeepAI login. Anyone
   who can reach the port and complete a DeepAI login gets their own account.
 - The Responses route has no stop-sequence field, so `stop` is dropped for

@@ -731,29 +731,28 @@ await checkAsync('the gateway refuses a sixth API key', async () => {
     assert.equal(listed.body.quota.max, 5);
     assert.equal(listed.body.quota.atLimit, true);
 
-    // Revoking frees a slot without destroying the key: it becomes a tombstone
-    // that can be restored, so it must not hold quota.
+    // Revoking deletes the key outright: it stops working and frees its slot.
     const revoked = await call(`/api/keys/${created[0].id}/revoke`, { method: 'POST' });
     assert.equal(revoked.status, 200);
-    assert.notEqual(revoked.body.key.revokedAt, null);
+    assert.equal(revoked.body.ok, true);
+    assert.equal(revoked.body.revoked.id, created[0].id);
 
     const afterRevoke = await call('/api/keys');
-    assert.equal(afterRevoke.body.quota.used, 4, 'a revoked key does not count against the cap');
-    assert.equal(afterRevoke.body.quota.archived, 1);
-    assert.equal(afterRevoke.body.quota.atLimit, false);
-    // The revoked key is still listed, so its history is visible.
-    assert.ok(afterRevoke.body.keys.some((k) => k.id === created[0].id));
+    assert.equal(afterRevoke.body.quota.used, 4, 'revoking frees a slot');
+    assert.ok(!afterRevoke.body.keys.some((k) => k.id === created[0].id), 'the key is gone from the list');
 
+    // The revoked key no longer authenticates.
+    const dead = await fetch(`${base}/v1/models`, { headers: { authorization: `Bearer ${created[0].plaintext}` } });
+    assert.equal(dead.status, 401, 'a revoked key must stop working');
+
+    // Its name is free again, and a new key fits in the freed slot.
     const replacement = await call('/api/keys', {
       method: 'POST',
-      body: { name: 'replacement', limitWindow: 'unlimited', modelsRestricted: false },
+      body: { name: `key 0`, limitWindow: 'unlimited', modelsRestricted: false },
     });
-    assert.equal(replacement.status, 201);
+    assert.equal(replacement.status, 201, 'the name and the slot are both reusable');
 
-    // Reaching the active cap again refuses a new key, and says to revoke.
-    for (let index = 0; index < 1; index += 1) {
-      await call('/api/keys', { method: 'POST', body: { name: `filler ${index}` } });
-    }
+    // At the cap again, a new key is refused with a note to revoke.
     const full = await call('/api/keys', { method: 'POST', body: { name: 'over' } });
     assert.equal(full.status, 409);
     assert.equal(full.body.code, 'key_limit_reached');
@@ -1335,9 +1334,14 @@ check('a pre-multi-user database migrates without losing anything', async () => 
                VALUES (NULL, 'ghost', 'kimi-k3', '', 22, ?)`).run(Date.now());
   old.close();
 
-  // Opening it must migrate in place.
+  // Opening it must migrate in place, all the way to the current schema.
   const upgraded = openDatabase(file);
-  assert.equal(upgraded.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, '4');
+  const { SCHEMA_VERSION: CURRENT } = await import('../src/db.js');
+  assert.equal(
+    Number(upgraded.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value),
+    CURRENT,
+    'the database must reach the current schema',
+  );
   assert.equal(upgraded.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name='account'").get().n, 0, 'the old table is gone');
 
   // The account survived, key and balance included.
@@ -1357,6 +1361,126 @@ check('a pre-multi-user database migrates without losing anything', async () => 
   const session = createSession(upgraded, 'legacy-user');
   assert.equal(sessionAccount(upgraded, session.token).username, 'legacy-user');
   upgraded.close();
+});
+
+check('revoking deletes the key and usage keeps its history', () => {
+  const fresh = openDatabase(':memory:');
+  saveAccount(fresh, { apiKey: 'k', username: 'u', isPro: false });
+  const key = generateKey();
+  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+                 VALUES ('kv', 'to revoke', ?, ?, ?, 'unlimited', '[]', 'u')`)
+    .run(key.prefix, key.hash, Date.now());
+  record(fresh, { keyId: 'kv', keyName: 'to revoke', owner: 'u', model: 'glm-5.3-flash', totalTokens: 7, ok: true });
+
+  fresh.prepare('DELETE FROM api_keys WHERE id = ?').run('kv');
+
+  assert.equal(fresh.prepare('SELECT COUNT(*) AS n FROM api_keys').get().n, 0, 'the key row is gone');
+  // The foreign key nulls key_id, and key_name survives, so the spend is still
+  // attributable to the name the key had.
+  const row = fresh.prepare('SELECT key_id, key_name, total_tokens FROM usage').get();
+  assert.equal(row.key_id, null);
+  assert.equal(row.key_name, 'to revoke');
+  assert.equal(row.total_tokens, 7);
+  // And it still shows up under the owner's usage.
+  assert.equal(totals(fresh, 0, 'u').totalTokens, 7);
+});
+
+check('a database with revoked tombstones is cleaned up on upgrade', async () => {
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { DatabaseSync } = await import('node:sqlite');
+  const file = join(mkdtempSync(join(tmpdir(), 'deepai-v5-')), 'v4.db');
+
+  // A v4 database in the old shape: one live key and one revoked tombstone.
+  const old = new DatabaseSync(file);
+  old.exec(`
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO meta VALUES ('schema_version', '4');
+    CREATE TABLE accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE,
+      api_key TEXT NOT NULL, is_pro INTEGER NOT NULL DEFAULT 0, balance TEXT, granted TEXT,
+      refresh_at TEXT, checked_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE TABLE sessions (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
+      account_id INTEGER NOT NULL REFERENCES accounts (id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE api_keys (id TEXT PRIMARY KEY, name TEXT NOT NULL, prefix TEXT NOT NULL,
+      key_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_used_at INTEGER,
+      revoked_at INTEGER, expires_at INTEGER, limit_tokens INTEGER, limit_requests INTEGER,
+      limit_window TEXT NOT NULL DEFAULT 'month', allowed_models TEXT NOT NULL DEFAULT '[]',
+      owner_username TEXT NOT NULL DEFAULT '', owner_key_hash TEXT, models_restricted INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE usage (id INTEGER PRIMARY KEY AUTOINCREMENT, key_id TEXT REFERENCES api_keys (id) ON DELETE SET NULL,
+      key_name TEXT NOT NULL DEFAULT '', model TEXT NOT NULL, requested_model TEXT NOT NULL DEFAULT '',
+      endpoint TEXT NOT NULL DEFAULT 'chat.completions', status INTEGER NOT NULL DEFAULT 200,
+      ok INTEGER NOT NULL DEFAULT 1, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+      reasoning_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0,
+      duration_ms INTEGER NOT NULL DEFAULT 0, first_token_ms INTEGER, streamed INTEGER NOT NULL DEFAULT 0,
+      error_code TEXT, created_at INTEGER NOT NULL, owner_username TEXT NOT NULL DEFAULT '');
+    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE auth_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event TEXT NOT NULL,
+      username TEXT NOT NULL DEFAULT '', detail TEXT, created_at INTEGER NOT NULL);
+  `);
+  old.prepare('INSERT INTO accounts (username, api_key, created_at, updated_at) VALUES (?, ?, ?, ?)')
+    .run('legacy', 'deepai-key', 1, 1);
+  const live = generateKey();
+  const dead = generateKey();
+  old.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username, revoked_at)
+               VALUES ('live', 'live key', ?, ?, ?, 'unlimited', '[]', 'legacy', NULL)`).run(live.prefix, live.hash, Date.now());
+  old.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username, revoked_at)
+               VALUES ('dead', 'old tombstone', ?, ?, ?, 'unlimited', '[]', 'legacy', ?)`).run(dead.prefix, dead.hash, Date.now(), Date.now());
+  old.prepare(`INSERT INTO usage (key_id, key_name, model, total_tokens, created_at) VALUES ('dead', 'old tombstone', 'glm-5.3-flash', 42, ?)`).run(Date.now());
+  old.close();
+
+  const upgraded = openDatabase(file);
+  const { SCHEMA_VERSION: LATEST } = await import('../src/db.js');
+  assert.equal(Number(upgraded.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value), LATEST);
+  assert.deepEqual(upgraded.prepare('SELECT id FROM api_keys').all().map((r) => r.id), ['live'], 'only the tombstones are removed');
+  // The tombstone's usage row survives, unattributed but named.
+  const row = upgraded.prepare('SELECT key_id, key_name FROM usage').get();
+  assert.equal(row.key_id, null);
+  assert.equal(row.key_name, 'old tombstone');
+  upgraded.close();
+});
+
+check('the backup script writes a complete copy, not a WAL-stale one', async () => {
+  // Regression: `cp deepai.db` misses committed rows still in the WAL, so a
+  // backup could silently capture older state than the live database.
+  const { mkdtempSync, readdirSync, statSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const { execFileSync } = await import('node:child_process');
+  const { DatabaseSync } = await import('node:sqlite');
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const { SCHEMA_VERSION: CURRENT } = await import('../src/db.js');
+
+  const dir = mkdtempSync(join(tmpdir(), 'deepai-backup-'));
+  const live = join(dir, 'live.db');
+  const out = join(dir, 'out');
+
+  // A WAL-mode database with uncommitted-to-checkpoint state, exactly like the
+  // gateway's own file.
+  const db = openDatabase(live);
+  saveAccount(db, { apiKey: 'k', username: 'bk-user', isPro: false });
+  const key = generateKey();
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+              VALUES ('kb', 'backup-probe', ?, ?, ?, 'unlimited', '[]', 'bk-user')`)
+    .run(key.prefix, key.hash, Date.now());
+  db.close();
+
+  execFileSync(process.execPath, [join(root, 'scripts', 'backup.js'), '--out', out], {
+    env: { ...process.env, DATABASE: live },
+    encoding: 'utf8',
+  });
+
+  const files = readdirSync(out).filter((name) => name.endsWith('.db'));
+  assert.equal(files.length, 1, 'exactly one backup');
+  const copy = new DatabaseSync(join(out, files[0]));
+  assert.equal(copy.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get().value, String(CURRENT));
+  assert.equal(copy.prepare('SELECT COUNT(*) AS n FROM accounts').get().n, 1);
+  assert.equal(copy.prepare('SELECT name FROM api_keys').get().name, 'backup-probe');
+  copy.close();
+  assert.ok(statSync(join(out, files[0])).size > 0);
 });
 
 /* ---------------------------------------------------------- multi-user scope */
@@ -1403,27 +1527,19 @@ await checkAsync('two accounts on one gateway never see each other', async () =>
     assert.equal((await asBob(`/api/keys/${alice1.body.key.id}/revoke`, { method: 'POST' })).status, 404);
     assert.equal((await asBob(`/api/keys/${alice1.body.key.id}`, { method: 'PATCH', body: { name: 'hijacked' } })).status, 404);
 
-    // Deleting an active key is refused: revoking is the correct action while a
-    // key still exists, and one click must not destroy it.
-    const active = await asBob(`/api/keys/${alice1.body.key.id}`, { method: 'DELETE' });
-    assert.equal(active.status, 404, "another account's key stays invisible");
+    // Another account cannot revoke Alice's key.
+    assert.equal((await asBob(`/api/keys/${alice1.body.key.id}/revoke`, { method: 'POST' })).status, 404);
+    assert.equal((await asBob(`/api/keys/${alice1.body.key.id}`, { method: 'PATCH', body: { name: 'x' } })).status, 404);
 
-    // Alice's own active key cannot be deleted either.
-    const refused = await asAlice(`/api/keys/${alice1.body.key.id}`, { method: 'DELETE' });
-    assert.equal(refused.status, 409);
-    assert.equal(refused.body.code, 'key_not_revoked');
-
-    // Once revoked, removal is allowed and frees the name.
-    await asAlice(`/api/keys/${alice1.body.key.id}/revoke`, { method: 'POST' });
-    const removed = await asAlice(`/api/keys/${alice1.body.key.id}`, { method: 'DELETE' });
-    assert.equal(removed.status, 200);
-    const afterRemoval = await asAlice('/api/keys');
-    assert.ok(!afterRemoval.body.keys.some((k) => k.id === alice1.body.key.id));
-
-    // Alice's remaining keys are untouched by any of that.
+    // Alice revoking her own key deletes it.
+    const revoked = await asAlice(`/api/keys/${alice1.body.key.id}/revoke`, { method: 'POST' });
+    assert.equal(revoked.status, 200);
     const aliceAfter = await asAlice('/api/keys');
     assert.deepEqual(aliceAfter.body.keys.map((k) => k.name).sort(), ['alice-2']);
-    assert.ok(aliceAfter.body.keys.every((k) => k.revokedAt === null));
+
+    // There is no restore or separate delete route any more.
+    assert.equal((await asAlice(`/api/keys/${alice1.body.key.id}/restore`, { method: 'POST' })).status, 404);
+    assert.equal((await asAlice(`/api/keys/${alice1.body.key.id}`, { method: 'DELETE' })).status, 404);
 
     // Usage is scoped too: one row per owner. `alice-1` was deleted above, so
     // attribute the rows to keys that still exist.

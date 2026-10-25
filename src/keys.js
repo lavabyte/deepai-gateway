@@ -20,22 +20,12 @@ export const KEY_PREFIX = 'sk-';
 const KEY_BYTES = 20;
 
 /**
- * Hard cap on **active** keys per account.
+ * Hard cap on live keys per account.
  *
- * Revoked keys are tombstones: they stay for history and can be restored, so
- * they must not hold a slot — otherwise five revocations would lock an account
- * out of ever creating a key again.
+ * Revoking deletes the key, so this is simply the number of rows an account may
+ * hold; there is no separate tombstone population.
  */
 export const MAX_KEYS = 5;
-
-/**
- * Safety net on total rows per account (active + revoked).
- *
- * Revoking frees a slot without deleting the row, so a loop of
- * create/revoke could otherwise grow the table without bound. This bound is far
- * above any real use.
- */
-export const MAX_KEY_ROWS = 100;
 
 /**
  * Limit windows a key may be created with.
@@ -145,44 +135,22 @@ export function hashesEqual(a, b) {
 /**
  * How many more keys one account may create.
  *
- * `used` counts **active** keys only; `archived` reports the revoked tombstones
- * kept for history. The cap is per user, not global: one account filling its
- * slots must not stop another account from creating its own.
+ * The cap is per user, not global: one account filling its slots must not stop
+ * another account from creating its own. Revoking deletes a key, so the count is
+ * just the number of rows the account holds.
  *
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {string} [owner] - omit for a global count (operator view only).
- * @returns {{used: number, max: number, remaining: number, atLimit: boolean,
- *   archived: number, rows: number, rowLimit: number, rowsFull: boolean}}
+ * @returns {{used: number, max: number, remaining: number, atLimit: boolean}}
  */
 export function keyQuota(db, owner = undefined) {
   const scoped = typeof owner === 'string' && owner !== '';
-  const params = scoped ? [owner] : [];
-
-  /**
-   * Count rows matching an optional extra predicate.
-   *
-   * The clause is assembled with an explicit `WHERE`/`AND` choice: appending
-   * "AND …" to a missing WHERE produced invalid SQL when no owner was given.
-   */
-  const count = (extra) => {
-    const clauses = [];
-    if (scoped) clauses.push('owner_username = ?');
-    if (extra !== undefined) clauses.push(extra);
-    const where = clauses.length === 0 ? '' : ` WHERE ${clauses.join(' AND ')}`;
-    return Number(db.prepare(`SELECT COUNT(*) AS n FROM api_keys${where}`).get(...params).n);
-  };
-
-  const used = count('revoked_at IS NULL');
-  const rows = count(undefined);
-  return {
-    used,
-    max: MAX_KEYS,
-    remaining: Math.max(0, MAX_KEYS - used),
-    atLimit: used >= MAX_KEYS,
-    // Revoked keys are shown separately: they are history, not quota.
-    archived: rows - used,
-    rows,
-    rowLimit: MAX_KEY_ROWS,
-    rowsFull: rows >= MAX_KEY_ROWS,
-  };
+  const used = Number(
+    db.prepare(
+      scoped
+        ? 'SELECT COUNT(*) AS n FROM api_keys WHERE owner_username = ?'
+        : 'SELECT COUNT(*) AS n FROM api_keys',
+    ).get(...(scoped ? [owner] : [])).n,
+  );
+  return { used, max: MAX_KEYS, remaining: Math.max(0, MAX_KEYS - used), atLimit: used >= MAX_KEYS };
 }
