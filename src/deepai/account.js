@@ -11,7 +11,7 @@
  * There is no second listener: the callback route lives on the main app, so
  * the flow shares the panel's origin, port and firewall rule.
  *
- * @module deepai-to-api/deepai/account
+ * @module deepai-gateway/deepai/account
  */
 
 import { randomBytes } from 'node:crypto';
@@ -64,27 +64,47 @@ export function startLogin({ port, timeoutMs = 300_000 }) {
     close: () => finish(new Error('DeepAI sign-in cancelled')),
 
     /**
-     * Handle the browser callback. Returns the HTML to send and whether the
-     * attempt is now finished, so the caller owns the HTTP response.
+     * Handle the browser callback.
+     *
+     * The resolved account is returned **in the result** rather than only through
+     * `done`: the caller owns the HTTP response and must be able to persist the
+     * account and set the session cookie before sending it. Resolving `done` is
+     * asynchronous, so relying on it here would race the response.
      *
      * @param {{query: Record<string, unknown>, method: string}} req
-     * @returns {Promise<{status: number, html: string, finished: boolean}>}
+     * @returns {Promise<{status: number, html: string, finished: boolean, account?: object}>}
      */
     async handleCallback(req) {
       if (closed) {
-        return { status: 410, html: callbackPage('Sign-in expired', 'This attempt timed out. Start a new one from the dashboard.', 'error'), finished: true };
+        return {
+          status: 410,
+          html: callbackPage('Login expired', 'This attempt timed out. Start a new one from the dashboard.', 'error'),
+          finished: true,
+        };
       }
       if (req.method !== 'GET') {
-        return { status: 405, html: callbackPage('Invalid callback', 'DeepAI sent an unexpected response. Start the sign-in again from the dashboard.', 'error'), finished: false };
+        return {
+          status: 405,
+          html: callbackPage('Invalid callback', 'DeepAI sent an unexpected response. Start the login again from the dashboard.', 'error'),
+          finished: false,
+        };
       }
 
       const code = typeof req.query.code === 'string' ? req.query.code : '';
       const returned = typeof req.query.state === 'string' ? req.query.state : '';
       if (code === '' || code.length > 4096 || returned !== state) {
-        return { status: 400, html: callbackPage('Invalid callback', 'DeepAI sent an unexpected response. Start the sign-in again from the dashboard.', 'error'), finished: false };
+        return {
+          status: 400,
+          html: callbackPage('Invalid callback', 'DeepAI sent an unexpected response. Start the login again from the dashboard.', 'error'),
+          finished: false,
+        };
       }
       if (exchanging) {
-        return { status: 409, html: callbackPage('Already in progress', 'A sign-in is already waiting for the browser. Finish it, or cancel it in the dashboard.', 'error'), finished: false };
+        return {
+          status: 409,
+          html: callbackPage('Already in progress', 'A login is already waiting for the browser. Finish it, or cancel it in the dashboard.', 'error'),
+          finished: false,
+        };
       }
       exchanging = true;
 
@@ -95,10 +115,15 @@ export function startLogin({ port, timeoutMs = 300_000 }) {
           status: 200,
           html: callbackPage('Logged in to DeepAI', 'The gateway now has your account and can serve requests.', 'ok', { returnTo: '/' }),
           finished: true,
+          account,
         };
       } catch (error) {
         finish(error);
-        return { status: 400, html: callbackPage('Sign-in failed', 'The code could not be exchanged. Return to the dashboard and try again.', 'error'), finished: true };
+        return {
+          status: 400,
+          html: callbackPage('Login failed', 'The code could not be exchanged. Return to the dashboard and try again.', 'error'),
+          finished: true,
+        };
       }
     },
   };

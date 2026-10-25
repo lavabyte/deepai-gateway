@@ -11,7 +11,7 @@
  * Both yield `{type}` events: `text`, `reasoning`, `tool-start`,
  * `tool-arguments`, `usage`, `finish`.
  *
- * @module deepai-to-api/deepai/client
+ * @module deepai-gateway/deepai/client
  */
 
 import { openAIToResponsesInput, openAIToResponsesTools } from '../openai.js';

@@ -15,7 +15,7 @@
  * genuinely unpublished does the code fall back to the full input rate, which
  * overstates the cost rather than understating it.
  *
- * @module deepai-to-api/pricing
+ * @module deepai-gateway/pricing
  */
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';

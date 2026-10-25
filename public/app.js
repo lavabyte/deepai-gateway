@@ -510,10 +510,15 @@ function accountCard() {
         </div>` : ''}
       <div class="row mt-3 row--wrap">
         <button class="btn btn--secondary btn--sm" id="refresh-allowance">Refresh balance</button>
+        <button class="btn btn--ghost btn--sm" id="forget-account">Forget this account</button>
         <span class="spacer"></span>
         <span class="tiny muted">${esc(keyQuotaLabel(account.keyQuota))}</span>
       </div>
-      <div class="tiny muted mt-3" id="auth-events"></div>
+      <div class="tiny muted mt-2">
+        This browser's session ends ${esc(account.sessionExpiresAt ? when(account.sessionExpiresAt) : 'never')}.
+        Logging out ends only this session; the DeepAI account and its keys stay, so other browsers keep working.
+      </div>
+      <div class="tiny muted mt-2" id="auth-events"></div>
     </div>`;
 }
 
@@ -635,6 +640,26 @@ function wireAccountCard(rerender) {
     }
     await loadAccount();
     rerender();
+  });
+
+  // "Log out" only ends this browser's session. Removing the account is a
+  // separate, destructive decision, so it gets its own confirm step.
+  $('forget-account')?.addEventListener('click', async () => {
+    const username = state.account?.username || 'this account';
+    const confirmed = window.confirm(
+      `Remove the DeepAI account "${username}" from this gateway?\n\n`
+      + 'Its API keys will be deleted and its DeepAI credential forgotten. '
+      + 'Usage history is kept. This cannot be undone.',
+    );
+    if (!confirmed) return;
+    try {
+      await api('/account/forget', { method: 'POST' });
+      toast('Account removed');
+      await loadAccount();
+      await render();
+    } catch (error) {
+      toast(String(error.message ?? error), 'error');
+    }
   });
 }
 

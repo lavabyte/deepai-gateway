@@ -5,7 +5,7 @@
  * desktop lane (`X-DeepAI-Code-Theos`), share session-affinity headers and
  * server-sent-events framing, and reduce to one normalized event stream.
  *
- * @module deepai-to-api/deepai/wire
+ * @module deepai-gateway/deepai/wire
  */
 
 export const API_ORIGIN = 'https://api.deepai.org';
@@ -13,8 +13,13 @@ export const API_ORIGIN = 'https://api.deepai.org';
 /** Header the desktop app uses to mark `/deepai_code` traffic. */
 export const LANE_HEADERS = Object.freeze({ 'X-DeepAI-Code-Theos': '1' });
 
-/** Product identity sent upstream. */
-export const USER_AGENT = 'deepai-to-api/1.0 (+https://github.com/deepseek-ai/deepseek-harness)';
+/**
+ * Product identity sent upstream.
+ *
+ * A plain `product/version` token: this gateway is its own project, so it does
+ * not claim the harness repository as its home.
+ */
+export const USER_AGENT = 'deepai-gateway/1.0';
 
 /** Upstream failure with a stable code. */
 export class UpstreamError extends Error {

@@ -1,22 +1,26 @@
 /**
- * deepai-to-api — OpenAI-compatible gateway in front of DeepAI Code.
+ * deepai-gateway — OpenAI-compatible gateway in front of DeepAI Code.
  *
- * Wires the database, the DeepAI account, the OpenAI surface and the dashboard
+ * Wires the database, the DeepAI accounts, the OpenAI surface and the dashboard
  * API into one Express app, then serves the dashboard from `public/`.
  *
- * @module deepai-to-api/server
+ * Multi-user: one row per DeepAI login, one session per browser. A gateway key
+ * is bound to the account that created it, and that account pays for its traffic.
+ *
+ * @module deepai-gateway/server
  */
 
 import express from 'express';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { openDatabase } from './src/db.js';
-import { adminRouter, beginLogin, localPort } from './src/api/admin.js';
+import { adminRouter, beginLogin, browserOf, completeLogin, localPort } from './src/api/admin.js';
 import { callbackPage } from './src/deepai/account.js';
 import { initPricing, pricingStatus, startPricingRefresh } from './src/pricing.js';
 import { v1Router } from './src/api/v1.js';
 import { prefetchCatalog } from './src/deepai/catalog.js';
-import { clearAccount, readAccount, recordAuthEvent } from './src/store.js';
+import { attachSession } from './src/middleware/session.js';
+import { listAccounts, clearSessionCookie, destroySession, recordAuthEvent } from './src/store.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -28,26 +32,31 @@ export function config(env = process.env) {
     database: env.DATABASE || join(HERE, 'data', 'deepai.db'),
     pricingCache: env.PRICING_CACHE || join(HERE, 'data', 'pricing.json'),
     logRequests: env.LOG_REQUESTS !== '0',
+    // Trust `X-Forwarded-*` and mark cookies `Secure` when behind TLS.
+    trustProxy: env.TRUST_PROXY === '1' || env.TRUST_PROXY === 'true',
   };
 }
 
 /** Build the Express app. Exported so tests can mount it without listening. */
 export function createApp(db, options = {}) {
   const runtime = {
-    pendingLogin: undefined,
-    log: options.log ?? ((message) => console.log(`[deepai-to-api] ${message}`)),
+    // One pending login per browser. A single global slot let a second visitor
+    // take over the first visitor's attempt.
+    pendingLogins: new Map(),
+    log: options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`)),
   };
 
   const app = express();
   app.disable('x-powered-by');
   app.set('etag', false);
+  if (options.trustProxy === true) app.set('trust proxy', true);
 
   app.use(express.json({ limit: '16mb' }));
 
   // Every response is JSON unless a route says otherwise; the dashboard sets
   // its own content types.
   app.use((req, res, next) => {
-    res.setHeader('x-gateway', 'deepai-to-api/1.0');
+    res.setHeader('x-gateway', 'deepai-gateway/1.0');
     next();
   });
 
@@ -63,23 +72,35 @@ export function createApp(db, options = {}) {
     });
   }
 
+  // Resolve the browser's session before any route runs, so `/api` handlers can
+  // ask "which account is this" rather than "is anyone logged in".
+  app.use(attachSession(db, { secure: options.trustProxy === true }));
+
   app.use('/v1', v1Router(db));
   app.use('/api', adminRouter(db, runtime));
 
+  /**
+   * Liveness probe.
+   *
+   * Deliberately unauthenticated so a supervisor can poll it, and deliberately
+   * says nothing about the deployment: not who is logged in, not how many
+   * accounts exist, not their names. An unauthenticated endpoint must not become
+   * a directory of users.
+   */
   app.get('/healthz', (req, res) => {
-    res.json({
-      ok: true,
-      signedIn: readAccount(db) !== undefined,
-      uptimeSeconds: Math.round(process.uptime()),
-    });
+    res.json({ ok: true });
   });
 
   /**
-   * DeepAI redirects the browser here after sign-in. The route lives on the
-   * main app, so the whole flow stays on the panel's port.
+   * DeepAI redirects the browser here after sign-in. The route lives on the main
+   * app, so the whole flow stays on the panel's port — and this is the response
+   * that hands the browser its session cookie.
    */
   app.get('/auth-callback', async (req, res) => {
-    const pending = runtime.pendingLogin;
+    // The browser coming back carries the same login cookie it started with, so
+    // it can only ever complete its own attempt.
+    const browser = browserOf(req);
+    const pending = runtime.pendingLogins.get(browser);
     if (pending === undefined) {
       return res
         .status(410)
@@ -90,12 +111,22 @@ export function createApp(db, options = {}) {
           'error',
         ));
     }
+
     try {
       const result = await pending.flow.handleCallback(req);
-      if (result.finished) runtime.pendingLogin = undefined;
+      if (result.finished) runtime.pendingLogins.delete(browser);
+      // The exchange succeeded: persist the account and mint this browser's
+      // session *before* sending the page, so the dashboard it redirects to is
+      // already authenticated.
+      if (result.account !== undefined) {
+        const completed = completeLogin(db, runtime, result.account, {
+          secure: options.trustProxy === true,
+        });
+        res.setHeader('set-cookie', completed.cookie);
+      }
       return res.status(result.status).type('html').send(result.html);
     } catch (error) {
-      runtime.pendingLogin = undefined;
+      runtime.pendingLogins.delete(browser);
       runtime.log(`callback failed: ${error?.message ?? error}`);
       return res.status(500).type('html').send(callbackPage(
         'Sign-in failed',
@@ -106,20 +137,20 @@ export function createApp(db, options = {}) {
   });
 
   /**
-   * Browser-navigable sign-in: `/login` starts the flow and redirects to
-   * DeepAI, so the dashboard can simply link to it. `?json=1` answers with the
-   * URL instead of redirecting.
+   * Browser-navigable login: `/login` starts the flow and redirects to DeepAI, so
+   * the dashboard can simply navigate to it. `?json=1` answers with the URL
+   * instead of redirecting, so the SPA can report a failure in place.
    */
   app.get('/login', async (req, res) => {
     try {
-      const url = await beginLogin(db, runtime, localPort(req));
+      const url = await beginLogin(db, runtime, localPort(req), { browser: browserOf(req) });
       if (req.query.json === '1') return res.json({ ok: true, url });
       return res.redirect(302, url);
     } catch (error) {
-      runtime.log(`sign-in could not start: ${error?.message ?? error}`);
+      runtime.log(`login could not start: ${error?.message ?? error}`);
       return res.status(500).json({
         error: {
-          message: `Could not start the DeepAI sign-in: ${String(error?.message ?? error)}`,
+          message: `Could not start the DeepAI login: ${String(error?.message ?? error)}`,
           type: 'api_error',
           code: 'login_unavailable',
           param: null,
@@ -128,12 +159,19 @@ export function createApp(db, options = {}) {
     }
   });
 
-  /** Sign out, then return to the dashboard. */
+  /**
+   * Log out the browser that follows this link, then return to the dashboard.
+   *
+   * Only this session ends; the DeepAI account and its keys stay, so another
+   * signed-in browser is unaffected and signing in again restores the keys.
+   */
   app.get('/logout', (req, res) => {
-    const account = readAccount(db);
-    clearAccount(db);
-    recordAuthEvent(db, 'logout', { username: account?.username ?? '', detail: 'signed out via /logout' });
-    runtime.log('signed out via /logout');
+    if (req.sessionToken !== undefined) destroySession(db, req.sessionToken);
+    if (req.account !== undefined) {
+      recordAuthEvent(db, 'logout', { username: req.account.username, detail: 'session ended via /logout' });
+      runtime.log(`logged out ${req.account.username} via /logout`);
+    }
+    res.setHeader('set-cookie', clearSessionCookie());
     res.redirect(302, '/');
   });
 
@@ -190,30 +228,34 @@ export function start(overrides = {}) {
 
   // Reference prices come from OpenRouter and are cached on disk, so the
   // dashboard shows real market rates rather than a frozen table.
-  initPricing({ cachePath: settings.pricingCache, log: (message) => console.log(`[deepai-to-api] ${message}`) });
-  startPricingRefresh({ log: (message) => console.log(`[deepai-to-api] ${message}`) });
+  initPricing({ cachePath: settings.pricingCache, log: (message) => console.log(`[deepai-gateway] ${message}`) });
+  startPricingRefresh({ log: (message) => console.log(`[deepai-gateway] ${message}`) });
   const pricing = pricingStatus();
-  console.log(`[deepai-to-api] pricing: ${pricing.source} (${pricing.priced}/${pricing.models} models, captured ${pricing.capturedAt})`);
+  console.log(`[deepai-gateway] pricing: ${pricing.source} (${pricing.priced}/${pricing.models} models, captured ${pricing.capturedAt})`);
 
-  const account = readAccount(db);
-
-  // Startup summary. Keys are read back from disk here on purpose: it makes a
-  // persistence problem obvious in the log instead of surfacing as a mysteriously
-  // empty dashboard.
+  // Startup summary. Keys and accounts are read back from disk on purpose: it
+  // makes a persistence problem obvious in the log instead of surfacing as a
+  // mysteriously empty dashboard.
+  const accounts = listAccounts(db);
   const keyCount = Number(db.prepare('SELECT COUNT(*) AS n FROM api_keys').get().n);
-  console.log(`[deepai-to-api] database: ${settings.database}`);
-  console.log(`[deepai-to-api] stored API keys: ${keyCount}`);
+  console.log(`[deepai-gateway] database: ${settings.database}`);
+  console.log(`[deepai-gateway] stored API keys: ${keyCount}`);
   console.log(
-    account === undefined
-      ? '[deepai-to-api] not signed in to DeepAI — open the dashboard to sign in'
-      : `[deepai-to-api] signed in as ${account.username || 'DeepAI user'}`,
+    accounts.length === 0
+      ? '[deepai-gateway] no DeepAI accounts yet — open the dashboard to log in'
+      : `[deepai-gateway] ${accounts.length} DeepAI account${accounts.length === 1 ? '' : 's'}: ${accounts.map((a) => a.username).join(', ')}`,
   );
 
   const server = app.listen(settings.port, settings.host, () => {
     const address = server.address();
     const port = typeof address === 'object' && address !== null ? address.port : settings.port;
-    console.log(`[deepai-to-api] listening on http://${settings.host}:${port}`);
-    console.log(`[deepai-to-api] OpenAI base URL: http://${settings.host}:${port}/v1`);
+    console.log(`[deepai-gateway] listening on http://${settings.host}:${port}`);
+    console.log(`[deepai-gateway] OpenAI base URL: http://${settings.host}:${port}/v1`);
+    if (settings.host !== '127.0.0.1' && settings.host !== 'localhost') {
+      // The dashboard is protected by a cookie, but an operator should still
+      // know the panel is reachable from the network.
+      console.log('[deepai-gateway] note: HOST is not loopback — the dashboard is reachable from the network');
+    }
   });
 
   const shutdown = () => {

@@ -8,7 +8,7 @@
  * Every key is owned by the DeepAI account that was signed in when it was
  * created, so usage can be attributed to a person.
  *
- * @module deepai-to-api/keys
+ * @module deepai-gateway/keys
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';

@@ -6,7 +6,7 @@
  * request/token limits inside the key's own window, and refuses models the key
  * is not allowed to use.
  *
- * @module deepai-to-api/middleware/auth
+ * @module deepai-gateway/middleware/auth
  */
 
 import { allowsModel, hashKey, isUsable, overLimit } from '../keys.js';

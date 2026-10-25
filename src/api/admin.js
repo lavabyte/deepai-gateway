@@ -1,11 +1,14 @@
 /**
  * Dashboard API: account, keys, usage, models and the auth audit trail.
  *
- * Everything the browser needs for its four views. Keys are created here and
- * the plaintext is returned exactly once, at creation. Every key records the
- * DeepAI account that owns it.
+ * Everything here is scoped to the **session's account**. A browser presents a
+ * session cookie; the account that cookie resolves to owns the keys and usage
+ * this router will show and change. Two accounts signed in on two browsers never
+ * see each other's rows.
  *
- * @module deepai-to-api/api/admin
+ * Keys are created here and the plaintext is returned exactly once.
+ *
+ * @module deepai-gateway/api/admin
  */
 
 import express from 'express';
@@ -21,21 +24,26 @@ import {
 } from '../keys.js';
 import {
   clearAccount,
+  clearSessionCookie,
+  createSession,
+  destroySession,
   getSetting,
-  readAccount,
+  pruneSessions,
   recentAuthEvents,
   recordAuthEvent,
+  readAccount,
   saveAccount,
   saveAllowance,
   savePro,
+  sessionCookie,
   setSetting,
 } from '../store.js';
+import { requireSession, publicAccount } from '../middleware/session.js';
 import {
   estimateSavings,
   pricingStatus,
   publicPrices,
   refreshPrices,
-  refreshPricesIfStale,
 } from '../pricing.js';
 import {
   CSV_COLUMNS,
@@ -55,10 +63,6 @@ import {
 /**
  * Mount the dashboard API.
  *
- * Every endpoint that reads keys, usage or events is scoped to the signed-in
- * DeepAI account: the dashboard is per user, so one account never sees another
- * account's keys or traffic.
- *
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {object} runtime - shared sign-in state.
  * @returns {import('express').Router}
@@ -66,29 +70,26 @@ import {
 export function adminRouter(db, runtime) {
   const router = express.Router();
 
-  /** The signed-in username, or `undefined` after answering 401. */
-  function requireOwner(req, res) {
-    const account = readAccount(db);
-    if (account === undefined) {
-      res.status(401).json({
-        ok: false,
-        error: 'Log in to DeepAI to view your keys and usage.',
-        code: 'not_logged_in',
-      });
-      return undefined;
-    }
-    return account.username;
+  /** The session's account, or `undefined` after answering 401. */
+  function requireAccount(req, res) {
+    if (req.account !== undefined) return req.account;
+    res.status(401).json({
+      ok: false,
+      error: 'Log in to DeepAI to view your keys and usage.',
+      code: 'not_logged_in',
+    });
+    return undefined;
   }
 
   /**
-   * Resolve a key the caller owns. Answers 404 for another account's key so the
-   * response does not reveal that it exists.
+   * Resolve a key the session's account owns. Answers 404 for another account's
+   * key, so the response does not reveal that it exists.
    */
-  function ownedKey(db, req, res) {
-    const owner = requireOwner(req, res);
-    if (owner === undefined) return undefined;
+  function ownedKey(req, res) {
+    const account = requireAccount(req, res);
+    if (account === undefined) return undefined;
     const row = db.prepare('SELECT * FROM api_keys WHERE id = ? AND owner_username = ?')
-      .get(req.params.id, owner);
+      .get(req.params.id, account.username);
     if (row === undefined) {
       res.status(404).json({ ok: false, error: 'No such key.' });
       return undefined;
@@ -98,104 +99,108 @@ export function adminRouter(db, runtime) {
 
   /* ---------------------------------------------------------------- account */
 
-  router.get('/account', async (req, res) => {
-    const account = readAccount(db);
+  router.get('/account', (req, res) => {
+    const account = req.account;
+    const view = publicAccount(account);
     res.json({
       signedIn: account !== undefined,
-      username: account?.username ?? '',
-      isPro: account?.isPro ?? false,
-      allowance: account?.allowance ?? null,
-      signedInSince: account?.createdAt ?? null,
-      pendingLogin: runtime.pendingLogin !== undefined,
-      defaultModel: getSetting(db, 'default_model', 'glm-5.3-flash'),
+      username: view?.username ?? '',
+      isPro: view?.isPro ?? false,
+      allowance: view?.allowance ?? null,
+      signedInSince: view?.signedInSince ?? null,
+      sessionExpiresAt: view?.sessionExpiresAt ?? null,
+      // Only this browser's own pending attempt, never another visitor's.
+      pendingLogin: runtime.pendingLogins?.get(browserOf(req)) !== undefined,
+      defaultModel: account === undefined
+        ? 'glm-5.3-flash'
+        : getSetting(db, account.username, 'default_model', 'glm-5.3-flash'),
       balanceLow: isBalanceLow(account?.allowance),
-      keyQuota: keyQuota(db),
+      keyQuota: account === undefined
+        ? { used: 0, max: MAX_KEYS, remaining: MAX_KEYS, atLimit: false }
+        : keyQuota(db, account.username),
     });
   });
 
-  router.get('/account/events', (req, res) => {
-    // Auth events are per account: without a session there is nothing to show,
-    // and another account's history is not the caller's business.
-    const owner = requireOwner(req, res);
-    if (owner === undefined) return undefined;
+  router.get('/account/events', requireSession, (req, res) => {
     const limit = Math.min(Math.max(Number(req.query.limit) || 25, 1), 200);
-    res.json({ events: recentAuthEvents(db, limit, owner) });
-    return undefined;
+    res.json({ events: recentAuthEvents(db, limit, req.account.username) });
   });
 
   /**
-   * Begin the DeepAI sign-in. Returns the URL so the SPA can open it; the
+   * Begin the DeepAI login. Returns the URL so the SPA can navigate to it; the
    * browser-navigable `GET /login` uses the same flow.
    */
   router.post('/login', async (req, res) => {
-    if (runtime.pendingLogin !== undefined) {
-      return res.json({ ok: true, url: runtime.pendingLogin.url });
-    }
     try {
-      const url = await beginLogin(db, runtime, localPort(req));
+      const url = await beginLogin(db, runtime, localPort(req), { browser: browserOf(req) });
       res.json({ ok: true, url });
     } catch (error) {
-      runtime.pendingLogin = undefined;
+      runtime.log?.(`login could not start: ${error?.message ?? error}`);
       res.status(500).json({ ok: false, error: String(error?.message ?? error) });
     }
   });
 
   router.post('/cancel-login', (req, res) => {
-    try {
-      runtime.pendingLogin?.close?.();
-    } catch {
-      /* best effort */
-    }
-    runtime.pendingLogin = undefined;
+    cancelLogin(runtime, browserOf(req));
     res.json({ ok: true });
   });
 
-  /** Sign out. Keys survive so their usage history stays attributable. */
+  /**
+   * Log out of **this browser only**.
+   *
+   * The session is destroyed, so this tab forgets who it was. The DeepAI account
+   * and its keys are left alone: another signed-in browser keeps working, and
+   * signing in again from here restores the same keys.
+   */
   router.post('/logout', (req, res) => {
-    const account = readAccount(db);
-    clearAccount(db);
-    recordAuthEvent(db, 'logout', { username: account?.username ?? '', detail: 'signed out' });
-    runtime.log?.('signed out');
+    const account = req.account;
+    if (req.sessionToken !== undefined) destroySession(db, req.sessionToken);
+    if (account !== undefined) {
+      recordAuthEvent(db, 'logout', { username: account.username, detail: 'session ended' });
+      runtime.log?.(`logged out ${account.username}`);
+    }
+    res.setHeader('set-cookie', clearSessionCookie());
     res.json({ ok: true });
   });
 
-  router.post('/account/refresh', async (req, res) => {
-    const result = await refreshAllowance(db, runtime);
+  /** Forget the account entirely, including its DeepAI key and API keys. */
+  router.post('/account/forget', requireSession, (req, res) => {
+    const username = req.account.username;
+    clearAccount(db, username);
+    recordAuthEvent(db, 'logout', { username, detail: 'account removed' });
+    runtime.log?.(`removed account ${username}`);
+    res.setHeader('set-cookie', clearSessionCookie());
+    res.json({ ok: true });
+  });
+
+  router.post('/account/refresh', requireSession, async (req, res) => {
+    const result = await refreshAllowance(db, runtime, req.account.username);
     res.json(result);
   });
 
-  router.post('/settings/default-model', (req, res) => {
+  router.post('/settings/default-model', requireSession, (req, res) => {
     const model = typeof req.body?.model === 'string' ? req.body.model : '';
     if (model === '') return res.status(400).json({ ok: false, error: 'model is required' });
-    setSetting(db, 'default_model', model);
+    setSetting(db, req.account.username, 'default_model', model);
     res.json({ ok: true, defaultModel: model });
   });
 
   /* ------------------------------------------------------------------- keys */
 
-  router.get('/keys', (req, res) => {
-    const owner = requireOwner(req, res);
-    if (owner === undefined) return undefined;
+  router.get('/keys', requireSession, (req, res) => {
+    const owner = req.account.username;
     const rows = db.prepare('SELECT * FROM api_keys WHERE owner_username = ? ORDER BY created_at DESC').all(owner);
     res.json({
       keys: rows.map((row) => publicKey(row, keyUsage(db, row.id, row.limit_window))),
       windows: [...WINDOWS],
       quota: keyQuota(db, owner),
     });
-    return undefined;
   });
 
-  router.post('/keys', (req, res) => {
+  router.post('/keys', requireSession, (req, res) => {
     // A key must belong to someone: an ownerless key would be invisible in the
-    // per-user dashboard and unaccountable in usage.
-    const account = readAccount(db);
-    if (account === undefined) {
-      return res.status(401).json({
-        ok: false,
-        error: 'Log in to DeepAI before creating an API key.',
-        code: 'not_logged_in',
-      });
-    }
+    // per-account dashboard and unaccountable in usage.
+    const account = req.account;
     const owner = account.username;
 
     const quota = keyQuota(db, owner);
@@ -238,18 +243,22 @@ export function adminRouter(db, runtime) {
       limits.limitWindow,
       JSON.stringify(restriction.models),
       owner,
+      // Which DeepAI key pays for this gateway key: the account's, at creation.
       hashKey(account.apiKey),
       restriction.restricted ? 1 : 0,
     );
 
     const row = db.prepare('SELECT * FROM api_keys WHERE id = ?').get(id);
-    runtime.log?.(`created API key "${name}" for ${row.owner_username || 'unknown user'}`);
+    runtime.log?.(`created API key "${name}" for ${owner}`);
     // The plaintext is returned once and never stored.
-    res.status(201).json({ key: publicKey(row, keyUsage(db, id, row.limit_window)), plaintext: generated.plaintext });
+    return res.status(201).json({
+      key: publicKey(row, keyUsage(db, id, row.limit_window)),
+      plaintext: generated.plaintext,
+    });
   });
 
   router.patch('/keys/:id', (req, res) => {
-    const row = ownedKey(db, req, res);
+    const row = ownedKey(req, res);
     if (row === undefined) return undefined;
 
     const limits = parseLimits(req.body, row);
@@ -285,42 +294,39 @@ export function adminRouter(db, runtime) {
     );
 
     const updated = db.prepare('SELECT * FROM api_keys WHERE id = ?').get(row.id);
-    res.json({ key: publicKey(updated, keyUsage(db, updated.id, updated.limit_window)) });
+    return res.json({ key: publicKey(updated, keyUsage(db, updated.id, updated.limit_window)) });
   });
 
   router.post('/keys/:id/revoke', (req, res) => {
-    const row = ownedKey(db, req, res);
+    const row = ownedKey(req, res);
     if (row === undefined) return undefined;
     db.prepare('UPDATE api_keys SET revoked_at = ? WHERE id = ?').run(Date.now(), row.id);
     runtime.log?.(`revoked API key "${row.name}"`);
     const updated = db.prepare('SELECT * FROM api_keys WHERE id = ?').get(row.id);
-    res.json({ key: publicKey(updated, keyUsage(db, updated.id, updated.limit_window)) });
+    return res.json({ key: publicKey(updated, keyUsage(db, updated.id, updated.limit_window)) });
   });
 
   router.post('/keys/:id/restore', (req, res) => {
-    const row = ownedKey(db, req, res);
+    const row = ownedKey(req, res);
     if (row === undefined) return undefined;
     db.prepare('UPDATE api_keys SET revoked_at = NULL WHERE id = ?').run(row.id);
     const updated = db.prepare('SELECT * FROM api_keys WHERE id = ?').get(row.id);
-    res.json({ key: publicKey(updated, keyUsage(db, updated.id, updated.limit_window)) });
+    return res.json({ key: publicKey(updated, keyUsage(db, updated.id, updated.limit_window)) });
   });
 
   router.delete('/keys/:id', (req, res) => {
-    const row = ownedKey(db, req, res);
+    const row = ownedKey(req, res);
     if (row === undefined) return undefined;
     db.prepare('DELETE FROM api_keys WHERE id = ?').run(row.id);
     runtime.log?.(`deleted API key "${row.name}"`);
-    res.json({ ok: true });
+    return res.json({ ok: true });
   });
 
   /* ------------------------------------------------------------------ usage */
 
-  router.get('/usage/summary', (req, res) => {
-    const owner = requireOwner(req, res);
-    if (owner === undefined) return undefined;
-    const now = Date.now();
-    const data = summary(db, now, owner);
-    const account = readAccount(db);
+  router.get('/usage/summary', requireSession, (req, res) => {
+    const owner = req.account.username;
+    const data = summary(db, Date.now(), owner);
     res.json({
       ...data,
       // What the same traffic would cost on the public APIs these models
@@ -331,40 +337,55 @@ export function adminRouter(db, runtime) {
         all: estimateSavings(data.modelsAll),
         pricing: pricingStatus(),
       },
-      balanceLow: isBalanceLow(account?.allowance),
-      allowance: account?.allowance ?? null,
+      balanceLow: isBalanceLow(req.account.allowance),
+      allowance: req.account.allowance ?? null,
     });
   });
 
-  // The live reference table, so the dashboard can show its provenance.
+  /**
+   * The reference price table.
+   *
+   * OpenRouter publishes these rates, so the table itself is public. The status
+   * is projected down to its provenance: `lastError` can carry upstream detail
+   * and has no business on an unauthenticated endpoint.
+   */
   router.get('/pricing', (req, res) => {
-    res.json({ status: pricingStatus(), prices: publicPrices() });
+    const status = pricingStatus();
+    res.json({
+      status: {
+        source: status.source,
+        capturedAt: status.capturedAt,
+        fetchedAt: status.fetchedAt,
+        ageMs: status.ageMs,
+        stale: status.stale,
+        ttlMs: status.ttlMs,
+        models: status.models,
+        priced: status.priced,
+      },
+      prices: publicPrices(),
+    });
   });
 
-  /** Force a refresh from OpenRouter. */
-  router.post('/pricing/refresh', async (req, res) => {
+  /** Force a refresh from OpenRouter. Authenticated: it performs a network call. */
+  router.post('/pricing/refresh', requireSession, async (req, res) => {
     const result = await refreshPrices();
     res.status(result.ok ? 200 : 502).json(result);
   });
 
-  router.get('/usage/recent', (req, res) => {
-    const owner = requireOwner(req, res);
-    if (owner === undefined) return undefined;
+  router.get('/usage/recent', requireSession, (req, res) => {
     const limit = Math.min(Math.max(Number(req.query.limit) || 25, 1), 200);
     const keyId = typeof req.query.keyId === 'string' && req.query.keyId !== '' ? req.query.keyId : undefined;
-    res.json({ requests: recent(db, limit, keyId, owner) });
-    return undefined;
+    res.json({ requests: recent(db, limit, keyId, req.account.username) });
   });
 
   /**
    * Download the usage history.
    *
    * `?format=csv` (default) or `json`; `?range=today|month|all` bounds it, and
-   * `?keyId=` narrows it to one key.
+   * `?keyId=` narrows it to one key. Always scoped to the session's account.
    */
-  router.get('/usage/export', (req, res) => {
-    const owner = requireOwner(req, res);
-    if (owner === undefined) return undefined;
+  router.get('/usage/export', requireSession, (req, res) => {
+    const owner = req.account.username;
     const range = typeof req.query.range === 'string' ? req.query.range : 'all';
     const since = range === 'today' ? startOfDay() : range === 'month' ? startOfMonth() : 0;
     const keyId = typeof req.query.keyId === 'string' && req.query.keyId !== '' ? req.query.keyId : undefined;
@@ -393,35 +414,33 @@ export function adminRouter(db, runtime) {
     res.end();
   });
 
-  router.get('/usage/models', (req, res) => {
-    const owner = requireOwner(req, res);
-    if (owner === undefined) return undefined;
+  router.get('/usage/models', requireSession, (req, res) => {
     const range = typeof req.query.range === 'string' ? req.query.range : 'month';
     const since = range === 'today' ? startOfDay() : range === 'all' ? 0 : startOfMonth();
-    res.json({ range, since, models: byModel(db, since, owner) });
-    return undefined;
+    res.json({ range, since, models: byModel(db, since, req.account.username) });
   });
 
   router.get('/usage/keys/:id', (req, res) => {
-    const row = ownedKey(db, req, res);
+    const row = ownedKey(req, res);
     if (row === undefined) return undefined;
     const window = typeof req.query.window === 'string' && WINDOWS.includes(req.query.window)
       ? req.query.window
       : row.limit_window;
-    res.json({
+    return res.json({
       key: publicKey(row, keyUsage(db, row.id, row.limit_window)),
       usage: keyUsage(db, row.id, window),
       totals: totals(db, windowStart(window), row.owner_username),
       recent: recent(db, 25, row.id, row.owner_username),
     });
-    return undefined;
   });
 
   /* ----------------------------------------------------------------- models */
 
-  router.get('/models', async (req, res) => {
+  router.get('/models', requireSession, async (req, res) => {
     try {
-      const owner = readAccount(db)?.username;
+      // The catalog is public data, but the usage figures beside it are not:
+      // this must be scoped to the session's account, never "all accounts".
+      const owner = req.account.username;
       const models = await loadCatalog(AbortSignal.timeout(10_000));
       const monthSince = startOfMonth();
       const usageByModel = new Map(byModel(db, monthSince, owner).map((item) => [item.model, item]));
@@ -460,41 +479,103 @@ export function localPort(req) {
 }
 
 /**
- * The DeepAI sign-in flow, shared by the JSON route, `GET /login` and the
- * browser callback. The callback is served by the main app, so it uses the
- * same port as the panel.
+ * Start a DeepAI login flow and remember it on the runtime.
+ *
+ * The flow's promise settles when the browser callback completes, but the
+ * callback route owns the HTTP response — so this only starts the attempt. The
+ * route calls {@link completeLogin} to persist the account and mint the session.
  *
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {object} runtime
  * @param {number} port - the port the gateway listens on.
+ * @returns {Promise<string>} the DeepAI authorization URL.
  */
-export async function beginLogin(db, runtime, port) {
-  if (runtime.pendingLogin !== undefined) return runtime.pendingLogin.url;
+export async function beginLogin(db, runtime, port, options = {}) {
   if (!Number.isInteger(port) || port <= 0) {
     throw new Error('the gateway port is unknown, so DeepAI cannot call back');
   }
 
+  const browser = options.browser ?? 'default';
+  const existing = runtime.pendingLogins?.get(browser);
+  // The same browser asking twice reuses its attempt; a *different* browser gets
+  // its own. Sharing one global slot let a second visitor take over the first
+  // visitor's pending login, which is a session-fixation bug.
+  if (existing !== undefined) return existing.flow.url;
+
   const flow = startLogin({ port });
-  runtime.pendingLogin = { url: flow.url, close: flow.close, flow };
-  flow.done.then(
-    (account) => {
-      runtime.pendingLogin = undefined;
-      saveAccount(db, account);
-      recordAuthEvent(db, 'login', { username: account.username, detail: 'signed in' });
-      runtime.log?.(`signed in as ${account.username || 'DeepAI user'}`);
-      void refreshAllowance(db, runtime);
-    },
-    (error) => {
-      runtime.pendingLogin = undefined;
-      // A cancelled attempt is routine, not a refusal worth auditing.
-      const message = String(error?.message ?? error);
-      if (!/cancelled/i.test(message)) {
-        recordAuthEvent(db, 'denied', { detail: message });
-      }
-      runtime.log?.(`sign-in failed: ${message}`);
-    },
-  );
+  if (runtime.pendingLogins === undefined) runtime.pendingLogins = new Map();
+  runtime.pendingLogins.set(browser, { flow });
+
+  const forget = () => {
+    // Only clear this browser's attempt, never another's.
+    if (runtime.pendingLogins?.get(browser)?.flow === flow) runtime.pendingLogins.delete(browser);
+  };
+  flow.done.then(forget, (error) => {
+    forget();
+    const message = String(error?.message ?? error);
+    // A cancelled attempt is routine, not a refusal worth auditing.
+    if (!/cancelled/i.test(message)) {
+      recordAuthEvent(db, 'denied', { detail: message });
+    }
+    runtime.log?.(`login failed: ${message}`);
+  });
   return flow.url;
+}
+
+/** Cancel one browser's pending login. */
+export function cancelLogin(runtime, browser = 'default') {
+  try {
+    runtime.pendingLogins?.get(browser)?.flow?.close?.();
+  } catch {
+    /* best effort */
+  }
+  runtime.pendingLogins?.delete(browser);
+}
+
+/**
+ * Identify the browser that owns a login attempt.
+ *
+ * A short-lived random cookie is minted on first use. It is not a credential —
+ * it only groups one browser's sequential requests so two visitors cannot
+ * interfere — so it is not `HttpOnly`-critical, but it is still scoped and
+ * cleared once the flow finishes.
+ */
+export function browserOf(req) {
+  return typeof req.loginBrowser === 'string' && req.loginBrowser !== '' ? req.loginBrowser : 'default';
+}
+
+/**
+ * Finish a login: persist the DeepAI account, mint a session for this browser and
+ * return the cookie value to send.
+ *
+ * Called by the `/auth-callback` route once DeepAI has handed back a code and the
+ * exchange succeeded. Keeping this out of the flow object means the account and
+ * the cookie are written *before* the response is sent, so the browser never
+ * lands on the dashboard without its session.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {object} runtime
+ * @param {object} account - `{apiKey, username, isPro}` from the exchange.
+ * @param {{secure?: boolean}} [options]
+ * @returns {{username: string, created: boolean, cookie: string}}
+ */
+export function completeLogin(db, runtime, account, options = {}) {
+  const saved = saveAccount(db, account);
+  const username = saved.account.username;
+  pruneSessions(db);
+  const session = createSession(db, username);
+  recordAuthEvent(db, 'login', {
+    username,
+    detail: saved.created ? 'account created' : 'logged in',
+  });
+  runtime.log?.(`logged in as ${username} (${saved.created ? 'new account' : 'existing account'})`);
+  // Allowance is a network call; it must not delay the redirect.
+  void refreshAllowance(db, runtime, username);
+  return {
+    username,
+    created: saved.created,
+    cookie: sessionCookie(session.token, session.expiresAt, { secure: options.secure === true }),
+  };
 }
 
 /**
@@ -512,7 +593,12 @@ function parseLimits(body, existing = undefined) {
 
   // An unlimited window means no token or request cap at all.
   if (window === 'unlimited') {
-    return { expiresAt: readExpiry(body, existing?.expires_at), limitTokens: null, limitRequests: null, limitWindow: window };
+    return {
+      expiresAt: readExpiry(body, existing?.expires_at),
+      limitTokens: null,
+      limitRequests: null,
+      limitWindow: window,
+    };
   }
 
   const limitTokens = readLimit(body, 'limitTokens', existing?.limit_tokens);
@@ -530,8 +616,8 @@ function parseLimits(body, existing = undefined) {
  * Model restriction for a key.
  *
  * `modelsRestricted: false` means every model. `true` means exactly the listed
- * models — including an empty list, which allows nothing. An omitted flag on
- * an existing key keeps its current mode.
+ * models — including an empty list, which allows nothing. An omitted flag on an
+ * existing key keeps its current mode.
  *
  * @returns {{restricted: boolean, models: string[]}|string}
  */
@@ -596,18 +682,24 @@ function isBalanceLow(allowance) {
   return balance / granted < 0.1;
 }
 
-/** Re-read the DeepAI allowance and cache it. */
-export async function refreshAllowance(db, runtime) {
-  const account = readAccount(db);
+/**
+ * Re-read one account's DeepAI allowance and cache it.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {object} runtime
+ * @param {string} username - which account to refresh.
+ */
+export async function refreshAllowance(db, runtime, username) {
+  const account = readAccount(db, username);
   if (account === undefined) return { ok: false, error: 'Not signed in.' };
   const check = await checkKey(account.apiKey, AbortSignal.timeout(15_000));
   if (!check.ok) {
-    recordAuthEvent(db, 'denied', { username: account.username, detail: check.error });
+    recordAuthEvent(db, 'denied', { username, detail: check.error });
     return { ok: false, error: check.error };
   }
-  saveAllowance(db, check.allowance);
-  if (typeof check.isPro === 'boolean') savePro(db, check.isPro);
-  recordAuthEvent(db, 'refresh', { username: account.username, detail: `balance ${check.allowance.balance ?? '?'}` });
-  runtime.log?.(`allowance refreshed: ${check.allowance.balance ?? '?'} Theos`);
+  saveAllowance(db, username, check.allowance);
+  if (typeof check.isPro === 'boolean') savePro(db, username, check.isPro);
+  recordAuthEvent(db, 'refresh', { username, detail: `balance ${check.allowance.balance ?? '?'}` });
+  runtime.log?.(`allowance refreshed for ${username}: ${check.allowance.balance ?? '?'} Theos`);
   return { ok: true, allowance: check.allowance };
 }

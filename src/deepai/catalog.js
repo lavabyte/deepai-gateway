@@ -6,7 +6,7 @@
  * API they use. The live answer is cached and an embedded snapshot keeps the
  * gateway usable when the network is down.
  *
- * @module deepai-to-api/deepai/catalog
+ * @module deepai-gateway/deepai/catalog
  */
 
 import { API_ORIGIN, LANE_HEADERS } from './wire.js';

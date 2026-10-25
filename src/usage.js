@@ -8,7 +8,7 @@
  * Token counts are stored disjoint: `input_tokens` excludes cached input,
  * matching what the gateway reports to its own clients.
  *
- * @module deepai-to-api/usage
+ * @module deepai-gateway/usage
  */
 
 /** Start of the current day (local time) as epoch milliseconds. */

@@ -1,5 +1,5 @@
 {
-  "name": "deepai-to-api",
+  "name": "deepai-gateway",
   "version": "1.0.0",
   "private": true,
   "type": "module",

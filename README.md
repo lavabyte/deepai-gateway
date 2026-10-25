@@ -1,11 +1,12 @@
-# deepai-to-api
+# deepai-gateway
 
-An OpenAI-compatible gateway in front of **DeepAI Code**. Sign in once with a
-DeepAI account, mint `sk-` keys with their own limits, and point any OpenAI
+An OpenAI-compatible gateway in front of **DeepAI Code**. Log in with one or more
+DeepAI accounts, mint `sk-` keys with their own limits, and point any OpenAI
 client at `/v1`.
 
 Comes with a dashboard: usage statistics, per-model breakdown, recent requests,
-the model catalog, and API-key management.
+the model catalog, API-key management — and **real multi-user isolation**, so
+several people can share one gateway without seeing each other's keys or traffic.
 
 ## Quick start
 
@@ -14,7 +15,7 @@ npm install
 npm start
 ```
 
-Open <http://127.0.0.1:8787>, sign in with DeepAI, create a key, then:
+Open <http://127.0.0.1:8787>, log in with DeepAI, create a key, then:
 
 ```bash
 curl http://127.0.0.1:8787/v1/chat/completions \
@@ -37,24 +38,56 @@ export OPENAI_API_KEY=sk-…
 | `PORT` | `8787` | Listen port |
 | `HOST` | `127.0.0.1` | Listen address. Set `0.0.0.0` to expose on the network |
 | `DATABASE` | `./data/deepai.db` | SQLite file |
+| `TRUST_PROXY` | unset | Set `1` behind a TLS proxy: trust `X-Forwarded-*` and set `Secure` cookies |
 | `LOG_REQUESTS` | `1` | Set `0` to silence per-request logging |
 | `PRICING_CACHE` | `./data/pricing.json` | Where the fetched price table is cached |
 
-## Per-user isolation
+## Multi-user
 
-The dashboard is **per account**. A DeepAI login owns its keys and its traffic:
+One gateway serves **many DeepAI accounts at once**. Each DeepAI login is a row in
+`accounts`; each browser gets its own session cookie tied to one of them.
 
-- `/api/keys`, `/api/usage/*`, `/api/account/events` and the export all filter by
-  the signed-in username;
-- another account's key answers `404`, not `403`, so its existence is not
-  revealed;
-- the 5-key cap is per account;
-- with no session those endpoints answer `401` and the dashboard shows a
-  **Log in required** prompt instead of empty tables.
+- **Accounts are separate.** Two people signed in on two browsers never see each
+  other's keys, usage, auth trail or default model.
+- **Keys belong to the account that made them.** A gateway key stores
+  `owner_username`, and *that* account pays for the key's traffic — not whoever
+  happens to be logged in when the request arrives.
+- **Sessions are per browser.** Logging out ends only that browser's session. The
+  account and its keys stay, so another signed-in browser keeps working and
+  logging in again restores the same keys.
+- **The 5-key cap is per account.**
+- **Usage history outlives the key.** Rows carry `owner_username`, so deleting a
+  key does not erase what it spent.
 
-A key cannot exist without an owner: creating one while logged out is refused
-with `401 not_logged_in`. Usage rows carry `owner_username` themselves, so the
-history stays attributable after the key that produced it is deleted.
+### What is public
+
+Only what genuinely has to be:
+
+| Endpoint | Access |
+| --- | --- |
+| `/healthz` | Public, and returns **only** `{"ok":true}` — a liveness probe must not become a directory of users |
+| `/api/pricing` | Public: OpenRouter publishes these rates. The status is projected so upstream error detail stays internal |
+| `/v1/models` | Requires an API key, scoped to what that key may use |
+| `/api/models` | Requires a session: the catalog is public but the usage figures beside it are per account |
+| everything else under `/api` | Requires a session |
+| `/api/pricing/refresh` | Requires a session: it performs an outbound network call |
+
+Without a session those endpoints answer `401 not_logged_in`, and the dashboard
+shows a **Log in required** prompt instead of empty tables. Creating a key without
+a session is refused, so an ownerless key cannot exist.
+
+### Concurrent logins
+
+Login attempts are keyed per browser by a short-lived `deepai_gateway_login`
+cookie. A single global slot would let a second visitor take over the first
+visitor's pending login; with per-browser slots each attempt can only be
+completed by the browser that started it.
+
+### Behind a proxy
+
+Set `TRUST_PROXY=1` when terminating TLS in front of the gateway. It enables
+`X-Forwarded-*` handling and marks the session cookie `Secure`. Leave it off for
+plain-HTTP localhost, where a `Secure` cookie would never be sent.
 
 ## Dashboard
 
@@ -141,19 +174,31 @@ so a plain copy of the `.db` file is complete on its own.
 SQLite iterator, so exporting a large history does not load it all into memory.
 The dashboard's **Export CSV** button uses the same endpoint.
 
+## How accounts and sessions are stored
+
+- **`accounts`** — one row per DeepAI user: `username`, the DeepAI `api_key`, the
+  cached Theos allowance, `is_pro`. Username is the identity, so signing in again
+  replaces that row's key instead of adding a second row.
+- **`sessions`** — one row per browser session. Only the **SHA-256 hash** of the
+  token is stored, so a database dump does not hand out dashboard access. The
+  cookie is `HttpOnly` and `SameSite=Lax`; it expires after 14 idle days.
+- **`api_keys`** — as below, plus `owner_username` (which account pays) and
+  `owner_key_hash` (the DeepAI key it was created with, kept as a record).
+- **`auth_events`** — append-only login/logout/refresh/denied trail, per account.
+
 ## How keys are stored
 
 A key is shown **once**, at creation. Only a SHA-256 hash is persisted, so a
 database leak does not hand out working credentials. Keys look like
 `sk-` followed by 40 hex characters.
 
-Each key also stores the **owner**: the DeepAI username and a hash of the
-account key that was signed in when it was created. Usage rows keep the key
-name, so deleting a key preserves its history.
+Each key also stores its **owner**: the DeepAI username, and a hash of the
+DeepAI key that was signed in when it was created. The owner — not the current
+session — decides which account pays, so a key keeps billing the right account
+even while its owner is logged out elsewhere.
 
-Signing out clears the DeepAI account but **keeps the keys**, so their usage
-stays attributable. Sign-in, sign-out, allowance refreshes and refused sign-ins
-are appended to `auth_events`.
+Logging out keeps the account and its keys, so their usage stays attributable.
+Only **Forget this account** removes them.
 
 ## Endpoints
 
@@ -203,22 +248,23 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | `GET` | `/login` | Browser sign-in; redirects to DeepAI (`?json=1` returns the URL) |
 | `GET` | `/auth-callback` | Where DeepAI sends the browser back — **on the panel's own port** |
 | `GET` | `/logout` | Sign out, then redirect to `/` |
-| `GET` | `/api/account` | Sign-in state, allowance, default model, key quota |
+| `GET` | `/api/account` | This session's account, allowance, default model, key quota |
 | `GET` | `/api/account/events` | That account's auth trail (login, logout, refresh, denied) |
-| `POST` | `/api/login` · `/api/cancel-login` · `/api/logout` | DeepAI sign-in flow |
+| `POST` | `/api/account/forget` | Remove the account, its keys and its DeepAI credential |
+| `POST` | `/api/login` · `/api/cancel-login` · `/api/logout` | DeepAI login flow |
 | `POST` | `/api/account/refresh` | Re-read the Theos balance |
 | `GET` `POST` | `/api/keys` | List / create |
 | `PATCH` `DELETE` | `/api/keys/:id` | Edit / delete |
 | `POST` | `/api/keys/:id/revoke` · `/restore` | Toggle usability |
 | `GET` | `/api/usage/summary` | Today / month / all-time totals, daily series, money saved |
 | `GET` | `/api/usage/export` | Download the history (`?format=csv\|json`, `?range=`, `?keyId=`) |
-| `GET` | `/api/pricing` | The live price table and its provenance |
-| `POST` | `/api/pricing/refresh` | Force a refresh from OpenRouter |
+| `GET` | `/api/pricing` | The live price table and its provenance (public) |
+| `POST` | `/api/pricing/refresh` | Force a refresh from OpenRouter (session required) |
 | `GET` | `/api/usage/models` | Per-model breakdown (`?range=today\|month\|all`) |
 | `GET` | `/api/usage/recent` | Recent requests (`?limit`, `?keyId`) |
 | `GET` | `/api/usage/keys/:id` | One key's usage and history |
 | `GET` | `/api/models` | Catalog with usage attached |
-| `GET` | `/healthz` | Liveness + sign-in state |
+| `GET` | `/healthz` | Liveness only: `{"ok":true}` |
 
 ## Money saved
 
@@ -308,13 +354,14 @@ follow the OS by default, and a manual toggle.
 
 ```
 server.js               Express wiring, static hosting, error shaping
-src/db.js               SQLite schema and migrations (v2 audit, v3 per-user ownership)
+src/db.js               SQLite schema and migrations (v4: accounts + sessions)
 src/keys.js             key generation, hashing, limit checks
 src/usage.js            usage recording and every aggregate query
 src/pricing.js          live OpenRouter prices, cache, and the savings estimate
 src/store.js            account + settings persistence
 src/openai.js           OpenAI ⇄ DeepAI conversions
 src/middleware/auth.js  key authentication and limit enforcement
+src/middleware/session.js  session cookie resolution, per browser
 src/api/v1.js           /v1 OpenAI surface
 src/api/admin.js        /api dashboard surface
 src/deepai/catalog.js   model catalog with cache and offline snapshot
@@ -348,6 +395,8 @@ and no external database. The only runtime dependency is Express.
 
 - Text only. Image inputs are not forwarded.
 - At most 5 gateway keys **per account**.
+- The dashboard has no password: authentication *is* the DeepAI login. Anyone
+  who can reach the port and complete a DeepAI login gets their own account.
 - The Responses route has no stop-sequence field, so `stop` is dropped for
   `gpt-6-astra`.
 - Premier models require Theos balance on the DeepAI account; free models are
@@ -361,10 +410,11 @@ npm test
 
 Runs offline against an in-memory database and a stubbed `fetch` — no account
 and no network needed. Covers the schema and the v1→v2 migration, key
-generation, ownership and limits, authentication, **per-user isolation** (keys,
-usage, export and audit are scoped; ownerless keys are refused), usage
-aggregation, live price parsing and cache accounting, usage export and
-durability, both usage normalizers, the
+generation, ownership and limits, authentication, **multi-user isolation** (two
+accounts on one gateway, cross-account reads refused, ownerless keys refused,
+per-account settings), **sessions** (resolution, expiry, hashing, cookie
+parsing, per-browser concurrent logins), usage aggregation, live price parsing
+and cache accounting, usage export and durability, both usage normalizers, the
 catalog and the `/v1/models` payload, the OpenAI conversions, the `[hidden]`
 and OS-theme CSS invariants,
 routing (`/` is HTML, `/v1` and `/api` are JSON), the same-origin sign-in

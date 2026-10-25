@@ -5,7 +5,7 @@
  * chat-completions path is a near pass-through. Only the Responses transport
  * needs reshaping, which is what this module does.
  *
- * @module deepai-to-api/openai
+ * @module deepai-gateway/openai
  */
 
 /** Join the text of one OpenAI message content value. */

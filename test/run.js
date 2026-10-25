@@ -9,7 +9,21 @@ import assert from 'node:assert/strict';
 import { openDatabase } from '../src/db.js';
 import { generateKey, hashKey, overLimit, publicKey, statusOf } from '../src/keys.js';
 import { exportRows, keyUsage, record, startOfHour, summary, totals, windowStart } from '../src/usage.js';
-import { readAccount, saveAccount, saveAllowance } from '../src/store.js';
+import {
+  SESSION_COOKIE,
+  clearAccount,
+  clearSessionCookie,
+  createSession,
+  destroySession,
+  hashToken,
+  listAccounts,
+  readAccount,
+  saveAccount,
+  saveAllowance,
+  sessionAccount,
+  sessionCookie,
+  tokenFromCookie,
+} from '../src/store.js';
 import { authenticate, keyFromRequest } from '../src/middleware/auth.js';
 import {
   effortOf,
@@ -59,15 +73,63 @@ async function checkAsync(name, fn) {
   }
 }
 
+/**
+ * Create an account plus a session for it and return the request headers that
+ * authenticate as that user. The dashboard authenticates with a cookie, so every
+ * HTTP check below needs one — exactly like a browser.
+ */
+function sessionFor(database, username, options = {}) {
+  const apiKey = options.apiKey ?? `key-${username}`;
+  saveAccount(database, { apiKey, username, isPro: options.isPro === true });
+  const session = createSession(database, username);
+  return {
+    username,
+    apiKey,
+    token: session.token,
+    cookie: `${SESSION_COOKIE}=${session.token}`,
+    headers: { cookie: `${SESSION_COOKIE}=${session.token}` },
+  };
+}
+
+/**
+ * JSON request helper carrying one user's session cookie.
+ *
+ * A plain object `body` is serialized; a string is sent as-is. That matters:
+ * `fetch` stringifies a plain object to "[object Object]", which the server would
+ * reject as an invalid body without saying so clearly.
+ */
+function asUser(base, session) {
+  return async (path, init = {}) => {
+    const hasBody = init.body !== undefined;
+    const body = hasBody && typeof init.body !== 'string' ? JSON.stringify(init.body) : init.body;
+    const headers = {
+      ...(hasBody ? { 'content-type': 'application/json' } : {}),
+      ...session.headers,
+      ...(init.headers ?? {}),
+    };
+    const response = await fetch(`${base}${path}`, { ...init, body, headers });
+    const text = await response.text();
+    let parsed;
+    try {
+      parsed = text === '' ? null : JSON.parse(text);
+    } catch {
+      parsed = text;
+    }
+    return { status: response.status, body: parsed, headers: response.headers };
+  };
+}
+
 /* ------------------------------------------------------------------- schema */
 
 const db = openDatabase(':memory:');
 
 check('schema creates the expected tables', () => {
   const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name);
-  for (const table of ['meta', 'account', 'api_keys', 'usage', 'settings']) {
+  for (const table of ['meta', 'accounts', 'sessions', 'api_keys', 'usage', 'settings', 'auth_events']) {
     assert.ok(names.includes(table), `missing table ${table}`);
   }
+  // The pre-multi-user table must be gone, not merely unused.
+  assert.ok(!names.includes('account'), 'the single-row account table must be dropped');
 });
 
 /* --------------------------------------------------------------------- keys */
@@ -166,17 +228,86 @@ check('daily series has one bucket per day', () => {
 
 /* ------------------------------------------------------------------ account */
 
-check('account round-trips through the database', () => {
-  assert.equal(readAccount(db), undefined);
+check('accounts round-trip per username and never merge', () => {
+  assert.equal(readAccount(db, 'nobody'), undefined);
   saveAccount(db, { apiKey: 'secret-key', username: 'tester', isPro: true });
-  const account = readAccount(db);
+  const account = readAccount(db, 'tester');
   assert.equal(account.apiKey, 'secret-key');
   assert.equal(account.username, 'tester');
   assert.equal(account.isPro, true);
   assert.equal(account.allowance, null);
 
-  saveAllowance(db, { balance: '49.5', granted: '50', refreshAt: '2026-10-26T15:07:00Z' });
-  assert.equal(readAccount(db).allowance.balance, '49.5');
+  saveAllowance(db, 'tester', { balance: '49.5', granted: '50', refreshAt: '2026-10-26T15:07:00Z' });
+  assert.equal(readAccount(db, 'tester').allowance.balance, '49.5');
+
+  // A second DeepAI user is a second row: the first one is untouched.
+  const second = saveAccount(db, { apiKey: 'other-key', username: 'other', isPro: false });
+  assert.equal(second.created, true);
+  assert.equal(readAccount(db, 'tester').apiKey, 'secret-key');
+  assert.equal(readAccount(db, 'other').apiKey, 'other-key');
+  assert.deepEqual(listAccounts(db).map((row) => row.username).sort(), ['other', 'tester']);
+
+  // Signing in again replaces that user's key without adding a row.
+  const again = saveAccount(db, { apiKey: 'rotated-key', username: 'tester', isPro: false });
+  assert.equal(again.created, false);
+  assert.equal(readAccount(db, 'tester').apiKey, 'rotated-key');
+  assert.equal(listAccounts(db).length, 2);
+  // ...and the cached allowance survives the key rotation.
+  assert.equal(readAccount(db, 'tester').allowance.balance, '49.5');
+
+  // Removal takes the account and its keys, and leaves other users alone.
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+              VALUES ('ktester', 'mine', 'sk-x', 'h-x', ?, 'unlimited', '[]', 'tester')`).run(Date.now());
+  clearAccount(db, 'tester');
+  assert.equal(readAccount(db, 'tester'), undefined);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM api_keys WHERE owner_username = 'tester'").get().n, 0);
+  assert.notEqual(readAccount(db, 'other'), undefined);
+});
+
+check('sessions resolve to one account and expire', () => {
+  const session = createSession(db, 'other');
+  const found = sessionAccount(db, session.token);
+  assert.equal(found.username, 'other');
+  assert.equal(found.sessionId, session.id);
+  // Only the hash is stored.
+  const row = db.prepare('SELECT * FROM sessions WHERE id = ?').get(session.id);
+  assert.equal(row.token_hash, hashToken(session.token));
+  assert.ok(!JSON.stringify(row).includes(session.token), 'the plaintext token must not be stored');
+
+  // An unknown token resolves to nothing rather than throwing.
+  assert.equal(sessionAccount(db, 'not-a-token'), undefined);
+  assert.equal(sessionAccount(db, undefined), undefined);
+
+  // Destroying it makes the token useless.
+  assert.equal(destroySession(db, session.token), true);
+  assert.equal(sessionAccount(db, session.token), undefined);
+  assert.equal(destroySession(db, session.token), false);
+
+  // An expired session is refused and cleaned up.
+  const short = createSession(db, 'other', { ttlMs: -1 });
+  assert.equal(sessionAccount(db, short.token), undefined);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE id = ?').get(short.id).n, 0);
+});
+
+check('the session cookie parses and clears', () => {
+  const expiresAt = Date.now() + 60_000;
+  const cookie = sessionCookie('abc123', expiresAt);
+  assert.match(cookie, /^deepai_gateway_session=abc123; /);
+  assert.match(cookie, /HttpOnly/);
+  assert.match(cookie, /SameSite=Lax/);
+  assert.match(cookie, /Path=\//);
+  assert.ok(!/Secure/.test(cookie), 'Secure must be opt-in: localhost is plain HTTP');
+
+  // The attribute parser ignores other cookies and matches by exact name.
+  assert.equal(tokenFromCookie('a=1; deepai_gateway_session=abc123; b=2'), 'abc123');
+  assert.equal(tokenFromCookie('deepai_gateway_session='), undefined);
+  assert.equal(tokenFromCookie('other=abc123'), undefined);
+  assert.equal(tokenFromCookie(undefined), undefined);
+
+  // A trailing attribute must not be mistaken for part of the value.
+  assert.equal(tokenFromCookie(cookie), 'abc123');
+  assert.match(clearSessionCookie(), /^deepai_gateway_session=; /);
+  assert.match(clearSessionCookie(), /1970/);
 });
 
 /* ------------------------------------------------------------------- auth */
@@ -406,23 +537,27 @@ check('rate labels distinguish unmetered from billed', () => {
 
 /* ------------------------------------------------------------------- server */
 
-await checkAsync('app mounts; /healthz works and /v1/models requires a key', async () => {
+await checkAsync('app mounts; /healthz is minimal and /v1/models requires a key', async () => {
   const { createApp } = await import('../server.js');
+  const session = sessionFor(db, 'http-user');
   const app = createApp(db, { log: () => {}, logRequests: false });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
 
-  // A key for this check, unrestricted.
+  // A key for this check, unrestricted, owned by the session's account.
   const key = generateKey();
-  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models)
-              VALUES ('khttp', 'http', ?, ?, ?, 'unlimited', '[]')`).run(key.prefix, key.hash, Date.now());
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+              VALUES ('khttp', 'http', ?, ?, ?, 'unlimited', '[]', 'http-user')`)
+    .run(key.prefix, key.hash, Date.now());
 
   try {
+    // /healthz is a liveness probe: unauthenticated, and it must not disclose
+    // who is signed in, how many accounts exist, or their names.
     const health = await fetch(`${base}/healthz`).then((res) => res.json());
+    assert.deepEqual(Object.keys(health).sort(), ['ok']);
     assert.equal(health.ok, true);
-    assert.equal(health.signedIn, true);
 
     // Without a key the catalog is refused.
     const anon = await fetch(`${base}/v1/models`);
@@ -490,9 +625,12 @@ await checkAsync('/v1/models only advertises the models a restricted key may use
     }).then((res) => res.json());
     assert.equal(none.data.length, 0);
 
-    // The catalogue is still complete for the dashboard's own view.
-    const dashboard = await fetch(`${base}/api/models`).then((res) => res.json());
-    assert.ok(dashboard.models.length >= 13);
+    // The dashboard's own view is complete, but requires a session because the
+    // usage figures beside the catalog are per account.
+    assert.equal((await fetch(`${base}/api/models`)).status, 401);
+    const session = sessionFor(fresh, 'catalog-viewer');
+    const dashboard = await asUser(base, session)('/api/models');
+    assert.ok(dashboard.body.models.length >= 13);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -525,9 +663,18 @@ await checkAsync('/ serves the dashboard and /login is browser-navigable', async
     assert.equal(payload.ok, true);
     assert.match(payload.url, /^https:\/\/api\.deepai\.org\/deepai_code\/desktop_auth\//);
 
-    // A second call reuses the pending flow rather than starting another.
-    const again = await fetch(`${base}/login?json=1`).then((res) => res.json());
-    assert.equal(again.url, payload.url);
+    // The response that starts a login also hands this browser its login cookie.
+    // Sending it back identifies the same browser, which reuses its attempt
+    // instead of starting another.
+    const loginCookie = String(login.headers.get('set-cookie') ?? '').split(';')[0];
+    assert.match(loginCookie, /deepai_gateway_login=/);
+    const again = await fetch(`${base}/login?json=1`, { headers: { cookie: loginCookie } })
+      .then((res) => res.json());
+    assert.equal(again.url, payload.url, 'the same browser reuses its own attempt');
+
+    // A different browser gets its own attempt, not the first one's.
+    const other = await fetch(`${base}/login?json=1`).then((res) => res.json());
+    assert.notEqual(other.url, payload.url, 'a second browser must not hijack the first attempt');
 
     // Cancel it so the callback server does not outlive this check.
     await fetch(`${base}/api/cancel-login`, { method: 'POST' });
@@ -539,47 +686,44 @@ await checkAsync('/ serves the dashboard and /login is browser-navigable', async
 await checkAsync('the gateway refuses a sixth API key', async () => {
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
-  const { saveAccount } = await import('../src/store.js');
-  saveAccount(fresh, { apiKey: 'k', username: 'quota-user', isPro: false });
+  const session = sessionFor(fresh, 'quota-user');
   const app = createApp(fresh, { log: () => {}, logRequests: false });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
+  const call = asUser(base, session);
 
   try {
     const created = [];
     for (let index = 0; index < 5; index += 1) {
-      const response = await fetch(`${base}/api/keys`, {
+      const response = await call('/api/keys', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name: `key ${index}`, limitWindow: 'unlimited', modelsRestricted: false }),
+        body: { name: `key ${index}`, limitWindow: 'unlimited', modelsRestricted: false },
       });
       assert.equal(response.status, 201, `key ${index} should be created`);
-      created.push((await response.json()).key);
+      created.push(response.body.key);
     }
     assert.equal(created.length, 5);
 
-    const sixth = await fetch(`${base}/api/keys`, {
+    const sixth = await call('/api/keys', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'key 6', limitWindow: 'unlimited', modelsRestricted: false }),
+      body: { name: 'key 6', limitWindow: 'unlimited', modelsRestricted: false },
     });
     assert.equal(sixth.status, 409);
-    assert.equal((await sixth.json()).code, 'key_limit_reached');
+    assert.equal(sixth.body.code, 'key_limit_reached');
 
     // The quota is reported so the UI can disable the button.
-    const listed = await fetch(`${base}/api/keys`).then((res) => res.json());
-    assert.equal(listed.quota.used, 5);
-    assert.equal(listed.quota.max, 5);
-    assert.equal(listed.quota.atLimit, true);
+    const listed = await call('/api/keys');
+    assert.equal(listed.body.quota.used, 5);
+    assert.equal(listed.body.quota.max, 5);
+    assert.equal(listed.body.quota.atLimit, true);
 
     // Deleting one frees a slot.
-    await fetch(`${base}/api/keys/${created[0].id}`, { method: 'DELETE' });
-    const after = await fetch(`${base}/api/keys`, {
+    await call(`/api/keys/${created[0].id}`, { method: 'DELETE' });
+    const after = await call('/api/keys', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'replacement', limitWindow: 'unlimited', modelsRestricted: false }),
+      body: { name: 'replacement', limitWindow: 'unlimited', modelsRestricted: false },
     });
     assert.equal(after.status, 201);
   } finally {
@@ -590,20 +734,20 @@ await checkAsync('the gateway refuses a sixth API key', async () => {
 await checkAsync('a key records its DeepAI owner and unrestricted keys allow everything', async () => {
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
-  saveAccount(fresh, { apiKey: 'owner-key', username: 'owner-user', isPro: false });
+  const session = sessionFor(fresh, 'owner-user', { apiKey: 'owner-key' });
   const app = createApp(fresh, { log: () => {}, logRequests: false });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
+  const call = asUser(base, session);
 
   try {
-    const response = await fetch(`${base}/api/keys`, {
+    const response = await call('/api/keys', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'owned', limitWindow: 'unlimited', modelsRestricted: false }),
+      body: { name: 'owned', limitWindow: 'unlimited', modelsRestricted: false },
     });
-    const { key } = await response.json();
+    const key = response.body.key;
     assert.equal(key.owner, 'owner-user');
     assert.equal(key.modelsRestricted, false);
 
@@ -611,21 +755,26 @@ await checkAsync('a key records its DeepAI owner and unrestricted keys allow eve
     assert.equal(row.owner_username, 'owner-user');
     assert.equal(row.owner_key_hash, hashKey('owner-key'));
 
-    // Signing out clears the account and closes the per-user views; the key
-    // itself stays stored so the history remains attributable.
-    await fetch(`${base}/api/logout`, { method: 'POST' });
-    const account = await fetch(`${base}/api/account`).then((res) => res.json());
-    assert.equal(account.signedIn, false);
-    assert.equal((await fetch(`${base}/api/keys`)).status, 401, 'keys are per account');
+    // Logging out ends this browser's session but leaves the account and its key
+    // stored, so another signed-in browser keeps working.
+    const logout = await call('/api/logout', { method: 'POST' });
+    assert.equal(logout.status, 200);
+    assert.match(String(logout.headers.get('set-cookie')), /deepai_gateway_session=;/);
+    const account = await call('/api/account');
+    assert.equal(account.body.signedIn, false, 'the cookie no longer resolves to an account');
+    assert.equal((await call('/api/keys')).status, 401, 'keys are per account');
+    assert.notEqual(readAccount(fresh, 'owner-user'), undefined, 'the account row survives a logout');
+    assert.equal(destroySession(fresh, session.token), false, 'the session was already destroyed');
 
-    saveAccount(fresh, { apiKey: 'owner-key', username: 'owner-user', isPro: false });
-    const still = await fetch(`${base}/api/keys`).then((res) => res.json());
-    assert.equal(still.keys.length, 1);
-    assert.equal(still.keys[0].owner, 'owner-user');
+    // Signing in again from a browser restores the same keys.
+    const again = sessionFor(fresh, 'owner-user', { apiKey: 'owner-key' });
+    const still = await asUser(base, again)('/api/keys');
+    assert.equal(still.body.keys.length, 1);
+    assert.equal(still.body.keys[0].owner, 'owner-user');
 
     // Sign-out is recorded in the audit trail.
-    const events = await fetch(`${base}/api/account/events`).then((res) => res.json());
-    assert.ok(events.events.some((event) => event.event === 'logout'));
+    const events = await asUser(base, again)('/api/account/events');
+    assert.ok(events.body.events.some((event) => event.event === 'logout'));
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -634,32 +783,31 @@ await checkAsync('a key records its DeepAI owner and unrestricted keys allow eve
 await checkAsync('unlimited keys ignore token and request limits', async () => {
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
-  saveAccount(fresh, { apiKey: 'k', username: 'u', isPro: false });
+  const session = sessionFor(fresh, 'limits-user');
   const app = createApp(fresh, { log: () => {}, logRequests: false });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
+  const call = asUser(base, session);
 
   try {
-    const created = await fetch(`${base}/api/keys`, {
+    const created = await call('/api/keys', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
       // Limits are supplied but the window is unlimited, so they must be dropped.
-      body: JSON.stringify({ name: 'unlimited', limitWindow: 'unlimited', limitTokens: 5, limitRequests: 1 }),
-    }).then((res) => res.json());
-    assert.equal(created.key.limitTokens, null);
-    assert.equal(created.key.limitRequests, null);
-    assert.equal(created.key.limitWindow, 'unlimited');
+      body: { name: 'unlimited', limitWindow: 'unlimited', limitTokens: 5, limitRequests: 1 },
+    });
+    assert.equal(created.body.key.limitTokens, null);
+    assert.equal(created.body.key.limitRequests, null);
+    assert.equal(created.body.key.limitWindow, 'unlimited');
 
     // A monthly window keeps the supplied limits.
-    const monthly = await fetch(`${base}/api/keys`, {
+    const monthly = await call('/api/keys', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'monthly', limitWindow: 'month', limitTokens: 1000, limitRequests: 10 }),
-    }).then((res) => res.json());
-    assert.equal(monthly.key.limitTokens, 1000);
-    assert.equal(monthly.key.limitRequests, 10);
+      body: { name: 'monthly', limitWindow: 'month', limitTokens: 1000, limitRequests: 10 },
+    });
+    assert.equal(monthly.body.key.limitTokens, 1000);
+    assert.equal(monthly.body.key.limitRequests, 10);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -673,9 +821,11 @@ await checkAsync('a signed-out gateway refuses completions with 503', async () =
   await new Promise((resolve) => server.once('listening', resolve));
   const { port } = server.address();
 
+  // A key whose owning DeepAI account is not signed in. Its owner is named so
+  // the error can say whose account is missing.
   const key = generateKey();
-  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models)
-                 VALUES ('kx', 'temp', ?, ?, ?, 'month', '[]')`).run(key.prefix, key.hash, Date.now());
+  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+                 VALUES ('kx', 'temp', ?, ?, ?, 'month', '[]', 'gone-user')`).run(key.prefix, key.hash, Date.now());
 
   try {
     const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
@@ -684,7 +834,22 @@ await checkAsync('a signed-out gateway refuses completions with 503', async () =
       body: JSON.stringify({ model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'hi' }] }),
     });
     assert.equal(response.status, 503);
-    assert.equal((await response.json()).error.code, 'deepai_signed_out');
+    const failure = await response.json();
+    assert.equal(failure.error.code, 'deepai_signed_out');
+    // The message names the account so the operator knows where to log in.
+    assert.match(failure.error.message, /gone-user/);
+
+    // An ownerless key cannot resolve an account at all, and says so.
+    const orphan = generateKey();
+    fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+                   VALUES ('ko', 'orphan', ?, ?, ?, 'month', '[]', '')`).run(orphan.prefix, orphan.hash, Date.now());
+    const orphaned = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${orphan.plaintext}` },
+      body: JSON.stringify({ model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(orphaned.status, 503);
+    assert.match((await orphaned.json()).error.message, /no DeepAI account/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -758,25 +923,25 @@ check('windowStart understands the hour window', () => {
 await checkAsync('a per-hour key is accepted and enforced', async () => {
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
-  saveAccount(fresh, { apiKey: 'k', username: 'u', isPro: false });
+  const session = sessionFor(fresh, 'hour-user');
   const app = createApp(fresh, { log: () => {}, logRequests: false });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
+  const call = asUser(base, session);
 
   try {
-    const created = await fetch(`${base}/api/keys`, {
+    const created = await call('/api/keys', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'hourly', limitWindow: 'hour', limitRequests: 1 }),
-    }).then((res) => res.json());
-    assert.equal(created.key.limitWindow, 'hour');
-    assert.equal(created.key.limitRequests, 1);
+      body: { name: 'hourly', limitWindow: 'hour', limitRequests: 1 },
+    });
+    assert.equal(created.body.key.limitWindow, 'hour');
+    assert.equal(created.body.key.limitRequests, 1);
 
     // The window is reported by the list endpoint too.
-    const listed = await fetch(`${base}/api/keys`).then((res) => res.json());
-    assert.ok(listed.windows.includes('hour'));
+    const listed = await call('/api/keys');
+    assert.ok(listed.body.windows.includes('hour'));
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -972,26 +1137,26 @@ await checkAsync('the summary endpoint reports savings and pricing status', asyn
   resetPricing();
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
-  const { saveAccount } = await import('../src/store.js');
-  saveAccount(fresh, { apiKey: 'k', username: 'savings-user', isPro: false });
+  const session = sessionFor(fresh, 'savings-user');
   const app = createApp(fresh, { log: () => {}, logRequests: false });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
+  const call = asUser(base, session);
 
   try {
     record(fresh, {
       keyId: null, keyName: 'k', owner: 'savings-user', model: 'glm-5.3-flash',
       inputTokens: 1_000_000, outputTokens: 1_000_000, totalTokens: 2_000_000, ok: true,
     });
-    const payload = await fetch(`${base}/api/usage/summary`).then((res) => res.json());
+    const payload = (await call('/api/usage/summary')).body;
     assert.ok(payload.savings, 'summary must carry savings');
     assert.ok(Math.abs(payload.savings.month.usd - 0.65) < 1e-9, `got ${payload.savings.month.usd}`);
     assert.ok(payload.savings.pricing, 'summary must report where prices came from');
     assert.equal(typeof payload.savings.pricing.source, 'string');
 
-    const pricing = await fetch(`${base}/api/pricing`).then((res) => res.json());
+    const pricing = (await call('/api/pricing')).body;
     assert.equal(pricing.prices.length, FALLBACK_MODELS.length);
     assert.equal(typeof pricing.status.capturedAt, 'string');
   } finally {
@@ -1005,13 +1170,13 @@ await checkAsync('the summary endpoint reports savings and pricing status', asyn
 await checkAsync('usage export produces CSV and JSON with every row', async () => {
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
-  const { saveAccount } = await import('../src/store.js');
-  saveAccount(fresh, { apiKey: 'k', username: 'export-user', isPro: false });
+  const session = sessionFor(fresh, 'export-user');
   const app = createApp(fresh, { log: () => {}, logRequests: false });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
+  const call = asUser(base, session);
 
   try {
     // A real key row, because usage.key_id is a foreign key.
@@ -1029,17 +1194,17 @@ await checkAsync('usage export produces CSV and JSON with every row', async () =
       totalTokens: 0, ok: false, status: 500, errorCode: 'PROVIDER_ERROR',
     });
 
-    const csv = await fetch(`${base}/api/usage/export?format=csv`);
-    assert.match(csv.headers.get('content-type'), /text\/csv/);
-    assert.match(csv.headers.get('content-disposition'), /attachment; filename="deepai-usage-\d{4}-\d{2}-\d{2}\.csv"/);
-    const csvText = await csv.text();
+    const csv = await call('/api/usage/export?format=csv');
+    assert.match(String(csv.headers.get('content-type')), /text\/csv/);
+    assert.match(String(csv.headers.get('content-disposition')), /attachment; filename="deepai-usage-\d{4}-\d{2}-\d{2}\.csv"/);
+    const csvText = csv.body;
     const lines = csvText.trim().split('\n');
     assert.equal(lines.length, 3, 'header plus two rows');
     assert.match(lines[0], /^id,created_at,key_id,key_name,owner_username,model/);
     // A name containing a comma must be quoted, not split into two fields.
     assert.ok(csvText.includes('"comma, name"'), 'CSV must quote fields with commas');
 
-    const json = await fetch(`${base}/api/usage/export?format=json`).then((res) => res.json());
+    const json = (await call('/api/usage/export?format=json')).body;
     assert.equal(json.rows.length, 2);
     assert.equal(json.rows[0].model, 'glm-5.3-flash');
     assert.equal(json.rows[1].ok, false);
@@ -1047,7 +1212,7 @@ await checkAsync('usage export produces CSV and JSON with every row', async () =
     assert.match(json.rows[0].createdAtIso, /^\d{4}-\d{2}-\d{2}T/);
 
     // The export honours the range filter.
-    const today = await fetch(`${base}/api/usage/export?format=json&range=today`).then((res) => res.json());
+    const today = (await call('/api/usage/export?format=json&range=today')).body;
     assert.equal(today.rows.length, 2);
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -1089,80 +1254,217 @@ check('the stylesheet makes the hidden attribute win', async () => {
   assert.match(css, /:root:not\(\[data-theme\]\)/, 'a stored theme must stay authoritative');
 });
 
-/* ------------------------------------------------------------ per-user scope */
+/* --------------------------------------------------------------- migration */
 
-await checkAsync('keys and usage are scoped to the signed-in account', async () => {
+check('a pre-multi-user database migrates without losing anything', async () => {
+  // Build a v3 database exactly as the previous release left it.
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { DatabaseSync } = await import('node:sqlite');
+  const file = join(mkdtempSync(join(tmpdir(), 'deepai-migrate-')), 'old.db');
+
+  const old = new DatabaseSync(file);
+  old.exec(`
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO meta VALUES ('schema_version', '3');
+    CREATE TABLE account (
+      id INTEGER PRIMARY KEY CHECK (id = 1), api_key TEXT NOT NULL,
+      username TEXT NOT NULL DEFAULT '', is_pro INTEGER NOT NULL DEFAULT 0,
+      balance TEXT, granted TEXT, refresh_at TEXT, checked_at INTEGER, created_at INTEGER NOT NULL);
+    CREATE TABLE api_keys (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, prefix TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL, last_used_at INTEGER, revoked_at INTEGER, expires_at INTEGER,
+      limit_tokens INTEGER, limit_requests INTEGER, limit_window TEXT NOT NULL DEFAULT 'month',
+      allowed_models TEXT NOT NULL DEFAULT '[]',
+      owner_username TEXT NOT NULL DEFAULT '', owner_key_hash TEXT, models_restricted INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, key_id TEXT, key_name TEXT NOT NULL DEFAULT '',
+      model TEXT NOT NULL, requested_model TEXT NOT NULL DEFAULT '', endpoint TEXT NOT NULL DEFAULT 'chat.completions',
+      status INTEGER NOT NULL DEFAULT 200, ok INTEGER NOT NULL DEFAULT 1, input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_write_tokens INTEGER NOT NULL DEFAULT 0, reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+      total_tokens INTEGER NOT NULL DEFAULT 0, duration_ms INTEGER NOT NULL DEFAULT 0, first_token_ms INTEGER,
+      streamed INTEGER NOT NULL DEFAULT 0, error_code TEXT, created_at INTEGER NOT NULL,
+      owner_username TEXT NOT NULL DEFAULT '');
+    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE auth_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event TEXT NOT NULL,
+      username TEXT NOT NULL DEFAULT '', detail TEXT, created_at INTEGER NOT NULL);
+  `);
+  old.prepare('INSERT INTO account VALUES (1, ?, ?, 1, ?, ?, ?, ?, ?)')
+    .run('legacy-deepai-key', 'legacy-user', '12.5', '50', '2026-11-01T00:00:00Z', Date.now(), 1700000000000);
+  old.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+               VALUES ('k-old', 'legacy key', 'sk-legacy', 'hash-old', ?, 'unlimited', '[]', 'legacy-user')`).run(Date.now());
+  // One usage row owned by the user, one whose owner was never recorded.
+  old.prepare(`INSERT INTO usage (key_id, key_name, model, owner_username, total_tokens, created_at)
+               VALUES ('k-old', 'legacy key', 'glm-5.3-flash', 'legacy-user', 111, ?)`).run(Date.now());
+  old.prepare(`INSERT INTO usage (key_id, key_name, model, owner_username, total_tokens, created_at)
+               VALUES (NULL, 'ghost', 'kimi-k3', '', 22, ?)`).run(Date.now());
+  old.close();
+
+  // Opening it must migrate in place.
+  const upgraded = openDatabase(file);
+  assert.equal(upgraded.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, '4');
+  assert.equal(upgraded.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name='account'").get().n, 0, 'the old table is gone');
+
+  // The account survived, key and balance included.
+  const account = readAccount(upgraded, 'legacy-user');
+  assert.equal(account.apiKey, 'legacy-deepai-key');
+  assert.equal(account.isPro, true);
+  assert.equal(account.allowance.balance, '12.5');
+  assert.equal(account.allowance.granted, '50');
+
+  // The key survived and is still owned.
+  assert.equal(upgraded.prepare('SELECT owner_username FROM api_keys WHERE id = ?').get('k-old').owner_username, 'legacy-user');
+  // All usage rows survived, including the unattributable one.
+  assert.equal(upgraded.prepare('SELECT COUNT(*) AS n FROM usage').get().n, 2);
+  assert.equal(upgraded.prepare('SELECT total_tokens FROM usage WHERE key_name = ?').get('ghost').total_tokens, 22);
+
+  // A new session can be created against the migrated account.
+  const session = createSession(upgraded, 'legacy-user');
+  assert.equal(sessionAccount(upgraded, session.token).username, 'legacy-user');
+  upgraded.close();
+});
+
+/* ---------------------------------------------------------- multi-user scope */
+
+await checkAsync('two accounts on one gateway never see each other', async () => {
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
-  const { saveAccount } = await import('../src/store.js');
+  const alice = sessionFor(fresh, 'alice', { apiKey: 'alice-deepai-key' });
+  const bob = sessionFor(fresh, 'bob', { apiKey: 'bob-deepai-key' });
   const app = createApp(fresh, { log: () => {}, logRequests: false });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
-  const json = (path, init) => fetch(`${base}${path}`, init).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }));
-  const createKey = (name) => json('/api/keys', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name, limitWindow: 'unlimited', modelsRestricted: false }),
+  const asAlice = asUser(base, alice);
+  const asBob = asUser(base, bob);
+  const createKey = (call, name) => call('/api/keys', {
+    method: 'POST',
+    body: { name, limitWindow: 'unlimited', modelsRestricted: false },
   });
 
   try {
-    saveAccount(fresh, { apiKey: 'alice-key', username: 'alice', isPro: false });
-    const alice1 = await createKey('alice-1');
-    const alice2 = await createKey('alice-2');
-    assert.equal(alice1.body.key.owner, 'alice');
+    // Both accounts exist at the same time — this is what multi-user means.
+    assert.equal(listAccounts(fresh).length, 2);
 
-    saveAccount(fresh, { apiKey: 'bob-key', username: 'bob', isPro: false });
-    const bob1 = await createKey('bob-1');
+    const alice1 = await createKey(asAlice, 'alice-1');
+    const alice2 = await createKey(asAlice, 'alice-2');
+    const bob1 = await createKey(asBob, 'bob-1');
+    assert.equal(alice1.body.key.owner, 'alice');
     assert.equal(bob1.body.key.owner, 'bob');
 
-    // Each account sees only its own keys.
-    const bobKeys = await json('/api/keys');
+    // Each session sees only its own keys and its own quota.
+    const aliceKeys = await asAlice('/api/keys');
+    assert.deepEqual(aliceKeys.body.keys.map((k) => k.name).sort(), ['alice-1', 'alice-2']);
+    assert.equal(aliceKeys.body.quota.used, 2);
+
+    const bobKeys = await asBob('/api/keys');
     assert.deepEqual(bobKeys.body.keys.map((k) => k.name), ['bob-1']);
     assert.equal(bobKeys.body.quota.used, 1, 'the quota is per account');
 
     // Another account's key is invisible, not merely forbidden.
-    assert.equal((await json(`/api/usage/keys/${alice1.body.key.id}`)).status, 404);
-    assert.equal((await json(`/api/keys/${alice1.body.key.id}`, { method: 'DELETE' })).status, 404);
-    assert.equal((await json(`/api/keys/${alice1.body.key.id}/revoke`, { method: 'POST' })).status, 404);
+    assert.equal((await asBob(`/api/usage/keys/${alice1.body.key.id}`)).status, 404);
+    assert.equal((await asBob(`/api/keys/${alice1.body.key.id}`, { method: 'DELETE' })).status, 404);
+    assert.equal((await asBob(`/api/keys/${alice1.body.key.id}/revoke`, { method: 'POST' })).status, 404);
+    assert.equal((await asBob(`/api/keys/${alice1.body.key.id}`, { method: 'PATCH', body: { name: 'hijacked' } })).status, 404);
 
-    // Alice's keys are untouched.
-    saveAccount(fresh, { apiKey: 'alice-key', username: 'alice', isPro: false });
-    const aliceKeys = await json('/api/keys');
-    assert.deepEqual(aliceKeys.body.keys.map((k) => k.name).sort(), ['alice-1', 'alice-2']);
-    assert.ok(aliceKeys.body.keys.every((k) => k.revokedAt === null));
+    // Alice's keys are untouched by any of that.
+    const aliceAfter = await asAlice('/api/keys');
+    assert.deepEqual(aliceAfter.body.keys.map((k) => k.name).sort(), ['alice-1', 'alice-2']);
+    assert.ok(aliceAfter.body.keys.every((k) => k.revokedAt === null));
 
-    // Usage is scoped too: record one row per owner.
+    // Usage is scoped too: one row per owner.
     record(fresh, { keyId: alice1.body.key.id, keyName: 'alice-1', owner: 'alice', model: 'glm-5.3-flash', inputTokens: 100, outputTokens: 10, totalTokens: 110, ok: true });
     record(fresh, { keyId: bob1.body.key.id, keyName: 'bob-1', owner: 'bob', model: 'kimi-k3', inputTokens: 7, outputTokens: 3, totalTokens: 10, ok: true });
 
-    const aliceSummary = (await json('/api/usage/summary')).body;
+    const aliceSummary = (await asAlice('/api/usage/summary')).body;
     assert.equal(aliceSummary.all.requests, 1);
     assert.equal(aliceSummary.all.totalTokens, 110);
     assert.deepEqual(aliceSummary.modelsAll.map((m) => m.model), ['glm-5.3-flash']);
 
-    const aliceRecent = (await json('/api/usage/recent')).body.requests;
+    const aliceRecent = (await asAlice('/api/usage/recent')).body.requests;
     assert.equal(aliceRecent.length, 1);
     assert.equal(aliceRecent[0].model, 'glm-5.3-flash');
 
-    saveAccount(fresh, { apiKey: 'bob-key', username: 'bob', isPro: false });
-    const bobSummary = (await json('/api/usage/summary')).body;
+    const bobSummary = (await asBob('/api/usage/summary')).body;
     assert.equal(bobSummary.all.totalTokens, 10);
     assert.deepEqual(bobSummary.modelsAll.map((m) => m.model), ['kimi-k3']);
 
     // The export is scoped as well.
-    const bobExport = await fetch(`${base}/api/usage/export?format=json`).then((res) => res.json());
-    assert.equal(bobExport.rows.length, 1);
-    assert.equal(bobExport.rows[0].owner, 'bob');
-    assert.equal(bobExport.rows[0].model, 'kimi-k3');
+    const bobExport = await asBob('/api/usage/export?format=json');
+    assert.equal(bobExport.body.rows.length, 1);
+    assert.equal(bobExport.body.rows[0].owner, 'bob');
+    assert.equal(bobExport.body.rows[0].model, 'kimi-k3');
+
+    // The audit trail is per account.
+    const aliceEvents = (await asAlice('/api/account/events')).body.events;
+    assert.ok(aliceEvents.every((event) => event.username === 'alice'), 'no other account may appear');
+
+    // Default model is a per-account setting.
+    await asAlice('/api/settings/default-model', { method: 'POST', body: { model: 'kimi-k3' } });
+    assert.equal((await asAlice('/api/account')).body.defaultModel, 'kimi-k3');
+    assert.equal((await asBob('/api/account')).body.defaultModel, 'glm-5.3-flash', "Bob's default is unchanged");
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
 });
 
-await checkAsync('an ownerless key cannot be created and nothing leaks when logged out', async () => {
+await checkAsync('a key is billed to the account that created it', async () => {
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
+  const alice = sessionFor(fresh, 'alice', { apiKey: 'alice-deepai-key' });
+  sessionFor(fresh, 'bob', { apiKey: 'bob-deepai-key' });
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const created = await asUser(base, alice)('/api/keys', {
+      method: 'POST',
+      body: { name: 'alice-key', limitWindow: 'unlimited', modelsRestricted: false },
+    });
+    // The key remembers which DeepAI key paid for it at creation time.
+    const row = fresh.prepare('SELECT owner_username, owner_key_hash FROM api_keys WHERE id = ?')
+      .get(created.body.key.id);
+    assert.equal(row.owner_username, 'alice');
+    assert.equal(row.owner_key_hash, hashKey('alice-deepai-key'));
+
+    // Rotating Alice's DeepAI key must not repoint her existing gateway key: the
+    // hash is a record of what it was created with, not a live binding.
+    saveAccount(fresh, { apiKey: 'alice-rotated-key', username: 'alice', isPro: false });
+    const unchanged = fresh.prepare('SELECT owner_key_hash FROM api_keys WHERE id = ?').get(created.body.key.id);
+    assert.equal(unchanged.owner_key_hash, hashKey('alice-deepai-key'));
+    // And the account now holds the new key, so calls use it.
+    assert.equal(readAccount(fresh, 'alice').apiKey, 'alice-rotated-key');
+
+    // Removing Alice's account takes only her keys.
+    const bob = sessionFor(fresh, 'bob', { apiKey: 'bob-deepai-key' });
+    await asUser(base, bob)('/api/keys', {
+      method: 'POST',
+      body: { name: 'bob-key', limitWindow: 'unlimited', modelsRestricted: false },
+    });
+    assert.equal(fresh.prepare('SELECT COUNT(*) AS n FROM api_keys').get().n, 2);
+
+    const removed = await asUser(base, alice)('/api/account/forget', { method: 'POST' });
+    assert.equal(removed.status, 200);
+    assert.equal(readAccount(fresh, 'alice'), undefined);
+    const remaining = fresh.prepare('SELECT name, owner_username FROM api_keys').all();
+    assert.deepEqual(remaining.map((k) => k.name), ['bob-key']);
+    assert.notEqual(readAccount(fresh, 'bob'), undefined, "Bob's account is untouched");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('an ownerless key cannot be created and nothing leaks without a session', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  // An account exists, but this browser has no session for it.
+  saveAccount(fresh, { apiKey: 'k', username: 'someone', isPro: false });
   const app = createApp(fresh, { log: () => {}, logRequests: false });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
@@ -1171,21 +1473,31 @@ await checkAsync('an ownerless key cannot be created and nothing leaks when logg
   const json = (path, init) => fetch(`${base}${path}`, init).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }));
 
   try {
-    // Regression: creating a key while logged out used to succeed with
-    // owner '', which then vanished from the per-user dashboard.
+    // Regression: creating a key while logged out used to succeed with owner '',
+    // which then vanished from the per-user dashboard.
     const created = await json('/api/keys', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: 'orphan', limitWindow: 'unlimited', modelsRestricted: false }),
     });
     assert.equal(created.status, 401);
     assert.equal(created.body.code, 'not_logged_in');
     assert.equal(fresh.prepare('SELECT COUNT(*) AS n FROM api_keys').get().n, 0, 'no key may be stored');
 
-    // Every per-user read refuses rather than returning another account's data.
+    // Regression: an existing account used to be enough. Every per-account read
+    // must refuse without a session, even though someone is signed in globally.
+    assert.equal((await json('/api/account')).body.signedIn, false, 'no cookie means no account');
     for (const path of ['/api/keys', '/api/usage/summary', '/api/usage/recent', '/api/usage/models', '/api/account/events']) {
       assert.equal((await json(path)).status, 401, `${path} must require a session`);
     }
     assert.equal((await fetch(`${base}/api/usage/export`)).status, 401);
+    assert.equal((await fetch(`${base}/api/account/forget`, { method: 'POST' })).status, 401);
+
+    // A forged cookie is not a session.
+    const forged = await fetch(`${base}/api/keys`, { headers: { cookie: `${SESSION_COOKIE}=deadbeef` } });
+    assert.equal(forged.status, 401);
+    // ...and the bad cookie is cleared so the browser stops sending it.
+    assert.match(String(forged.headers.get('set-cookie')), /deepai_gateway_session=;/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -1226,6 +1538,49 @@ await checkAsync('the auth screen styles buttons by class and never closes a tab
   const error = callbackPage('Failed', 'Try again', 'error');
   assert.match(error, /var returnTo = null/);
   assert.ok(!error.includes('Taking you back'), 'no auto-return notice on failure');
+});
+
+/* ------------------------------------------------------------------- brand */
+
+await checkAsync('the project presents one consistent identity', async () => {
+  const { readFileSync, readdirSync, statSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const root = new URL('..', import.meta.url).pathname;
+
+  // Walk the shipped sources and fail on any leftover of the old name.
+  const walk = (dir, out = []) => {
+    for (const entry of readdirSync(dir)) {
+      if (entry === 'node_modules' || entry === 'data' || entry === '.git') continue;
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) walk(full, out);
+      else out.push(full);
+    }
+    return out;
+  };
+  const needle = ['deepai', 'to', 'api'].join('-');
+  const stale = [];
+  for (const file of walk(root)) {
+    if (!/\.(js|json|md|css|html|yml|yaml)$/.test(file)) continue;
+    if (file.endsWith('package-lock.json')) continue;
+    // This test file assembles the needle at runtime, so it never matches itself.
+    const text = readFileSync(file, 'utf8');
+    if (text.includes(needle)) stale.push(file.slice(root.length));
+  }
+  assert.deepEqual(stale, [], 'no shipped file may mention the old project name');
+
+  // The identity strings the outside world sees.
+  const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  assert.equal(manifest.name, 'deepai-gateway');
+  const lock = JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8'));
+  assert.equal(lock.name, 'deepai-gateway');
+  assert.equal(lock.packages[''].name, 'deepai-gateway');
+
+  const { USER_AGENT } = await import('../src/deepai/wire.js');
+  assert.equal(USER_AGENT, 'deepai-gateway/1.0');
+
+  const dashboard = readFileSync(join(root, 'public/index.html'), 'utf8');
+  assert.match(dashboard, /<title>DeepAI Gateway<\/title>/);
+  assert.match(dashboard, /DeepAI Gateway/);
 });
 
 /* -------------------------------------------------------------------- done */

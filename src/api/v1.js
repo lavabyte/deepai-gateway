@@ -8,7 +8,7 @@
  * `/v1/models` requires a key and only advertises the models that key may use,
  * so a client can never see — or try — a model its key is not entitled to.
  *
- * @module deepai-to-api/api/v1
+ * @module deepai-gateway/api/v1
  */
 
 import { randomUUID } from 'node:crypto';
@@ -106,12 +106,19 @@ async function handleChatCompletion(db, req, res) {
     return apiError(res, 400, '"messages" must be a non-empty array.', 'invalid_messages');
   }
 
-  const account = readAccount(db);
+  // The key's owner decides which DeepAI account pays for this call. Before
+  // multi-user support this read one global row, so every key billed the same
+  // account — and a key whose owner had signed out would silently run on
+  // whoever happened to be signed in.
+  const owner = req.gatewayKey.owner_username ?? '';
+  const account = readAccount(db, owner);
   if (account === undefined) {
     return apiError(
       res,
       503,
-      'The gateway is not signed in to DeepAI. Open the dashboard and sign in.',
+      owner === ''
+        ? 'This API key has no DeepAI account. Recreate it from a signed-in dashboard.'
+        : `The DeepAI account "${owner}" that owns this API key is not signed in. Log in again from the dashboard.`,
       'deepai_signed_out',
       'api_error',
     );
