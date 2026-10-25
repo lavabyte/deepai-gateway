@@ -116,7 +116,11 @@ export function adminRouter(db, runtime) {
         ? 'glm-5.3-flash'
         : getSetting(db, account.username, 'default_model', 'glm-5.3-flash'),
       balanceLow: isBalanceLow(account?.allowance),
-      keyQuota: keyQuota(db, account?.username),
+      // An anonymous caller gets an empty quota, never the deployment-wide
+      // count: `keyQuota(db, undefined)` would total every account's keys.
+      keyQuota: account === undefined
+        ? { used: 0, max: MAX_KEYS, remaining: MAX_KEYS, atLimit: false }
+        : keyQuota(db, account.username),
     });
   });
 

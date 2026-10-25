@@ -21,6 +21,7 @@ import { v1Router } from './src/api/v1.js';
 import { prefetchCatalog } from './src/deepai/catalog.js';
 import { attachSession } from './src/middleware/session.js';
 import { listAccounts, clearSessionCookie, destroySession, recordAuthEvent } from './src/store.js';
+import { totalKeyCount } from './src/keys.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -237,7 +238,7 @@ export function start(overrides = {}) {
   // makes a persistence problem obvious in the log instead of surfacing as a
   // mysteriously empty dashboard.
   const accounts = listAccounts(db);
-  const keyCount = Number(db.prepare('SELECT COUNT(*) AS n FROM api_keys').get().n);
+  const keyCount = totalKeyCount(db);
   console.log(`[deepai-gateway] database: ${settings.database}`);
   console.log(`[deepai-gateway] stored API keys: ${keyCount}`);
   console.log(

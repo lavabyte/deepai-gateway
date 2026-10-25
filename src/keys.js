@@ -139,18 +139,36 @@ export function hashesEqual(a, b) {
  * another account from creating its own. Revoking deletes a key, so the count is
  * just the number of rows the account holds.
  *
+ * `owner` is required and must be non-empty. An earlier version accepted
+ * `undefined` as "count everything", which is a footgun: a caller that passed a
+ * missing username by accident got a deployment-wide total, and an anonymous
+ * request leaked how many keys existed across every account. Callers that want
+ * the global view must ask for it explicitly with {@link totalKeyCount}.
+ *
  * @param {import('node:sqlite').DatabaseSync} db
- * @param {string} [owner] - omit for a global count (operator view only).
+ * @param {string} owner - the account whose quota to report; must not be empty.
  * @returns {{used: number, max: number, remaining: number, atLimit: boolean}}
  */
-export function keyQuota(db, owner = undefined) {
-  const scoped = typeof owner === 'string' && owner !== '';
+export function keyQuota(db, owner) {
+  if (typeof owner !== 'string' || owner === '') {
+    throw new TypeError('keyQuota needs an owner; use totalKeyCount() for a global count');
+  }
   const used = Number(
-    db.prepare(
-      scoped
-        ? 'SELECT COUNT(*) AS n FROM api_keys WHERE owner_username = ?'
-        : 'SELECT COUNT(*) AS n FROM api_keys',
-    ).get(...(scoped ? [owner] : [])).n,
+    db.prepare('SELECT COUNT(*) AS n FROM api_keys WHERE owner_username = ?').get(owner).n,
   );
   return { used, max: MAX_KEYS, remaining: Math.max(0, MAX_KEYS - used), atLimit: used >= MAX_KEYS };
+}
+
+/**
+ * Total keys across every account.
+ *
+ * Deliberately separate from {@link keyQuota} so a deployment-wide count can
+ * never be produced by omitting an argument. Operator diagnostics only; it is
+ * not exposed on any unauthenticated endpoint.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @returns {number}
+ */
+export function totalKeyCount(db) {
+  return Number(db.prepare('SELECT COUNT(*) AS n FROM api_keys').get().n);
 }

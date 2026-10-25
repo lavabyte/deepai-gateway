@@ -7,7 +7,15 @@
 
 import assert from 'node:assert/strict';
 import { openDatabase } from '../src/db.js';
-import { generateKey, hashKey, overLimit, publicKey, statusOf } from '../src/keys.js';
+import {
+  generateKey,
+  hashKey,
+  keyQuota,
+  overLimit,
+  publicKey,
+  statusOf,
+  totalKeyCount,
+} from '../src/keys.js';
 import { exportRows, keyUsage, record, startOfHour, summary, totals, windowStart } from '../src/usage.js';
 import {
   SESSION_COOKIE,
@@ -1481,6 +1489,63 @@ check('the backup script writes a complete copy, not a WAL-stale one', async () 
   assert.equal(copy.prepare('SELECT name FROM api_keys').get().name, 'backup-probe');
   copy.close();
   assert.ok(statSync(join(out, files[0])).size > 0);
+});
+
+check('keyQuota refuses to count globally by accident', () => {
+  const fresh = openDatabase(':memory:');
+  saveAccount(fresh, { apiKey: 'k', username: 'alice', isPro: false });
+  saveAccount(fresh, { apiKey: 'k2', username: 'bob', isPro: false });
+  for (const [id, owner] of [['ka', 'alice'], ['kb', 'bob']]) {
+    fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+                   VALUES (?, ?, 'sk-x', ?, 1, 'unlimited', '[]', ?)`)
+      .run(id, id, `h-${id}`, owner);
+  }
+
+  // Regression: an omitted owner used to mean "count every account's keys", so
+  // a caller that lost a username silently read a deployment-wide total — and an
+  // anonymous request leaked how many keys existed across the whole install.
+  for (const missing of [undefined, '', null, 0, false]) {
+    assert.throws(() => keyQuota(fresh, missing), /needs an owner/, `owner ${String(missing)} must be refused`);
+  }
+
+  assert.equal(keyQuota(fresh, 'alice').used, 1);
+  assert.equal(keyQuota(fresh, 'bob').used, 1);
+  assert.equal(keyQuota(fresh, 'nobody').used, 0);
+  // A global count needs an explicit, differently named call.
+  assert.equal(totalKeyCount(fresh), 2);
+});
+
+await checkAsync('/api/account never reports another account\'s key count', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const session = sessionFor(fresh, 'account-user');
+  // Two more accounts with keys this session must never count.
+  for (const [name, id] of [['other-1', 'ko1'], ['other-2', 'ko2']]) {
+    saveAccount(fresh, { apiKey: `k-${name}`, username: name, isPro: false });
+    fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+                   VALUES (?, ?, 'sk-o', ?, 1, 'unlimited', '[]', ?)`).run(id, id, `h-${id}`, name);
+  }
+  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+                 VALUES ('kmine', 'mine', 'sk-m', 'h-m', 1, 'unlimited', '[]', 'account-user')`).run();
+
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    // Regression: the anonymous shape used to be built with `keyQuota(db, undefined)`,
+    // which counted every key in the database.
+    const anon = await (await fetch(`${base}/api/account`)).json();
+    assert.equal(anon.signedIn, false);
+    assert.equal(anon.keyQuota.used, 0, 'an anonymous caller must not see a key count');
+
+    const mine = await asUser(base, session)('/api/account');
+    assert.equal(mine.body.keyQuota.used, 1, 'a session sees only its own keys');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 /* ---------------------------------------------------------- multi-user scope */
