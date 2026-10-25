@@ -130,7 +130,7 @@ async function handleChatCompletion(db, req, res) {
   const usesResponses = model?.api === 'openai-responses';
 
   const streamed = body.stream === true;
-  const wantsTools = Array.isArray(body.tools) && body.tools.length > 0;
+  // The session id groups a caller's requests for upstream prompt-cache affinity.
   const sessionId = req.get('x-session-id') ?? req.gatewayKey.id;
 
   const params = {

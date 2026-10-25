@@ -248,24 +248,6 @@ export function responsesUsage(raw) {
   };
 }
 
-/** Map a DeepAI thinking level onto its wire value. */
-export function reasoningEffortOf(value) {
-  switch (value) {
-    case 'none':
-    case 'off':
-      return 'none';
-    case 'low':
-      return 'low';
-    case 'medium':
-      return 'medium';
-    case 'high':
-    case 'max':
-      return 'high';
-    default:
-      return undefined;
-  }
-}
-
 /** Map an OpenAI finish reason onto the shared vocabulary. */
 export function mapFinishReason(raw) {
   switch (raw) {

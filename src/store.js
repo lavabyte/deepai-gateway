@@ -13,7 +13,7 @@
  * @module deepai-gateway/store
  */
 
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 /** Session cookie name. */
 export const SESSION_COOKIE = 'deepai_gateway_session';
@@ -101,11 +101,6 @@ function allowanceOf(row) {
 export function readAccount(db, username) {
   if (typeof username !== 'string' || username === '') return undefined;
   return accountOf(db.prepare('SELECT * FROM accounts WHERE username = ?').get(username));
-}
-
-/** Read one account by its numeric id. */
-export function readAccountById(db, id) {
-  return accountOf(db.prepare('SELECT * FROM accounts WHERE id = ?').get(id));
 }
 
 /** Every signed-in DeepAI account. */
@@ -248,11 +243,6 @@ export function destroySession(db, token) {
   return Number(result.changes) > 0;
 }
 
-/** End every session for one account. */
-export function destroyAccountSessions(db, username) {
-  db.prepare('DELETE FROM sessions WHERE account_id IN (SELECT id FROM accounts WHERE username = ?)').run(username);
-}
-
 /** Remove expired sessions. Cheap enough to run opportunistically. */
 export function pruneSessions(db, now = Date.now()) {
   db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now);
@@ -349,12 +339,6 @@ export function setSetting(db, username, key, value) {
 /** Namespace a setting key by owner, so accounts cannot overwrite each other. */
 function settingKey(username, key) {
   return `${typeof username === 'string' && username !== '' ? username : '_'}:${key}`;
-}
-
-/** Constant-time comparison of two hex digests. */
-export function hashesEqual(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
-  return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
 }
 
 /** Short stable digest used to derive a username when DeepAI gives none. */

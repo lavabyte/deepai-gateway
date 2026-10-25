@@ -11,7 +11,7 @@
  * @module deepai-gateway/keys
  */
 
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 /** Prefix every gateway key carries. */
 export const KEY_PREFIX = 'sk-';
@@ -121,15 +121,6 @@ export function overLimit(row, usage) {
     return true;
   }
   return false;
-}
-
-/**
- * Constant-time comparison of two hex hashes of equal length. Returns false on
- * any length mismatch rather than throwing.
- */
-export function hashesEqual(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
-  return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
 }
 
 /**
