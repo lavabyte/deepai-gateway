@@ -263,10 +263,13 @@ export async function* streamResponsesCompletion(params) {
     if (type === 'response.function_call_arguments.done') {
       const key = keyOf(event);
       const call = calls.get(key) ?? { id: '', name: '', args: '', started: false };
+      // `arguments` here is the complete argument string, and the deltas that
+      // preceded it are a prefix of it — so only the unseen suffix is forwarded,
+      // which is what keeps a client's accumulated JSON valid.
       const full = typeof event.arguments === 'string' ? event.arguments : '';
-      const missing = full.startsWith(call.args) ? full.slice(call.args.length) : '';
-      if (!full.startsWith(call.args)) call.args = full;
-      else call.args = full;
+      const extendsPrefix = full.startsWith(call.args);
+      const missing = extendsPrefix ? full.slice(call.args.length) : '';
+      call.args = full;
       calls.set(key, call);
       if (!call.started && call.id !== '') yield startCall(call);
       else if (call.started && missing !== '') yield { type: 'tool-arguments', id: call.id, delta: missing };
@@ -279,9 +282,13 @@ export async function* streamResponsesCompletion(params) {
       const call = calls.get(key) ?? { id: '', name: '', args: '', started: false };
       call.id = typeof item.call_id === 'string' && item.call_id !== '' ? item.call_id : call.id;
       call.name = typeof item.name === 'string' && item.name !== '' ? item.name : call.name;
+      // Same contract as the `arguments.done` branch above: the item carries the
+      // complete argument string, so only its unseen suffix is forwarded. An item
+      // that contradicts the deltas replaces them rather than appending garbage.
       const full = typeof item.arguments === 'string' ? item.arguments : '';
-      const missing = full.startsWith(call.args) ? full.slice(call.args.length) : '';
-      call.args = full.startsWith(call.args) ? full : full;
+      const extendsPrefix = full.startsWith(call.args);
+      const missing = extendsPrefix ? full.slice(call.args.length) : '';
+      call.args = full;
       calls.set(key, call);
       if (!call.started && call.id !== '') yield startCall(call);
       else if (call.started && missing !== '') yield { type: 'tool-arguments', id: call.id, delta: missing };
