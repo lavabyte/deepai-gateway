@@ -13,7 +13,7 @@
 
 import express from 'express';
 import { randomUUID } from 'node:crypto';
-import { checkKey, startLogin } from '../deepai/account.js';
+import { checkKey, loopbackCallbackUrl, startLogin } from '../deepai/account.js';
 import { loadCatalog, publicModel } from '../deepai/catalog.js';
 import {
   MAX_KEYS,
@@ -69,6 +69,30 @@ import {
 const MAX_PENDING_LOGINS = 64;
 
 /**
+ * What each out-of-band completion failure means to the visitor.
+ *
+ * Mapped from the reason the sign-in flow reports, so the message a visitor sees
+ * cannot drift from the check that produced it.
+ */
+const COMPLETION_FAILURES = {
+  unparsable: [400, 'That is not the address DeepAI sent you to. Copy the whole address from the browser bar, including `code` and `state`.'],
+  invalid_state: [400, 'That sign-in does not belong to this browser, or the address was truncated. Copy it again from the browser bar.'],
+  exchange_failed: [400, 'DeepAI rejected that code. Start the login again.'],
+  expired: [410, 'This sign-in expired. Start a new one.'],
+  too_many_attempts: [429, 'Too many attempts for this sign-in. Start a new one.'],
+  busy: [409, 'This sign-in is already being completed.'],
+};
+
+/**
+ * The completion failures that end the attempt.
+ *
+ * The sign-in flow has already closed itself for each of these, so the entry is
+ * dropped too. `invalid_state`, `unparsable` and `busy` are deliberately absent:
+ * a mistyped paste must not cost the visitor their login.
+ */
+const TERMINAL_COMPLETION_REASONS = new Set(['expired', 'too_many_attempts', 'exchange_failed']);
+
+/**
  * Mount the dashboard API.
  *
  * @param {import('node:sqlite').DatabaseSync} db
@@ -110,6 +134,11 @@ export function adminRouter(db, runtime) {
   router.get('/account', (req, res) => {
     const account = req.account;
     const view = publicAccount(account);
+    // The address DeepAI will send *this* browser to, derived from the request
+    // the dashboard is being served on. It is fixed to loopback by DeepAI, so the
+    // dashboard shows it and offers to accept it back; computing it here means the
+    // port is right even on a fresh page load, with no client-side bookkeeping.
+    const callbackPort = localPort(req, runtime.publicUrl);
     res.json({
       signedIn: account !== undefined,
       username: view?.username ?? '',
@@ -119,6 +148,9 @@ export function adminRouter(db, runtime) {
       sessionExpiresAt: view?.sessionExpiresAt ?? null,
       // Only this browser's own pending attempt, never another visitor's.
       pendingLogin: runtime.pendingLogins?.get(browserOf(req)) !== undefined,
+      origin: publicOrigin(req, runtime.publicUrl),
+      callbackUrl: loopbackCallbackUrl(callbackPort),
+      callbackPort,
       defaultModel: account === undefined
         ? 'glm-5.3-flash'
         : getSetting(db, account.username, 'default_model', 'glm-5.3-flash'),
@@ -139,15 +171,88 @@ export function adminRouter(db, runtime) {
   /**
    * Begin the DeepAI login. Returns the URL so the SPA can navigate to it; the
    * browser-navigable `GET /login` uses the same flow.
+   *
+   * `callbackUrl` is the address DeepAI will send the browser to. It is the only
+   * one it will ever use — loopback, with the port read off this request — so the
+   * dashboard shows it and offers to accept it back when a browser elsewhere
+   * cannot open it. `listenPort` is the socket this gateway is actually serving
+   * on, which is what a port forward has to target.
    */
   router.post('/login', async (req, res) => {
     try {
-      const url = await beginLogin(db, runtime, localPort(req), { browser: browserOf(req) });
-      res.json({ ok: true, url });
+      const port = localPort(req, runtime.publicUrl);
+      const url = await beginLogin(db, runtime, port, { browser: browserOf(req) });
+      res.json({
+        ok: true,
+        url,
+        origin: publicOrigin(req, runtime.publicUrl),
+        callbackPort: port,
+        callbackUrl: loopbackCallbackUrl(port),
+        listenPort: req.socket?.localPort ?? 0,
+        path: '/auth-callback',
+      });
     } catch (error) {
       runtime.log?.(`login could not start: ${error?.message ?? error}`);
       res.status(500).json({ ok: false, error: String(error?.message ?? error) });
     }
+  });
+
+  /**
+   * Finish a login out of band.
+   *
+   * DeepAI hard-codes the callback to `127.0.0.1`, so a browser on any other
+   * machine lands on a dead address. That address stays in its address bar, and
+   * the one-shot code in it is still redeemable, so the dashboard lets the visitor
+   * paste it back here.
+   *
+   * Only the browser that started the attempt can finish it: the pending flow is
+   * looked up by this request's login cookie, and the pasted `state` must match
+   * the one generated for it. That is why the flow, not the request, owns the
+   * validation — and why a bare code with no `state` is refused.
+   */
+  router.post('/login/complete', async (req, res) => {
+    const browser = browserOf(req);
+    const flow = runtime.pendingLogins?.get(browser)?.flow;
+    if (flow === undefined) {
+      return res.status(410).json({
+        ok: false,
+        error: 'No sign-in is waiting. Start one, then paste the address DeepAI sent you to.',
+        code: 'no_pending_login',
+      });
+    }
+
+    const body = req.body ?? {};
+    const pasted = typeof body.url === 'string' ? body.url.trim() : '';
+    const paired = typeof body.code === 'string' && typeof body.state === 'string'
+      && body.code !== '' && body.state !== '';
+    if (pasted === '' && !paired) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Paste the whole address your browser was sent to.',
+        code: 'missing_address',
+      });
+    }
+
+    const result = pasted !== ''
+      ? await flow.complete(pasted)
+      : await flow.submit(body.code, body.state);
+
+    if (result.ok) {
+      runtime.pendingLogins.delete(browser);
+      const completed = completeLogin(db, runtime, result.account, {
+        secure: runtime.trustProxy === true,
+      });
+      res.setHeader('set-cookie', completed.cookie);
+      return res.json({ ok: true, username: completed.username });
+    }
+
+    // Only a reason that ends the attempt forgets it. A rejected address or a
+    // truncated paste must leave the flow usable, because the whole point is that
+    // the visitor tries again with the address copied properly.
+    if (TERMINAL_COMPLETION_REASONS.has(result.reason)) runtime.pendingLogins.delete(browser);
+    const [status, message] = COMPLETION_FAILURES[result.reason]
+      ?? [400, 'That sign-in could not be completed. Start a new login.'];
+    return res.status(status).json({ ok: false, error: message, code: result.reason });
   });
 
   router.post('/cancel-login', (req, res) => {
@@ -480,20 +585,77 @@ export function adminRouter(db, runtime) {
 }
 
 /**
- * The port this request arrived on. Read from the socket rather than config so
- * the DeepAI callback always points at the listener that is actually serving.
+ * The origin the **browser** reached the gateway on.
+ *
+ * Read from the request rather than from a constant, because the address that
+ * matters is the one in the visitor's address bar. An explicit `PUBLIC_URL` wins
+ * when a deployment knows its own name; behind a proxy the forwarded pair is
+ * next; otherwise the `Host` header is the browser's own answer, which is exactly
+ * right.
+ *
+ * Forwarding headers are only honoured when Express' `trust proxy` is on, since
+ * otherwise any client could name its own origin.
  *
  * @param {import('express').Request} req
- * @returns {number}
+ * @param {string} [configured] - an explicit `PUBLIC_URL`.
+ * @returns {string} `scheme://host[:port]`, or `''` when nothing usable exists.
  */
-export function localPort(req) {
+export function publicOrigin(req, configured) {
+  if (typeof configured === 'string' && configured.trim() !== '') {
+    try {
+      return new URL(configured.trim()).origin;
+    } catch {
+      /* malformed PUBLIC_URL: fall back to the request itself */
+    }
+  }
+
+  const forwarded = req.app?.get?.('trust proxy') === true;
+  const host = (firstForwarded(forwarded ? req.get('x-forwarded-host') : undefined)
+    ?? req.get('host')
+    ?? '').trim();
+  if (host === '') return '';
+
+  const proto = (firstForwarded(forwarded ? req.get('x-forwarded-proto') : undefined)
+    ?? (req.secure === true ? 'https' : 'http')).trim().toLowerCase();
+  if (proto !== 'http' && proto !== 'https') return '';
+
+  return `${proto}://${host}`;
+}
+
+/** The first hop of a comma-separated forwarding header. */
+function firstForwarded(value) {
+  if (typeof value !== 'string') return undefined;
+  const first = value.split(',')[0].trim();
+  return first === '' ? undefined : first;
+}
+
+/**
+ * The port the browser used to reach the gateway.
+ *
+ * DeepAI takes the callback port as a plain integer, so it has to end up as a
+ * number DeepAI accepts. The request's own address is preferred over the
+ * listening socket: behind a proxy the socket port is the internal one, which is
+ * not an address the browser could ever be sent back to.
+ *
+ * This is only the port DeepAI will put in `http://127.0.0.1:<port>/auth-callback`.
+ * No port makes a public host reachable, so the value is used for the port-forward
+ * hint and for telling the visitor what to expect.
+ *
+ * @param {import('express').Request} req
+ * @param {string} [configured] - an explicit `PUBLIC_URL`.
+ * @returns {number} the port, or `0` when none could be determined.
+ */
+export function localPort(req, configured) {
+  const origin = publicOrigin(req, configured);
+  if (origin !== '') {
+    const explicit = /:(\d+)$/.exec(new URL(origin).host);
+    if (explicit !== null) return Number(explicit[1]);
+    // No explicit port, so the browser used the scheme's default.
+    return origin.startsWith('https://') ? 443 : 80;
+  }
+
   const fromSocket = req.socket?.localPort;
   if (Number.isInteger(fromSocket) && fromSocket > 0) return fromSocket;
-  const host = req.get('host');
-  if (typeof host === 'string') {
-    const match = /:(\d+)$/.exec(host);
-    if (match !== null) return Number(match[1]);
-  }
   return 0;
 }
 

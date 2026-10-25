@@ -119,9 +119,64 @@ function needsLogin() {
       <div class="card__title">Not logged in</div>
       <div class="card__sub mt-2">Log in with DeepAI to see your API keys and usage. The button is in the top bar.</div>
       <div class="row mt-3"><button class="btn btn--primary" id="login-inline">Log in with DeepAI</button></div>
+      <details class="mt-3" id="login-manual" ${state.account?.pendingLogin === true ? 'open' : ''}>
+        <summary class="card__sub login-manual__summary">Browser did not come back? Finish manually</summary>
+        <div class="field mt-3">
+          <label class="field__label" for="callback-url">Address your browser was sent to</label>
+          <textarea class="textarea" id="callback-url" rows="3" spellcheck="false" autocomplete="off"
+            placeholder="${esc(state.callbackUrl || 'http://127.0.0.1:8787/auth-callback?code=…&state=…')}"></textarea>
+          <div class="field__hint">
+            ${state.account?.pendingLogin === true
+              ? `Your browser was sent to <code>${esc(state.callbackUrl)}</code>. If that page
+                 did not open, copy the whole address out of the browser's address bar and paste it here —
+                 the code in it is still valid.`
+              : `DeepAI sends the browser to a <code>127.0.0.1</code> address it chooses itself, which only
+                 opens on the machine running the gateway. Start a login above and paste the address it
+                 sends you to here.`}
+          </div>
+        </div>
+        <div class="row mt-3"><button class="btn" id="login-complete">Finish sign-in</button></div>
+      </details>
     </div>`;
   $('login-inline')?.addEventListener('click', () => void startLoginFlow());
+  $('login-complete')?.addEventListener('click', () => void completeLoginManually());
   return true;
+}
+
+/**
+ * Finish a login the loopback redirect could not deliver.
+ *
+ * DeepAI fixes the callback to `127.0.0.1`, so a browser on any other machine
+ * lands on a dead address. That address is still in its bar and its one-shot code
+ * is still redeemable, so this hands the whole address back to the gateway, which
+ * validates the `state` against this browser's pending attempt before exchanging.
+ */
+async function completeLoginManually() {
+  const field = $('callback-url');
+  const url = field?.value?.trim() ?? '';
+  if (url === '') {
+    toast('Paste the address your browser was sent to.', 'error');
+    return;
+  }
+
+  const button = $('login-complete');
+  const label = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Checking…';
+  }
+  try {
+    await api('/login/complete', { method: 'POST', body: { url } });
+    toast('Logged in to DeepAI');
+    await loadAccount();
+    await render();
+  } catch (error) {
+    toast(String(error.message ?? error), 'error');
+    if (button) {
+      button.disabled = false;
+      button.textContent = label ?? 'Finish sign-in';
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ toasts */
@@ -262,6 +317,10 @@ $('auth-button').addEventListener('click', () => { void onAuthButton(); });
 const state = {
   account: undefined,
   models: [],
+  // The loopback address DeepAI will send this browser to. DeepAI chooses the
+  // host itself, so it is only ever shown to the visitor as the address to copy
+  // when their browser cannot open it.
+  callbackUrl: '',
 };
 
 /**
@@ -316,6 +375,10 @@ async function onAuthButton() {
  * the browser to the dashboard when it is done, so there is no second window to
  * chase and nothing to close. `/login?json=1` is asked first so a failure is
  * reported here instead of replacing the page with an error.
+ *
+ * DeepAI then redirects to a loopback address of its own choosing, which this
+ * browser can only open when it runs on the gateway's host. The address is kept
+ * so the dashboard can show it as the thing to copy when that fails.
  */
 async function startLoginFlow() {
   const buttons = [$('auth-button'), $('signin'), $('login-inline')].filter(Boolean);
@@ -326,6 +389,7 @@ async function startLoginFlow() {
   }
   try {
     const payload = await api('/login', { method: 'POST' });
+    state.callbackUrl = payload.callbackUrl ?? '';
     // Full navigation, not window.open: the callback lands back on the panel.
     window.location.assign(payload.url);
     return;
@@ -354,6 +418,10 @@ async function logOutEverywhere() {
 async function loadAccount() {
   try {
     state.account = await api('/account');
+    // The server derives this from the request the dashboard was served on, so it
+    // stays correct across a reload — which is exactly when the visitor comes back
+    // from the callback address their browser could not open.
+    state.callbackUrl = state.account.callbackUrl ?? '';
   } catch (error) {
     state.account = { signedIn: false, username: '', error: String(error.message ?? error) };
   }

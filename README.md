@@ -39,6 +39,7 @@ export OPENAI_API_KEY=sk-…
 | `HOST` | `127.0.0.1` | Listen address. Set `0.0.0.0` to expose on the network |
 | `DATABASE` | `./data/deepai.db` | SQLite file |
 | `TRUST_PROXY` | unset | Set `1` behind a TLS proxy: trust `X-Forwarded-*` and set `Secure` cookies |
+| `PUBLIC_URL` | unset | The address visitors use, e.g. `https://gw.example.com`. Reported to the dashboard as your origin; it cannot change where DeepAI sends the browser (see [Signing in from another machine](#signing-in-from-another-machine)) |
 | `LOG_REQUESTS` | `1` | Set `0` to silence per-request logging |
 | `PRICING_CACHE` | `./data/pricing.json` | Where the fetched price table is cached |
 
@@ -88,6 +89,50 @@ completed by the browser that started it.
 Set `TRUST_PROXY=1` when terminating TLS in front of the gateway. It enables
 `X-Forwarded-*` handling and marks the session cookie `Secure`. Leave it off for
 plain-HTTP localhost, where a `Secure` cookie would never be sent.
+
+## Signing in from another machine
+
+**DeepAI chooses the sign-in callback host, and it always chooses `127.0.0.1`.**
+The gateway cannot override it:
+
+- The sign-in request carries only `state` and `port`. DeepAI parses `port` as a
+  plain TCP port — a full URL, a `host:port` pair, `0`, `-1` or an empty value are
+  all rejected with `400 Invalid desktop sign-in request` — so there is no
+  parameter through which a public origin could be passed.
+- The sign-in page builds nothing client-side either: it polls
+  `/daily-time-sync/user/` and reloads *itself*, leaving the redirect to DeepAI's
+  server, which only ever learns a port number.
+
+This is the RFC 8252 native-app pattern: the official DeepAI Code desktop app
+binds `127.0.0.1:0`, hands over the ephemeral port, and expects the browser to
+come back to loopback. `PUBLIC_URL` therefore changes what the dashboard *reports*
+as your origin, never where DeepAI sends the browser.
+
+The browser must run where `http://127.0.0.1:<port>` resolves to this gateway.
+There are two ways to arrange that:
+
+**1. Paste the address back (works from anywhere).** After signing in at DeepAI,
+the browser is sent to a `127.0.0.1` address and shows a connection error. The
+code in that address is still redeemable, so open the dashboard, expand
+**"Browser did not come back? Finish manually"**, and paste the whole address out
+of the browser's address bar. The gateway checks the `state` against the attempt
+that this browser started — only that browser can finish it, and an address
+without a matching `state` is refused — then exchanges the code exactly as the
+callback route would.
+
+The dashboard shows the exact address to expect, and the gateway logs it at boot
+when `HOST` is not loopback.
+
+**2. Forward the port.** Make the loopback address reach the gateway:
+
+```sh
+ssh -L 25912:127.0.0.1:8787 you@gateway-host
+```
+
+Then browse to `http://127.0.0.1:25912`, sign in, and the redirect resolves. The
+port on the left must be the one DeepAI was given: the port visitors use, which
+the gateway reads from the request (`PUBLIC_URL`, then `X-Forwarded-Host` when
+`TRUST_PROXY=1`, otherwise `Host`).
 
 ## Dashboard
 
@@ -293,8 +338,9 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/` | The dashboard |
-| `GET` | `/login` | Browser sign-in; redirects to DeepAI (`?json=1` returns the URL) |
-| `GET` | `/auth-callback` | Where DeepAI sends the browser back — **on the panel's own port** |
+| `GET` | `/login` | Browser sign-in; redirects to DeepAI (`?json=1` returns the URL and the callback address) |
+| `GET` | `/auth-callback` · `/callback` | Where DeepAI sends the browser back. The host is DeepAI's — always loopback — so see [Signing in from another machine](#signing-in-from-another-machine) |
+| `POST` | `/api/login/complete` | Finish that sign-in from the dashboard by pasting the address the browser was sent to |
 | `GET` | `/logout` | Sign out, then redirect to `/` |
 | `GET` | `/api/account` | This session's account, allowance, default model, key quota |
 | `GET` | `/api/account/events` | That account's auth trail (login, logout, refresh, denied) |
@@ -432,8 +478,10 @@ and no external database. The only runtime dependency is Express.
 - The model catalog is fetched from `GET /deepai_code/models` and cached for ten
   minutes; an embedded snapshot keeps the gateway usable offline.
 - Login mirrors the desktop app, except the callback is served by the panel
-  itself: DeepAI is told to call back on the port the gateway already listens
-  on, so the flow needs no second listener and no extra firewall rule.
+  itself, so the flow needs no second listener. DeepAI still chooses the callback
+  **host** — always `127.0.0.1` — so read
+  [Signing in from another machine](#signing-in-from-another-machine) before
+  exposing the panel.
 - **Login runs in the current tab**, not a popup. The panel navigates to DeepAI
   and DeepAI returns the browser to the panel, so there is no second window to
   close and no opener relationship to lose. The confirmation page hands the tab

@@ -2,30 +2,121 @@
  * DeepAI sign-in, mirroring the desktop app but served from the panel itself.
  *
  *   1. the dashboard opens `https://api.deepai.org/deepai_code/desktop_auth/`
- *      with `state` and `port` — the port the gateway already listens on;
+ *      with `state` and `port` — the only two inputs DeepAI accepts;
  *   2. DeepAI redirects the browser to
- *      `http://127.0.0.1:<panel port>/auth-callback?code=…&state=…`;
+ *      `http://127.0.0.1:<port>/auth-callback?code=…&state=…`;
  *   3. the gateway exchanges the code for an `api_key` at
  *      `POST /deepai_code/desktop_auth/exchange/`.
  *
+ * **The callback host is not ours to choose.** DeepAI implements RFC 8252 for a
+ * native client: the desktop app binds `127.0.0.1:0`, hands DeepAI the ephemeral
+ * port, and DeepAI hard-codes the loopback host when it builds the redirect.
+ * `port` is parsed as a plain TCP port — a full URL, a `host:port` pair, `0`,
+ * `-1`, an empty value and a path suffix are each rejected with
+ * `400 Invalid desktop sign-in request` — so no parameter exists through which a
+ * public origin could be passed. The redirect is not built client-side either:
+ * the sign-in page polls `/daily-time-sync/user/` and then reloads *itself*,
+ * leaving the redirect to the server, which only ever learns a port number.
+ *
+ * A browser anywhere other than the gateway's own host therefore cannot open the
+ * redirect by itself. Two supported ways to finish such a login:
+ *
+ *   - **Out-of-band completion** — {@link startLogin}'s `complete()` accepts the
+ *     address the browser was sent to (or an explicit `code` + `state`), so a
+ *     visitor can paste back the address their browser failed to open. This is
+ *     what makes a public deployment work, and it is the dashboard's advice.
+ *   - **A port forward** — `ssh -L <port>:127.0.0.1:<gateway port> …` maps the
+ *     loopback redirect back onto the gateway.
+ *
  * There is no second listener: the callback route lives on the main app, so
- * the flow shares the panel's origin, port and firewall rule.
+ * whenever the redirect does resolve it lands on the gateway itself and shares
+ * the panel's origin, port and firewall rule.
  *
  * @module deepai-gateway/deepai/account
  */
 
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { API_ORIGIN, LANE_HEADERS, laneHeaders } from './wire.js';
+
+/**
+ * Constant-time equality for two secrets.
+ *
+ * `state` is a 256-bit secret binding a code to the attempt that asked for it, so
+ * comparing it with `===` would leak its prefix through timing. Lengths are
+ * checked first because `timingSafeEqual` throws on a mismatch, and a length is
+ * not secret.
+ *
+ * @param {unknown} left
+ * @param {unknown} right
+ * @returns {boolean}
+ */
+function sameSecret(left, right) {
+  const a = Buffer.from(String(left ?? ''), 'utf8');
+  const b = Buffer.from(String(right ?? ''), 'utf8');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * The address DeepAI will send the browser to.
+ *
+ * Fixed to loopback by DeepAI, so it is not configurable — exported only so the
+ * dashboard can show the visitor which address to expect, and what to copy when
+ * it does not open.
+ *
+ * @param {number} port
+ * @returns {string}
+ */
+export function loopbackCallbackUrl(port) {
+  return `http://127.0.0.1:${Number(port) || 0}/auth-callback`;
+}
+
+/**
+ * Pull `code` and `state` out of whatever a visitor pasted.
+ *
+ * The redirect that fails to open is still in the browser's address bar, so the
+ * usual input is a whole URL. A bare code is deliberately rejected: without the
+ * `state` nothing proves the code was minted for *this* attempt, and redeeming an
+ * unbound code is precisely what the `state` parameter exists to prevent.
+ *
+ * @param {unknown} input
+ * @returns {{code: string, state: string} | undefined} `undefined` when the text
+ *   is not an address carrying both parameters.
+ */
+export function parseCallbackInput(input) {
+  if (typeof input !== 'string') return undefined;
+  // Browsers, chat clients and terminals like to hand back a quoted link.
+  const text = input.trim().replace(/^[<'"]+|[>'"]+$/g, '').trim();
+  if (text === '' || text.length > 8192) return undefined;
+
+  let params;
+  try {
+    // A base is supplied so a bare `?code=…&state=…` fragment also parses; text
+    // with no query at all simply yields no parameters below.
+    params = new URL(text, 'http://127.0.0.1').searchParams;
+  } catch {
+    return undefined;
+  }
+  const code = params.get('code') ?? '';
+  const state = params.get('state') ?? '';
+  if (code === '' || state === '') return undefined;
+  return { code, state };
+}
 
 /**
  * Begin a sign-in attempt.
  *
  * @param {object} params
- * @param {number} params.port - the port the gateway listens on.
+ * @param {number} params.port - the port that goes into the callback DeepAI
+ *   builds. It must be a plain integer: it is the only input DeepAI accepts.
  * @param {number} [params.timeoutMs] - how long the attempt stays valid.
- * @returns {{url: string, state: string, done: Promise<object>, close: () => void, settle: (result: object) => void}}
+ * @param {number} [params.maxAttempts] - how many rejected `code`/`state` pairs
+ *   the attempt tolerates before it gives up. Both entry points are
+ *   unauthenticated, so a pending attempt must not become an unlimited oracle.
+ * @returns {object} the flow: `url`, `state`, `done`, `close`, `submit`,
+ *   `complete` and `handleCallback`.
  */
-export function startLogin({ port, timeoutMs = 300_000 }) {
+export function startLogin({ port, timeoutMs = 300_000, maxAttempts = 5 }) {
   const state = randomBytes(32).toString('hex');
 
   let settleResolve;
@@ -57,11 +148,78 @@ export function startLogin({ port, timeoutMs = 300_000 }) {
   const url = new URL('/deepai_code/desktop_auth/', API_ORIGIN);
   url.search = new URLSearchParams({ state, port: String(port) }).toString();
 
+  let attemptsLeft = maxAttempts;
+
+  /**
+   * Validate one `code`/`state` pair and exchange it.
+   *
+   * Both entry points — the loopback callback route and out-of-band completion —
+   * funnel through here, so they cannot drift apart in what they accept.
+   *
+   * A rejected pair costs one attempt rather than ending the flow, so a visitor
+   * who pastes a truncated address can simply paste it again. A *failed exchange*
+   * does end it: the code is one-shot, so retrying the same one cannot succeed.
+   * So does the last rejected pair: the endpoint is unauthenticated, so it must
+   * not remain a free guessing oracle for the 256-bit state.
+   *
+   * @param {unknown} rawCode
+   * @param {unknown} rawState
+   * @returns {Promise<{ok: true, account: object} | {ok: false, reason: string}>}
+   */
+  async function submit(rawCode, rawState) {
+    if (closed) return { ok: false, reason: 'expired' };
+
+    const code = typeof rawCode === 'string' ? rawCode : '';
+    const returned = typeof rawState === 'string' ? rawState : '';
+    if (code === '' || code.length > 4096 || !sameSecret(returned, state)) {
+      attemptsLeft -= 1;
+      // The last rejected pair ends the attempt, so an unauthenticated endpoint
+      // cannot be turned into an unlimited guessing oracle. Reporting that reason
+      // here — rather than letting a later call discover a closed flow — keeps the
+      // cause attached to the request that caused it.
+      if (attemptsLeft <= 0) {
+        finish(new Error('too many DeepAI sign-in attempts'));
+        return { ok: false, reason: 'too_many_attempts' };
+      }
+      return { ok: false, reason: 'invalid_state' };
+    }
+    if (exchanging) return { ok: false, reason: 'busy' };
+    exchanging = true;
+
+    try {
+      const account = await exchangeCode(code);
+      finish(undefined, account);
+      return { ok: true, account };
+    } catch (error) {
+      finish(error);
+      return { ok: false, reason: 'exchange_failed' };
+    }
+  }
+
   return {
     url: url.href,
     state,
     done,
     close: () => finish(new Error('DeepAI sign-in cancelled')),
+    submit,
+
+    /**
+     * Finish the attempt out of band.
+     *
+     * DeepAI redirects to loopback, which a browser on another machine cannot
+     * open. That address stays in the browser's address bar, so this accepts it
+     * verbatim (or a `?code=…&state=…` fragment) and applies exactly the checks
+     * the callback route would have applied.
+     *
+     * @param {unknown} input - the pasted address.
+     * @returns {Promise<{ok: true, account: object} | {ok: false, reason: string}>}
+     */
+    async complete(input) {
+      if (closed) return { ok: false, reason: 'expired' };
+      const parsed = parseCallbackInput(input);
+      if (parsed === undefined) return { ok: false, reason: 'unparsable' };
+      return submit(parsed.code, parsed.state);
+    },
 
     /**
      * Handle the browser callback.
@@ -75,13 +233,6 @@ export function startLogin({ port, timeoutMs = 300_000 }) {
      * @returns {Promise<{status: number, html: string, finished: boolean, account?: object}>}
      */
     async handleCallback(req) {
-      if (closed) {
-        return {
-          status: 410,
-          html: callbackPage('Login expired', 'This attempt timed out. Start a new one from the dashboard.', 'error'),
-          finished: true,
-        };
-      }
       if (req.method !== 'GET') {
         return {
           status: 405,
@@ -90,40 +241,47 @@ export function startLogin({ port, timeoutMs = 300_000 }) {
         };
       }
 
-      const code = typeof req.query.code === 'string' ? req.query.code : '';
-      const returned = typeof req.query.state === 'string' ? req.query.state : '';
-      if (code === '' || code.length > 4096 || returned !== state) {
-        return {
-          status: 400,
-          html: callbackPage('Invalid callback', 'DeepAI sent an unexpected response. Start the login again from the dashboard.', 'error'),
-          finished: false,
-        };
-      }
-      if (exchanging) {
-        return {
-          status: 409,
-          html: callbackPage('Already in progress', 'A login is already waiting for the browser. Finish it, or cancel it in the dashboard.', 'error'),
-          finished: false,
-        };
-      }
-      exchanging = true;
-
-      try {
-        const account = await exchangeCode(code);
-        finish(undefined, account);
+      const result = await submit(req.query.code, req.query.state);
+      if (result.ok) {
         return {
           status: 200,
           html: callbackPage('Logged in to DeepAI', 'The gateway now has your account and can serve requests.', 'ok', { returnTo: '/' }),
           finished: true,
-          account,
+          account: result.account,
         };
-      } catch (error) {
-        finish(error);
-        return {
-          status: 400,
-          html: callbackPage('Login failed', 'The code could not be exchanged. Return to the dashboard and try again.', 'error'),
-          finished: true,
-        };
+      }
+
+      switch (result.reason) {
+        case 'expired':
+          return {
+            status: 410,
+            html: callbackPage('Login expired', 'This attempt timed out. Start a new one from the dashboard.', 'error'),
+            finished: true,
+          };
+        case 'busy':
+          return {
+            status: 409,
+            html: callbackPage('Already in progress', 'A login is already waiting for the browser. Finish it, or cancel it in the dashboard.', 'error'),
+            finished: false,
+          };
+        case 'too_many_attempts':
+          return {
+            status: 429,
+            html: callbackPage('Too many attempts', 'Start the login again from the dashboard.', 'error'),
+            finished: true,
+          };
+        case 'exchange_failed':
+          return {
+            status: 400,
+            html: callbackPage('Login failed', 'The code could not be exchanged. Return to the dashboard and try again.', 'error'),
+            finished: true,
+          };
+        default:
+          return {
+            status: 400,
+            html: callbackPage('Invalid callback', 'DeepAI sent an unexpected response. Start the login again from the dashboard.', 'error'),
+            finished: false,
+          };
       }
     },
   };

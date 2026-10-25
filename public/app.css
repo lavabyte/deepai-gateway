@@ -296,6 +296,17 @@ code, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field__label { font-size: 12px; font-weight: 500; color: var(--text-2); }
 .field__hint { font-size: 11.5px; color: var(--text-3); }
+.field__hint code {
+  font-family: var(--mono); font-size: 11px;
+  background: var(--bg); border: 1px solid var(--hairline);
+  border-radius: 4px; padding: 0 4px;
+}
+
+/* Manual sign-in completion: a disclosure so it never competes with the button
+   that works in the common case. */
+.login-manual__summary { cursor: pointer; color: var(--link); list-style-position: inside; }
+.login-manual__summary:hover { text-decoration: underline; }
+details[open] > .login-manual__summary { margin-bottom: 2px; }
 
 
 .table { width: 100%; border-collapse: collapse; font-size: 13px; }

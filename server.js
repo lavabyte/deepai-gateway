@@ -15,8 +15,15 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { openDatabase } from './src/db.js';
-import { adminRouter, beginLogin, browserOf, completeLogin, localPort } from './src/api/admin.js';
-import { callbackPage } from './src/deepai/account.js';
+import {
+  adminRouter,
+  beginLogin,
+  browserOf,
+  completeLogin,
+  localPort,
+  publicOrigin,
+} from './src/api/admin.js';
+import { callbackPage, loopbackCallbackUrl } from './src/deepai/account.js';
 import { initPricing, pricingStatus, startPricingRefresh } from './src/pricing.js';
 import { v1Router } from './src/api/v1.js';
 import { prefetchCatalog } from './src/deepai/catalog.js';
@@ -36,7 +43,31 @@ export function config(env = process.env) {
     logRequests: env.LOG_REQUESTS !== '0',
     // Trust `X-Forwarded-*` and mark cookies `Secure` when behind TLS.
     trustProxy: env.TRUST_PROXY === '1' || env.TRUST_PROXY === 'true',
+    // The address visitors use, when the deployment knows its own name. It is
+    // used to report the origin back to the dashboard; it cannot change where
+    // DeepAI sends the browser, because DeepAI fixes that to loopback.
+    publicUrl: usableOrigin(env.PUBLIC_URL) ?? '',
   };
+}
+
+/**
+ * Normalise a configured public address, or reject it.
+ *
+ * A typo in `PUBLIC_URL` would otherwise be dropped in silence, leaving the
+ * operator to wonder why the dashboard reports the wrong origin. Returning
+ * `undefined` lets the caller fall back to the request instead.
+ *
+ * @param {string|undefined} value
+ * @returns {string|undefined} the canonical origin.
+ */
+function usableOrigin(value) {
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
+  try {
+    return new URL(value.trim()).origin;
+  } catch {
+    console.warn(`[deepai-gateway] PUBLIC_URL is not a usable URL: ${JSON.stringify(value)} — ignoring it`);
+    return undefined;
+  }
 }
 
 /** Build the Express app. Exported so tests can mount it without listening. */
@@ -46,6 +77,8 @@ export function createApp(db, options = {}) {
     // take over the first visitor's attempt.
     pendingLogins: new Map(),
     log: options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`)),
+    trustProxy: options.trustProxy === true,
+    publicUrl: options.publicUrl ?? '',
   };
 
   const app = express();
@@ -94,11 +127,18 @@ export function createApp(db, options = {}) {
   });
 
   /**
-   * DeepAI redirects the browser here after sign-in. The route lives on the main
-   * app, so the whole flow stays on the panel's port — and this is the response
-   * that hands the browser its session cookie.
+   * DeepAI sends the browser here after sign-in.
+   *
+   * The host is DeepAI's choice, not ours: it always builds
+   * `http://127.0.0.1:<port>/auth-callback`, so this route can only be reached
+   * when the browser runs where the redirect can resolve — the gateway's own host,
+   * or through a port forward. A visitor anywhere else finishes the login by
+   * pasting that address into the dashboard instead, which `POST /api/login/complete`
+   * handles. `/callback` is the same handler under the shorter name.
+   *
+   * The response is also the one that hands the browser its session cookie.
    */
-  app.get('/auth-callback', async (req, res) => {
+  const handleCallback = async (req, res) => {
     // The browser coming back carries the same login cookie it started with, so
     // it can only ever complete its own attempt.
     const browser = browserOf(req);
@@ -136,17 +176,35 @@ export function createApp(db, options = {}) {
         'error',
       ));
     }
-  });
+  };
+
+  app.get('/auth-callback', handleCallback);
+  app.get('/callback', handleCallback);
 
   /**
    * Browser-navigable login: `/login` starts the flow and redirects to DeepAI, so
    * the dashboard can simply navigate to it. `?json=1` answers with the URL
    * instead of redirecting, so the SPA can report a failure in place.
+   *
+   * The JSON answer also carries the address DeepAI will send the browser back
+   * to, because that address is fixed to loopback and a browser elsewhere cannot
+   * open it unaided.
    */
   app.get('/login', async (req, res) => {
     try {
-      const url = await beginLogin(db, runtime, localPort(req), { browser: browserOf(req) });
-      if (req.query.json === '1') return res.json({ ok: true, url });
+      const port = localPort(req, runtime.publicUrl);
+      const url = await beginLogin(db, runtime, port, { browser: browserOf(req) });
+      if (req.query.json === '1') {
+        return res.json({
+          ok: true,
+          url,
+          origin: publicOrigin(req, runtime.publicUrl),
+          callbackPort: port,
+          callbackUrl: loopbackCallbackUrl(port),
+          listenPort: req.socket?.localPort ?? 0,
+          path: '/auth-callback',
+        });
+      }
       return res.redirect(302, url);
     } catch (error) {
       runtime.log(`login could not start: ${error?.message ?? error}`);
@@ -257,6 +315,11 @@ export function start(overrides = {}) {
       // The dashboard is protected by a cookie, but an operator should still
       // know the panel is reachable from the network.
       console.log('[deepai-gateway] note: HOST is not loopback — the dashboard is reachable from the network');
+      // DeepAI builds the sign-in callback host itself and always picks loopback,
+      // so a visitor's browser will not be able to open it unless it runs on this
+      // machine or forwards the port. Say so at boot rather than at first login.
+      console.log(`[deepai-gateway] note: the DeepAI sign-in callback is fixed to ${loopbackCallbackUrl(port)}`);
+      console.log('[deepai-gateway]       a browser elsewhere cannot open it; finish sign-in by pasting that address into the dashboard');
     }
   });
 

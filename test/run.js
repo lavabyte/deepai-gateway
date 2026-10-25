@@ -2022,6 +2022,337 @@ await checkAsync('the project presents one consistent identity', async () => {
   assert.match(dashboard, /DeepAI Gateway/);
 });
 
+/* ------------------------------------------- deepai sign-in callback address */
+
+/*
+ * DeepAI builds the sign-in callback host itself and always picks `127.0.0.1`;
+ * `port` is the only input it accepts, and it must be a plain integer. A browser
+ * on any other machine therefore cannot open the redirect, so the gateway keeps
+ * the address to show the visitor and accepts it back through
+ * `POST /api/login/complete`. These checks pin both halves of that.
+ */
+
+check('the sign-in callback address is DeepAI loopback, not ours to choose', async () => {
+  const { loopbackCallbackUrl } = await import('../src/deepai/account.js');
+  assert.equal(loopbackCallbackUrl(8787), 'http://127.0.0.1:8787/auth-callback');
+  // A junk port must not become a junk host in the address shown to a visitor.
+  assert.equal(loopbackCallbackUrl(undefined), 'http://127.0.0.1:0/auth-callback');
+});
+
+check('a pasted callback address yields its code and state', async () => {
+  const { parseCallbackInput } = await import('../src/deepai/account.js');
+
+  // What the browser leaves in its address bar after the redirect fails to open.
+  assert.deepEqual(
+    parseCallbackInput('http://127.0.0.1:25912/auth-callback?code=abc123&state=deadbeef'),
+    { code: 'abc123', state: 'deadbeef' },
+  );
+  // DeepAI's own path, and the alias the gateway also serves.
+  assert.deepEqual(
+    parseCallbackInput('http://127.0.0.1:8787/callback?code=c&state=s'),
+    { code: 'c', state: 's' },
+  );
+  // A chat client or terminal likes to wrap the link in quotes or brackets.
+  assert.deepEqual(
+    parseCallbackInput('  <"http://127.0.0.1:8787/auth-callback?code=c&state=s">  '),
+    { code: 'c', state: 's' },
+  );
+  // Extra parameters must not disturb the two that matter.
+  assert.deepEqual(
+    parseCallbackInput('http://127.0.0.1:8787/auth-callback?code=c&state=s&extra=1#frag'),
+    { code: 'c', state: 's' },
+  );
+  // A bare query fragment is accepted too.
+  assert.deepEqual(parseCallbackInput('?code=c&state=s'), { code: 'c', state: 's' });
+
+  // Rejected: without a state nothing proves which attempt the code belongs to.
+  assert.equal(parseCallbackInput('http://127.0.0.1:8787/auth-callback?code=c'), undefined);
+  assert.equal(parseCallbackInput('http://127.0.0.1:8787/auth-callback?state=s'), undefined);
+  // Rejected: a bare code is not an address.
+  assert.equal(parseCallbackInput('abc123'), undefined);
+  // Rejected: not text at all.
+  assert.equal(parseCallbackInput(undefined), undefined);
+  assert.equal(parseCallbackInput(42), undefined);
+  assert.equal(parseCallbackInput('   '), undefined);
+  // Rejected: unbounded input must not be parsed or logged.
+  assert.equal(parseCallbackInput(`http://x/?code=c&state=${'s'.repeat(9000)}`), undefined);
+});
+
+check('the origin and port come from the request, not a constant', async () => {
+  const { localPort, publicOrigin } = await import('../src/api/admin.js');
+
+  /** A request stand-in; `trusted` mirrors Express' `trust proxy` setting. */
+  const req = ({ host = 'gw.example.test:25912', proto, forwardedHost, forwardedProto, trusted = false, socketPort } = {}) => ({
+    app: { get: (name) => (name === 'trust proxy' ? trusted : undefined) },
+    secure: false,
+    socket: socketPort === undefined ? {} : { localPort: socketPort },
+    get(name) {
+      if (name === 'host') return host;
+      if (name === 'x-forwarded-host') return forwardedHost;
+      if (name === 'x-forwarded-proto') return forwardedProto;
+      return undefined;
+    },
+    _proto: proto,
+  });
+
+  // The browser's own Host is the best answer when nothing else is known, and it
+  // is what fixes the public port a visitor actually used.
+  assert.equal(publicOrigin(req()), 'http://gw.example.test:25912');
+  assert.equal(localPort(req()), 25912);
+
+  // An explicit PUBLIC_URL wins over the request.
+  assert.equal(publicOrigin(req(), 'https://panel.example.test/'), 'https://panel.example.test');
+  assert.equal(localPort(req(), 'https://panel.example.test/'), 443);
+
+  // A default port needs no explicit port in the origin.
+  assert.equal(localPort(req({ host: 'gw.example.test' })), 80);
+  assert.equal(publicOrigin(req({ host: 'gw.example.test' })), 'http://gw.example.test');
+
+  // Forwarding headers are only believed when the proxy is trusted: otherwise any
+  // client could name the origin the dashboard reports.
+  const spoofed = req({ forwardedHost: 'evil.example.test', forwardedProto: 'https' });
+  assert.equal(publicOrigin(spoofed), 'http://gw.example.test:25912', 'untrusted forwarding headers must be ignored');
+  assert.equal(
+    publicOrigin(req({ forwardedHost: 'panel.example.test', forwardedProto: 'https', trusted: true })),
+    'https://panel.example.test',
+    'a trusted proxy may name the origin',
+  );
+  assert.equal(
+    localPort(req({ forwardedHost: 'panel.example.test:25912', forwardedProto: 'https', trusted: true })),
+    25912,
+  );
+  // Only the first hop counts, and a nonsense scheme is refused.
+  assert.equal(
+    publicOrigin(req({ forwardedHost: 'a.test, b.test', forwardedProto: 'https', trusted: true })),
+    'https://a.test',
+  );
+  assert.equal(publicOrigin(req({ forwardedProto: 'gopher', trusted: true, host: 'gw.test' })), '');
+  assert.equal(publicOrigin(req({ host: '' })), '');
+
+  // With no usable request address at all, the listening socket is the fallback.
+  assert.equal(localPort(req({ host: '', socketPort: 8787 })), 8787);
+  assert.equal(localPort(req({ host: '', socketPort: undefined })), 0);
+});
+
+await checkAsync('a loopback callback the browser cannot open can be pasted back', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const runtime = app.locals.runtime;
+
+  const realFetch = globalThis.fetch;
+  // The server's outbound exchange goes through `globalThis.fetch`, which this
+  // check stubs. The check's own HTTP calls must keep using the real one.
+  const http = (...args) => realFetch(...args);
+  try {
+    // Start a login as a browser would, and keep the cookie that identifies it.
+    const started = await http(`${base}/api/login`, { method: 'POST' });
+    assert.equal(started.status, 200);
+    const login = await started.json();
+    const cookie = String(started.headers.get('set-cookie') ?? '').split(';')[0];
+    assert.match(cookie, /deepai_gateway_login=/);
+
+    // The address DeepAI will use is loopback, and the port is read off the
+    // request, so the visitor knows exactly what to look for.
+    assert.equal(login.callbackUrl, `http://127.0.0.1:${server.address().port}/auth-callback`);
+    assert.equal(login.callbackPort, server.address().port);
+    assert.equal(login.origin, `http://127.0.0.1:${server.address().port}`);
+
+    // The state is the server's secret, binding a code to this attempt.
+    const browser = runtime.pendingLogins.keys().next().value;
+    const { state } = runtime.pendingLogins.get(browser).flow;
+
+    // `/api/account` reports the same address, derived from the request it is
+    // served on. That is what keeps the dashboard's instructions correct after a
+    // reload — which is exactly when the visitor comes back from the dead address.
+    const pendingView = await http(`${base}/api/account`, { headers: { cookie } }).then((r) => r.json());
+    assert.equal(pendingView.pendingLogin, true, 'this browser has an attempt waiting');
+    assert.equal(pendingView.callbackUrl, `http://127.0.0.1:${server.address().port}/auth-callback`);
+    assert.equal(pendingView.origin, `http://127.0.0.1:${server.address().port}`);
+    assert.ok(Number.isInteger(pendingView.callbackPort));
+    // A different browser must not be told about someone else's attempt.
+    const strangerView = await http(`${base}/api/account`).then((r) => r.json());
+    assert.equal(strangerView.pendingLogin, false, 'a pending login belongs to one browser only');
+
+    const pasted = `http://127.0.0.1:${server.address().port}/auth-callback?code=one-shot&state=${state}`;
+
+    // Truncated input must not burn the attempt: a visitor can paste again.
+    const truncated = await http(`${base}/api/login/complete`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ url: 'http://127.0.0.1:1/auth-callback?code=one-shot' }),
+    });
+    assert.equal(truncated.status, 400);
+    assert.equal((await truncated.json()).code, 'unparsable');
+    assert.equal(runtime.pendingLogins.size, 1, 'a rejected paste leaves the attempt alive');
+
+    // A code bound to a different attempt is refused...
+    const foreign = await http(`${base}/api/login/complete`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ url: `http://127.0.0.1:1/auth-callback?code=x&state=${'0'.repeat(64)}` }),
+    });
+    assert.equal(foreign.status, 400);
+    assert.equal((await foreign.json()).code, 'invalid_state');
+
+    // ...and another browser cannot finish this browser's attempt at all.
+    const stranger = await http(`${base}/api/login/complete`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url: pasted }),
+    });
+    assert.equal(stranger.status, 410, 'only the browser that started the attempt may finish it');
+    assert.equal((await stranger.json()).code, 'no_pending_login');
+
+    // Now the real exchange, with the network stubbed out.
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ api_key: 'sk-pasted', username: 'pasted-user', is_pro: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+
+    const done = await http(`${base}/api/login/complete`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ url: pasted }),
+    });
+    // Read the body once: a failed assertion can then show what the server said.
+    const doneText = await done.text();
+    assert.equal(done.status, 200, doneText);
+    const result = JSON.parse(doneText);
+    assert.equal(result.ok, true);
+    assert.equal(result.username, 'pasted-user');
+
+    // The same one-shot code the callback route would have redeemed.
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.endsWith('/deepai_code/desktop_auth/exchange/'));
+    assert.equal(calls[0].body.code, 'one-shot');
+
+    // The response hands the browser a live session, exactly like the callback.
+    const sessionCookie = String(done.headers.get('set-cookie') ?? '').split(';')[0];
+    assert.match(sessionCookie, /deepai_gateway_session=/);
+    const account = await http(`${base}/api/account`, { headers: { cookie: sessionCookie } }).then((r) => r.json());
+    assert.equal(account.signedIn, true);
+    assert.equal(account.username, 'pasted-user');
+    assert.equal(runtime.pendingLogins.size, 0, 'a completed attempt is forgotten');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('the completion endpoint refuses everything it cannot verify', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const runtime = app.locals.runtime;
+
+  const realFetch = globalThis.fetch;
+  try {
+    const post = (cookie, body) => fetch(`${base}/api/login/complete`, {
+      method: 'POST',
+      headers: cookie === '' ? { 'content-type': 'application/json' } : { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    // Nothing pending at all.
+    const nothing = await post('', { url: 'http://127.0.0.1:1/auth-callback?code=c&state=s' });
+    assert.equal(nothing.status, 410);
+    assert.equal((await nothing.json()).code, 'no_pending_login');
+
+    // Pending, but the request carries no address.
+    const started = await fetch(`${base}/api/login`, { method: 'POST' });
+    const cookie = String(started.headers.get('set-cookie') ?? '').split(';')[0];
+    for (const body of [{}, { url: '' }, { code: 'c' }, { url: 42 }, { url: '   ' }]) {
+      const bad = await post(cookie, body);
+      assert.equal(bad.status, 400, `body ${JSON.stringify(body)} must be refused`);
+      assert.equal((await bad.json()).code, 'missing_address');
+    }
+
+    // A bare code with no state is refused rather than exchanged: there would be
+    // nothing to prove which attempt it was minted for.
+    const unbound = await post(cookie, { code: 'abcdef', state: '' });
+    assert.equal(unbound.status, 400);
+
+    // Repeated junk exhausts the attempt instead of becoming a free oracle. The
+    // last rejected pair reports why it ended, rather than a later call merely
+    // finding the flow gone.
+    const browser = runtime.pendingLogins.keys().next().value;
+    const { state } = runtime.pendingLogins.get(browser).flow;
+    const seen = [];
+    for (let attempt = 0; attempt < 12 && runtime.pendingLogins.size > 0; attempt += 1) {
+      const response = await post(cookie, { url: `http://127.0.0.1:1/auth-callback?code=c&state=${'1'.repeat(64)}` });
+      seen.push([response.status, (await response.json()).code]);
+    }
+    assert.deepEqual(
+      seen.at(-1),
+      [429, 'too_many_attempts'],
+      `expected the attempt to end on too many tries, saw ${JSON.stringify(seen)}`,
+    );
+    assert.equal(runtime.pendingLogins.size, 0, 'an exhausted attempt is forgotten');
+    assert.ok(state.length === 64, 'the state is still the 256-bit value');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('/callback is the same handler as /auth-callback', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    // Both paths answer, and both refuse a callback with no attempt behind it.
+    for (const path of ['/auth-callback', '/callback']) {
+      const response = await fetch(`${base}${path}?code=c&state=s`, { redirect: 'manual' });
+      assert.equal(response.status, 410, `${path} should be served`);
+      assert.match(await response.text(), /Nothing to confirm/);
+    }
+
+    // A POST to either is the wrong verb and must not be treated as a callback.
+    const wrongVerb = await fetch(`${base}/callback`, { method: 'POST' });
+    assert.equal(wrongVerb.status, 404, 'only GET is routed');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('PUBLIC_URL is reported to the dashboard without changing the callback', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false, publicUrl: 'https://panel.example.test' });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    const login = await fetch(`${base}/api/login`, { method: 'POST' }).then((r) => r.json());
+    // The origin the visitor used, taken from configuration.
+    assert.equal(login.origin, 'https://panel.example.test');
+    // But DeepAI still gets a plain integer port for a loopback callback: no
+    // setting can move the redirect to the public host.
+    assert.equal(login.callbackPort, 443);
+    assert.equal(login.callbackUrl, 'http://127.0.0.1:443/auth-callback');
+    assert.equal(login.path, '/auth-callback');
+    await fetch(`${base}/api/cancel-login`, { method: 'POST' });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 /* -------------------------------------------------------------------- done */
 
 console.log(results.join('\n'));
