@@ -69,26 +69,31 @@ import {
 const MAX_PENDING_LOGINS = 64;
 
 /**
- * What each out-of-band completion failure means to the visitor.
+ * What each out-of-band completion failure says to the visitor.
  *
- * Mapped from the reason the sign-in flow reports, so the message a visitor sees
- * cannot drift from the check that produced it.
+ * Written for someone who is looking at a page that would not load, not at the
+ * protocol: every message says what happened to the *sign-in* and what to do
+ * next. Mapped from the reason the flow reports, so the message cannot drift from
+ * the check that produced it.
  */
 const COMPLETION_FAILURES = {
-  unparsable: [400, 'That is not the address DeepAI sent you to. Copy the whole address from the browser bar, including `code` and `state`.'],
-  invalid_state: [400, 'That sign-in does not belong to this browser, or the address was truncated. Copy it again from the browser bar.'],
-  exchange_failed: [400, 'DeepAI rejected that code. Start the login again.'],
-  expired: [410, 'This sign-in expired. Start a new one.'],
-  too_many_attempts: [429, 'Too many attempts for this sign-in. Start a new one.'],
-  busy: [409, 'This sign-in is already being completed.'],
+  'not-an-address': [400, 'That does not look like an address. Copy the whole address from the page that did not load — including everything after the “?”.'],
+  'too-long': [400, 'That is longer than any address DeepAI sends, so something else must have been pasted.'],
+  'no-code': [400, 'That address is missing the sign-in code, so it looks cut off. Copy the entire address from the page that did not load.'],
+  'no-state': [400, 'That address is missing its second half, so it looks cut off. Copy the entire address from the page that did not load.'],
+  invalid_state: [400, 'That address belongs to a different sign-in than this browser started. Use the address from the page DeepAI just sent you to.'],
+  exchange_failed: [400, 'DeepAI did not accept that sign-in code. Press “Log in with DeepAI” to start again.'],
+  expired: [410, 'This sign-in timed out. Press “Log in with DeepAI” to start again.'],
+  too_many_attempts: [429, 'Too many tries for this sign-in. Press “Log in with DeepAI” to start again.'],
+  busy: [409, 'This sign-in is already being finished — give it a moment.'],
 };
 
 /**
  * The completion failures that end the attempt.
  *
  * The sign-in flow has already closed itself for each of these, so the entry is
- * dropped too. `invalid_state`, `unparsable` and `busy` are deliberately absent:
- * a mistyped paste must not cost the visitor their login.
+ * dropped too. The address-shaped failures and `busy` are deliberately absent: a
+ * mistyped paste must not cost the visitor their sign-in.
  */
 const TERMINAL_COMPLETION_REASONS = new Set(['expired', 'too_many_attempts', 'exchange_failed']);
 
@@ -216,7 +221,7 @@ export function adminRouter(db, runtime) {
     if (flow === undefined) {
       return res.status(410).json({
         ok: false,
-        error: 'No sign-in is waiting. Start one, then paste the address DeepAI sent you to.',
+        error: 'There is no sign-in waiting. Press “Log in with DeepAI” first, then paste the address it sends you to.',
         code: 'no_pending_login',
       });
     }
@@ -228,7 +233,7 @@ export function adminRouter(db, runtime) {
     if (pasted === '' && !paired) {
       return res.status(400).json({
         ok: false,
-        error: 'Paste the whole address your browser was sent to.',
+        error: 'Paste the address from the page that did not load, then press “Finish signing in”.',
         code: 'missing_address',
       });
     }

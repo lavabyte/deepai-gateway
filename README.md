@@ -113,12 +113,24 @@ There are two ways to arrange that:
 
 **1. Paste the address back (works from anywhere).** After signing in at DeepAI,
 the browser is sent to a `127.0.0.1` address and shows a connection error. The
-code in that address is still redeemable, so open the dashboard, expand
-**"Browser did not come back? Finish manually"**, and paste the whole address out
-of the browser's address bar. The gateway checks the `state` against the attempt
-that this browser started — only that browser can finish it, and an address
-without a matching `state` is refused — then exchanges the code exactly as the
-callback route would.
+sign-in is not lost and the code in that address is still redeemable, so copy the
+address out of the browser's address bar and paste it into the dashboard.
+
+The dashboard does the explaining, so nobody has to know why the page failed:
+
+- On a browser that is *not* on the gateway's own host, the sign-in card says up
+  front that the last page may not load, and that copying the address back is the
+  way to finish. It shows the address to look for.
+- Once a sign-in is waiting, that becomes the only step on the card — **"One more
+  step to finish"** — with the paste field already focused.
+- On `127.0.0.1` the redirect just works, so nothing is said at all beyond a quiet
+  *"Signed in on DeepAI already? Paste the address it sent you"* escape hatch.
+
+The gateway then checks the address against the sign-in that this browser started
+— only that browser can finish it, and an address without a matching `state` is
+refused — and exchanges its code exactly as the callback route would. A paste that
+is cut off says so in as many words ("missing its second half"), and costs one of
+five tries rather than the sign-in itself.
 
 The dashboard shows the exact address to expect, and the gateway logs it at boot
 when `HOST` is not loopback.

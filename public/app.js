@@ -108,8 +108,91 @@ function isAuthFailure(error) {
  *
  * @returns {boolean} true when the caller should stop rendering.
  */
+/** Whether an origin points at the machine the browser itself is running on. */
+function isLoopbackOrigin(origin) {
+  return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(origin);
+}
+
+/**
+ * The "finish signing in" step.
+ *
+ * DeepAI ends the sign-in by sending the browser to a `127.0.0.1` address, and
+ * that address only opens on the machine running the gateway. A visitor browsing a
+ * public address therefore lands on a page that cannot load — while DeepAI is
+ * holding a sign-in that is still perfectly valid.
+ *
+ * Two states, because the same explanation is useful at different moments:
+ *
+ *   - **before** the visitor leaves, and only when their browser is *not* on the
+ *     gateway's own host (so the failure is certain, not hypothetical): what is
+ *     about to happen, and the one thing they need to remember;
+ *   - **while** a sign-in is waiting: the single action that finishes it.
+ *
+ * The address is shown because it is the thing to look for in the address bar.
+ *
+ * @param {{pending: boolean, remote: boolean}} options
+ * @returns {string} markup, always containing the paste field and its button.
+ */
+function finishStep({ pending, remote }) {
+  const address = state.callbackUrl;
+  const prefix = address.replace(/\/auth-callback$/, '');
+  const field = `
+    <div class="field mt-3">
+      <label class="field__label" for="callback-url">Address from that page</label>
+      <textarea class="textarea" id="callback-url" rows="3" spellcheck="false" autocomplete="off"
+        placeholder="${esc(address || 'http://127.0.0.1:8787/auth-callback?code=…&state=…')}"></textarea>
+      <div class="field__hint">
+        It starts with <code>${esc(prefix || 'http://127.0.0.1:8787')}</code> and ends with <code>state=…</code>
+      </div>
+    </div>
+    <div class="row mt-3"><button class="btn btn--primary" id="login-complete">Finish signing in</button></div>`;
+
+  if (pending) {
+    return `
+      <section class="note note--warning mt-3 step" id="finish-step" aria-labelledby="finish-title">
+        <div class="step__title" id="finish-title">One more step to finish</div>
+        <p class="step__lead">
+          DeepAI sent your browser to an address that only opens on the server, so that page could
+          not load. Your sign-in is still waiting — nothing is lost.
+        </p>
+        <p class="step__lead">
+          Copy the address from that page and paste it below.
+          <span class="step__aside">Need it again? Press Forward to return to that page.</span>
+        </p>
+        ${field}
+      </section>`;
+  }
+
+  if (remote) {
+    return `
+      <section class="note mt-3 step" id="finish-step" aria-labelledby="finish-title">
+        <div class="step__title" id="finish-title">The last page may not load</div>
+        <p class="step__lead">
+          After you sign in, DeepAI sends your browser back to an address that only opens on the
+          server running this gateway. If that page does not load, <strong>that is expected</strong> —
+          copy its address, come back to this tab, and paste it below.
+        </p>
+        ${field}
+      </section>`;
+  }
+
+  // On the gateway's own host the redirect just works, so stay out of the way and
+  // keep the escape hatch one click away rather than explaining a problem the
+  // visitor is unlikely to hit.
+  return `
+    <p class="card__sub mt-3" id="finish-step">
+      Signed in on DeepAI already?
+      <button class="linklike" id="login-reveal" type="button">Paste the address it sent you</button>
+    </p>
+    <div id="finish-fields" hidden>${field}</div>`;
+}
+
 function needsLogin() {
   if (state.account?.signedIn === true) return false;
+  const pending = state.account?.pendingLogin === true;
+  const origin = state.account?.origin ?? '';
+  const remote = origin !== '' && !isLoopbackOrigin(origin);
+
   view.innerHTML = `
     <div class="page__head">
       <h1 class="page__title">Log in required</h1>
@@ -117,45 +200,37 @@ function needsLogin() {
     </div>
     <div class="card">
       <div class="card__title">Not logged in</div>
-      <div class="card__sub mt-2">Log in with DeepAI to see your API keys and usage. The button is in the top bar.</div>
+      <div class="card__sub mt-2">Log in with DeepAI to see your API keys and usage.</div>
       <div class="row mt-3"><button class="btn btn--primary" id="login-inline">Log in with DeepAI</button></div>
-      <details class="mt-3" id="login-manual" ${state.account?.pendingLogin === true ? 'open' : ''}>
-        <summary class="card__sub login-manual__summary">Browser did not come back? Finish manually</summary>
-        <div class="field mt-3">
-          <label class="field__label" for="callback-url">Address your browser was sent to</label>
-          <textarea class="textarea" id="callback-url" rows="3" spellcheck="false" autocomplete="off"
-            placeholder="${esc(state.callbackUrl || 'http://127.0.0.1:8787/auth-callback?code=…&state=…')}"></textarea>
-          <div class="field__hint">
-            ${state.account?.pendingLogin === true
-              ? `Your browser was sent to <code>${esc(state.callbackUrl)}</code>. If that page
-                 did not open, copy the whole address out of the browser's address bar and paste it here —
-                 the code in it is still valid.`
-              : `DeepAI sends the browser to a <code>127.0.0.1</code> address it chooses itself, which only
-                 opens on the machine running the gateway. Start a login above and paste the address it
-                 sends you to here.`}
-          </div>
-        </div>
-        <div class="row mt-3"><button class="btn" id="login-complete">Finish sign-in</button></div>
-      </details>
+      ${finishStep({ pending, remote })}
     </div>`;
+
   $('login-inline')?.addEventListener('click', () => void startLoginFlow());
   $('login-complete')?.addEventListener('click', () => void completeLoginManually());
+  $('login-reveal')?.addEventListener('click', () => {
+    const fields = $('finish-fields');
+    if (fields) fields.hidden = false;
+    $('login-reveal')?.parentElement?.remove();
+    $('callback-url')?.focus();
+  });
+  // A waiting sign-in is the moment to type, so put the caret where it is needed.
+  if (pending) $('callback-url')?.focus();
   return true;
 }
 
 /**
- * Finish a login the loopback redirect could not deliver.
+ * Send back the address the failed page was sitting on.
  *
- * DeepAI fixes the callback to `127.0.0.1`, so a browser on any other machine
- * lands on a dead address. That address is still in its bar and its one-shot code
- * is still redeemable, so this hands the whole address back to the gateway, which
- * validates the `state` against this browser's pending attempt before exchanging.
+ * The gateway checks it against the sign-in this browser started and redeems the
+ * one-shot code in it, exactly as the callback route would have. On success the
+ * visitor is simply logged in, so the step disappears with the rest of the card.
  */
 async function completeLoginManually() {
   const field = $('callback-url');
   const url = field?.value?.trim() ?? '';
   if (url === '') {
-    toast('Paste the address your browser was sent to.', 'error');
+    toast('Copy the address from the page that did not load, then paste it here.', 'error');
+    field?.focus();
     return;
   }
 
@@ -163,19 +238,22 @@ async function completeLoginManually() {
   const label = button?.textContent;
   if (button) {
     button.disabled = true;
-    button.textContent = 'Checking…';
+    button.textContent = 'Signing in…';
   }
   try {
     await api('/login/complete', { method: 'POST', body: { url } });
-    toast('Logged in to DeepAI');
+    toast('Signed in to DeepAI');
     await loadAccount();
     await render();
   } catch (error) {
     toast(String(error.message ?? error), 'error');
     if (button) {
       button.disabled = false;
-      button.textContent = label ?? 'Finish sign-in';
+      button.textContent = label ?? 'Finish signing in';
     }
+    // The address is the only thing that can be wrong, so make it easy to retry.
+    field?.focus();
+    field?.select();
   }
 }
 

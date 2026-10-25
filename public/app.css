@@ -302,11 +302,24 @@ code, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
   border-radius: 4px; padding: 0 4px;
 }
 
-/* Manual sign-in completion: a disclosure so it never competes with the button
-   that works in the common case. */
-.login-manual__summary { cursor: pointer; color: var(--link); list-style-position: inside; }
-.login-manual__summary:hover { text-decoration: underline; }
-details[open] > .login-manual__summary { margin-bottom: 2px; }
+/* The "finish signing in" step. A note rather than a bare block, because it
+   explains an outcome the visitor may have just mistaken for a failure. */
+.step__title { font-weight: 600; margin-bottom: 4px; }
+.step__lead { margin-bottom: 8px; }
+.step__lead:last-of-type { margin-bottom: 0; }
+.step__aside { display: block; opacity: .75; font-size: 12px; }
+/* Inside the warning tone the field must stay legible, so it opts out of the
+   inherited colour and keeps its own surface. */
+.step .textarea, .step .input { background: var(--surface); color: var(--ink); }
+.step .field__hint code { background: var(--bg-soft); }
+
+/* A button that reads as a link: used where an action is secondary enough that a
+   full button would compete with the primary one. */
+.linklike {
+  border: 0; background: none; padding: 0; font: inherit;
+  color: var(--link); cursor: pointer; text-decoration: underline;
+  text-underline-offset: 2px;
+}
 
 
 .table { width: 100%; border-collapse: collapse; font-size: 13px; }

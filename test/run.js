@@ -2045,37 +2045,181 @@ check('a pasted callback address yields its code and state', async () => {
   // What the browser leaves in its address bar after the redirect fails to open.
   assert.deepEqual(
     parseCallbackInput('http://127.0.0.1:25912/auth-callback?code=abc123&state=deadbeef'),
-    { code: 'abc123', state: 'deadbeef' },
+    { ok: true, code: 'abc123', state: 'deadbeef' },
   );
   // DeepAI's own path, and the alias the gateway also serves.
   assert.deepEqual(
     parseCallbackInput('http://127.0.0.1:8787/callback?code=c&state=s'),
-    { code: 'c', state: 's' },
+    { ok: true, code: 'c', state: 's' },
   );
   // A chat client or terminal likes to wrap the link in quotes or brackets.
   assert.deepEqual(
     parseCallbackInput('  <"http://127.0.0.1:8787/auth-callback?code=c&state=s">  '),
-    { code: 'c', state: 's' },
+    { ok: true, code: 'c', state: 's' },
   );
   // Extra parameters must not disturb the two that matter.
   assert.deepEqual(
     parseCallbackInput('http://127.0.0.1:8787/auth-callback?code=c&state=s&extra=1#frag'),
-    { code: 'c', state: 's' },
+    { ok: true, code: 'c', state: 's' },
   );
   // A bare query fragment is accepted too.
-  assert.deepEqual(parseCallbackInput('?code=c&state=s'), { code: 'c', state: 's' });
+  assert.deepEqual(parseCallbackInput('?code=c&state=s'), { ok: true, code: 'c', state: 's' });
 
-  // Rejected: without a state nothing proves which attempt the code belongs to.
-  assert.equal(parseCallbackInput('http://127.0.0.1:8787/auth-callback?code=c'), undefined);
-  assert.equal(parseCallbackInput('http://127.0.0.1:8787/auth-callback?state=s'), undefined);
-  // Rejected: a bare code is not an address.
-  assert.equal(parseCallbackInput('abc123'), undefined);
-  // Rejected: not text at all.
-  assert.equal(parseCallbackInput(undefined), undefined);
-  assert.equal(parseCallbackInput(42), undefined);
-  assert.equal(parseCallbackInput('   '), undefined);
-  // Rejected: unbounded input must not be parsed or logged.
-  assert.equal(parseCallbackInput(`http://x/?code=c&state=${'s'.repeat(9000)}`), undefined);
+  /*
+   * Each rejection names what to fix, because the visitor is shown it as an
+   * instruction. "The address is cut off" is actionable; "invalid input" is not,
+   * and a single catch-all reason would also hide a genuinely wrong address behind
+   * the same words as a truncated one.
+   */
+  // An address that stops before the second half: the visitor copied too little.
+  assert.deepEqual(
+    parseCallbackInput('http://127.0.0.1:8787/auth-callback?code=c'),
+    { ok: false, reason: 'no-state' },
+  );
+  assert.deepEqual(
+    parseCallbackInput('http://127.0.0.1:8787/auth-callback?state=s'),
+    { ok: false, reason: 'no-code' },
+  );
+  // A bare code is not an address at all.
+  assert.deepEqual(parseCallbackInput('abc123'), { ok: false, reason: 'not-an-address' });
+  assert.deepEqual(parseCallbackInput('http://example.test/'), { ok: false, reason: 'not-an-address' });
+  // Not text at all.
+  assert.deepEqual(parseCallbackInput(undefined), { ok: false, reason: 'not-an-address' });
+  assert.deepEqual(parseCallbackInput(42), { ok: false, reason: 'not-an-address' });
+  assert.deepEqual(parseCallbackInput('   '), { ok: false, reason: 'not-an-address' });
+  // Unbounded input must not be parsed or logged.
+  assert.deepEqual(
+    parseCallbackInput(`http://x/?code=c&state=${'s'.repeat(9000)}`),
+    { ok: false, reason: 'too-long' },
+  );
+});
+
+await checkAsync('the sign-in step speaks to the visitor, not to the protocol', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const vm = await import('node:vm');
+  const root = new URL('..', import.meta.url).pathname;
+  const source = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+
+  /*
+   * Render the real dashboard against a DOM stand-in, so what is asserted here is
+   * the markup a visitor receives rather than the source that produces it. A
+   * template error would otherwise only show up in a browser.
+   */
+  const render = async (account) => {
+    const nodes = new Map();
+    const node = () => ({
+      innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
+      dataset: {}, style: {}, value: '',
+      classList: { add() {}, remove() {}, contains: () => false },
+      addEventListener() {}, appendChild() {}, remove() {}, replaceChildren() {},
+      querySelector: () => null, querySelectorAll: () => [], setAttribute() {},
+      getAttribute: () => null, closest: () => null, focus() {}, select() {}, scrollIntoView() {},
+    });
+    for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
+      'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle']) nodes.set(id, node());
+
+    const sandbox = {
+      document: {
+        getElementById: (id) => nodes.get(id) ?? null,
+        createElement: () => node(), querySelector: () => null, querySelectorAll: () => [],
+        addEventListener() {}, documentElement: node(), visibilityState: 'visible', body: node(),
+      },
+      window: { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }), location: { assign() {} } },
+      location: { search: '', pathname: '/', hash: '' },
+      history: { replaceState() {} },
+      localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      fetch: async (url) => new Response(
+        JSON.stringify(String(url).includes('/account') ? account : { ok: true, models: [] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+      setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
+      console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
+      Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
+    };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    new vm.Script(source, { filename: 'app.js' }).runInContext(sandbox);
+    // The boot sequence is async; let it paint before reading the view.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    return nodes.get('view').innerHTML;
+  };
+
+  const account = (extra) => ({
+    signedIn: false, pendingLogin: false,
+    origin: 'http://127.0.0.1:8787', callbackUrl: 'http://127.0.0.1:8787/auth-callback',
+    ...extra,
+  });
+
+  // On the gateway's own host the redirect works, so the step must stay out of the
+  // way: no warning about a problem this visitor will not hit.
+  const local = await render(account());
+  assert.ok(!local.includes('The last page may not load'), 'no warning on loopback');
+  assert.ok(!local.includes('One more step'), 'nothing is pending yet');
+  assert.match(local, /Signed in on DeepAI already\?/, 'the escape hatch is still offered');
+  assert.match(local, /<button class="linklike" id="login-reveal"/, 'it is a quiet link, not a button');
+  assert.match(local, /id="finish-fields" hidden/, 'its field starts hidden');
+  assert.match(local, /id="callback-url"/, 'the field exists in every state');
+  assert.match(local, /id="login-complete"/, 'as does its submit control');
+
+  // A visitor on a public host is guaranteed to hit the dead address, so they are
+  // told before they leave rather than stranded afterwards.
+  const remote = await render(account({ origin: 'http://gw.example.test:25912', callbackUrl: 'http://127.0.0.1:25912/auth-callback' }));
+  assert.match(remote, /The last page may not load/, 'the certain failure is explained up front');
+  assert.match(remote, /that is expected/, 'the scary page is pre-framed as normal');
+  assert.match(remote, /paste it below/i, 'and the next action is stated');
+  assert.ok(!remote.includes('hidden'), 'the field is offered immediately on a public host');
+  assert.match(remote, /<code>http:\/\/127\.0\.0\.1:25912<\/code>/, 'the address to look for is shown');
+
+  // While a sign-in waits, the step becomes the only thing to do.
+  const pending = await render(account({ pendingLogin: true, origin: 'http://gw.example.test:25912', callbackUrl: 'http://127.0.0.1:25912/auth-callback' }));
+  assert.match(pending, /One more step to finish/, 'the step is announced plainly');
+  assert.match(pending, /still waiting — nothing is lost/, 'and the sign-in is not framed as failed');
+  assert.match(pending, /Press Forward/, 'it says how to get the address back');
+  assert.match(pending, /Finish signing in/, 'the control names the outcome');
+  assert.match(pending, /note--warning/, 'and it is visually prominent');
+
+  // No state may leak the old developer-facing wording.
+  for (const [name, html] of [['local', local], ['remote', remote], ['pending', pending]]) {
+    for (const jargon of ['Browser did not come back', 'Finish manually', 'login-manual', 'window.close']) {
+      assert.ok(!html.includes(jargon), `${name} must not contain ${JSON.stringify(jargon)}`);
+    }
+    // Template expressions must have been evaluated, not shipped.
+    assert.ok(!html.includes('${'), `${name} has an unrendered template expression`);
+    assert.ok(!html.includes('undefined<'), `${name} interpolated undefined`);
+  }
+});
+
+check('every sign-in failure has something useful to say', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const root = new URL('..', import.meta.url).pathname;
+
+  // Every reason the flow can report must have a message, or it silently degrades
+  // to a generic one that tells the visitor nothing.
+  const flow = readFileSync(join(root, 'src', 'deepai', 'account.js'), 'utf8');
+  const reported = new Set([...flow.matchAll(/reason: '([a-z_-]+)'/g)].map((match) => match[1]));
+  assert.ok(reported.size >= 8, `expected the flow's reasons to be found, saw ${reported.size}`);
+
+  const admin = readFileSync(join(root, 'src', 'api', 'admin.js'), 'utf8');
+  const table = admin.slice(admin.indexOf('const COMPLETION_FAILURES'), admin.indexOf('const TERMINAL_COMPLETION_REASONS'));
+  const answered = new Set([...table.matchAll(/^\s{2}'?([a-z_-]+)'?:/gm)].map((match) => match[1]));
+
+  const missing = [...reported].filter((reason) => !answered.has(reason));
+  assert.deepEqual(missing, [], `these reasons would fall back to a generic message: ${missing}`);
+
+  // The messages are read by someone looking at a page that would not load, so
+  // they must not name protocol parameters.
+  for (const message of table.matchAll(/'([^']{20,})'/g)) {
+    assert.ok(!/\bstate\b|`code`/.test(message[1]), `jargon in: ${message[1]}`);
+  }
+
+  // Nothing may be terminal by accident: a mistyped paste must stay retryable.
+  const terminal = admin.slice(admin.indexOf('const TERMINAL_COMPLETION_REASONS'));
+  const terminalSet = terminal.slice(0, terminal.indexOf('];'));
+  for (const retryable of ['not-an-address', 'too-long', 'no-code', 'no-state', 'invalid_state', 'busy']) {
+    assert.ok(!terminalSet.includes(retryable), `${retryable} must leave the sign-in retryable`);
+  }
 });
 
 check('the origin and port come from the request, not a constant', async () => {
@@ -2186,7 +2330,7 @@ await checkAsync('a loopback callback the browser cannot open can be pasted back
       body: JSON.stringify({ url: 'http://127.0.0.1:1/auth-callback?code=one-shot' }),
     });
     assert.equal(truncated.status, 400);
-    assert.equal((await truncated.json()).code, 'unparsable');
+    assert.equal((await truncated.json()).code, 'no-state');
     assert.equal(runtime.pendingLogins.size, 1, 'a rejected paste leaves the attempt alive');
 
     // A code bound to a different attempt is refused...

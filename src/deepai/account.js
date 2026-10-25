@@ -79,28 +79,37 @@ export function loopbackCallbackUrl(port) {
  * `state` nothing proves the code was minted for *this* attempt, and redeeming an
  * unbound code is precisely what the `state` parameter exists to prevent.
  *
+ * The failure reasons are specific rather than a single "invalid", because they
+ * are shown to the visitor as instructions: "the address is cut off" is
+ * actionable, "invalid input" is not.
+ *
  * @param {unknown} input
- * @returns {{code: string, state: string} | undefined} `undefined` when the text
- *   is not an address carrying both parameters.
+ * @returns {{ok: true, code: string, state: string}
+ *   | {ok: false, reason: 'not-an-address'|'too-long'|'no-code'|'no-state'}}
  */
 export function parseCallbackInput(input) {
-  if (typeof input !== 'string') return undefined;
+  if (typeof input !== 'string') return { ok: false, reason: 'not-an-address' };
   // Browsers, chat clients and terminals like to hand back a quoted link.
   const text = input.trim().replace(/^[<'"]+|[>'"]+$/g, '').trim();
-  if (text === '' || text.length > 8192) return undefined;
+  if (text === '') return { ok: false, reason: 'not-an-address' };
+  if (text.length > 8192) return { ok: false, reason: 'too-long' };
 
   let params;
   try {
-    // A base is supplied so a bare `?code=…&state=…` fragment also parses; text
-    // with no query at all simply yields no parameters below.
+    // A base is supplied so a bare `?code=…&state=…` fragment also parses.
     params = new URL(text, 'http://127.0.0.1').searchParams;
   } catch {
-    return undefined;
+    return { ok: false, reason: 'not-an-address' };
   }
+  // A bare code parses fine as a relative URL, so reject text that carries neither
+  // parameter before blaming a missing half.
+  if (!/[?&](code|state)=/.test(text)) return { ok: false, reason: 'not-an-address' };
+
   const code = params.get('code') ?? '';
   const state = params.get('state') ?? '';
-  if (code === '' || state === '') return undefined;
-  return { code, state };
+  if (code === '') return { ok: false, reason: 'no-code' };
+  if (state === '') return { ok: false, reason: 'no-state' };
+  return { ok: true, code, state };
 }
 
 /**
@@ -217,7 +226,9 @@ export function startLogin({ port, timeoutMs = 300_000, maxAttempts = 5 }) {
     async complete(input) {
       if (closed) return { ok: false, reason: 'expired' };
       const parsed = parseCallbackInput(input);
-      if (parsed === undefined) return { ok: false, reason: 'unparsable' };
+      // Report *why* the address was unusable so the dashboard can say what to
+      // fix: a different paste, not a different attempt.
+      if (parsed.ok !== true) return { ok: false, reason: parsed.reason };
       return submit(parsed.code, parsed.state);
     },
 
