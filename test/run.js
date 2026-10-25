@@ -1,0 +1,1234 @@
+/**
+ * Offline test suite for the gateway.
+ *
+ * Everything runs against an in-memory database and a stubbed `fetch`, so no
+ * DeepAI account or network access is required. Run with `npm test`.
+ */
+
+import assert from 'node:assert/strict';
+import { openDatabase } from '../src/db.js';
+import { generateKey, hashKey, overLimit, publicKey, statusOf } from '../src/keys.js';
+import { exportRows, keyUsage, record, startOfHour, summary, totals, windowStart } from '../src/usage.js';
+import { readAccount, saveAccount, saveAllowance } from '../src/store.js';
+import { authenticate, keyFromRequest } from '../src/middleware/auth.js';
+import {
+  effortOf,
+  openAIUsage,
+  openAIToResponsesInput,
+  openAIToResponsesTools,
+  stopSequences,
+} from '../src/openai.js';
+import { completionsUsage, responsesUsage } from '../src/deepai/wire.js';
+import { FALLBACK_MODELS, REASONING_LEVELS, displayName, findModel, publicModel, rateLabel } from '../src/deepai/catalog.js';
+import { findEventEnd } from '../src/deepai/wire.js';
+import {
+  FALLBACK_PRICES,
+  MODEL_SOURCES,
+  buildPrices,
+  estimateSavings,
+  formatUsd,
+  initPricing,
+  isPriced,
+  parsePrice,
+  priceOf,
+  priceUsage,
+  pricingStatus,
+  publicPrices,
+  readCache,
+  refreshPrices,
+  resetPricing,
+} from '../src/pricing.js';
+
+const results = [];
+function check(name, fn) {
+  try {
+    fn();
+    results.push(`  ok   ${name}`);
+  } catch (error) {
+    results.push(`  FAIL ${name}\n       ${error.message}`);
+    process.exitCode = 1;
+  }
+}
+async function checkAsync(name, fn) {
+  try {
+    await fn();
+    results.push(`  ok   ${name}`);
+  } catch (error) {
+    results.push(`  FAIL ${name}\n       ${error.message}`);
+    process.exitCode = 1;
+  }
+}
+
+/* ------------------------------------------------------------------- schema */
+
+const db = openDatabase(':memory:');
+
+check('schema creates the expected tables', () => {
+  const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name);
+  for (const table of ['meta', 'account', 'api_keys', 'usage', 'settings']) {
+    assert.ok(names.includes(table), `missing table ${table}`);
+  }
+});
+
+/* --------------------------------------------------------------------- keys */
+
+check('generated keys look right and hash deterministically', () => {
+  const key = generateKey();
+  assert.match(key.plaintext, /^sk-[0-9a-f]{40}$/);
+  assert.equal(key.prefix, key.plaintext.slice(0, 11));
+  assert.equal(key.hash, hashKey(key.plaintext));
+  assert.notEqual(generateKey().plaintext, key.plaintext);
+});
+
+check('overLimit covers both counters and unlimited keys', () => {
+  const base = { limit_requests: 5, limit_tokens: 1000 };
+  assert.equal(overLimit(base, { requests: 4, totalTokens: 999 }), false);
+  assert.equal(overLimit(base, { requests: 5, totalTokens: 0 }), true);
+  assert.equal(overLimit(base, { requests: 0, totalTokens: 1000 }), true);
+  const unlimited = { limit_requests: null, limit_tokens: null };
+  assert.equal(overLimit(unlimited, { requests: 9999, totalTokens: 9_999_999 }), false);
+});
+
+check('status reflects revocation, expiry and limits', () => {
+  const now = Date.now();
+  assert.equal(statusOf({ revoked_at: null, expires_at: null }, { requests: 0 }), 'active');
+  assert.equal(statusOf({ revoked_at: now, expires_at: null }, { requests: 0 }), 'revoked');
+  assert.equal(statusOf({ revoked_at: null, expires_at: now - 1000 }, { requests: 0 }), 'expired');
+  assert.equal(statusOf({ revoked_at: null, expires_at: null, limit_requests: 1 }, { requests: 1 }), 'limited');
+});
+
+check('publicKey never leaks the hash', () => {
+  const row = {
+    id: 'key_1', name: 'test', prefix: 'sk-abcdefg', key_hash: 'deadbeef',
+    created_at: 1, last_used_at: null, revoked_at: null, expires_at: null,
+    limit_tokens: null, limit_requests: null, limit_window: 'month', allowed_models: '["a"]',
+  };
+  const view = publicKey(row, { requests: 0, totalTokens: 0 });
+  assert.equal(view.key_hash, undefined);
+  assert.deepEqual(view.allowedModels, ['a']);
+  assert.equal(view.limitWindow, 'month');
+});
+
+check('parse of malformed allowed_models does not throw', () => {
+  const view = publicKey({ id: 'x', name: 'n', prefix: 'p', allowed_models: 'not json', limit_window: 'day' });
+  assert.deepEqual(view.allowedModels, []);
+});
+
+/* -------------------------------------------------------------------- usage */
+
+check('token counts are stored disjoint and aggregated', () => {
+  const key = generateKey();
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models)
+              VALUES ('k1', 'first', ?, ?, ?, 'month', '[]')`).run(key.prefix, key.hash, Date.now());
+
+  record(db, {
+    keyId: 'k1', keyName: 'first', model: 'm-a', inputTokens: 100, outputTokens: 20,
+    cacheReadTokens: 30, reasoningTokens: 5, totalTokens: 150, status: 200, ok: true,
+  });
+  record(db, {
+    keyId: 'k1', keyName: 'first', model: 'm-b', inputTokens: 10, outputTokens: 5,
+    totalTokens: 15, status: 500, ok: false, errorCode: 'PROVIDER_ERROR',
+  });
+
+  const all = summary(db);
+  assert.equal(all.all.requests, 2);
+  assert.equal(all.all.failedRequests, 1);
+  assert.equal(all.all.totalTokens, 165);
+  assert.equal(all.all.inputTokens, 110);
+  assert.equal(all.all.cacheReadTokens, 30);
+  assert.equal(all.all.reasoningTokens, 5);
+
+  const models = all.modelsAll.map((model) => model.model);
+  assert.deepEqual(models.sort(), ['m-a', 'm-b']);
+  assert.equal(all.modelsAll.find((model) => model.model === 'm-a').requests, 1);
+
+  const scoped = keyUsage(db, 'k1', 'month');
+  assert.equal(scoped.requests, 2);
+  assert.equal(scoped.totalTokens, 165);
+});
+
+check('windowStart separates day, month and total', () => {
+  const now = new Date('2026-10-25T15:00:00').getTime();
+  const day = new Date(windowStart('day', now));
+  assert.equal(day.getHours(), 0);
+  assert.equal(day.getDate(), 25);
+  const month = new Date(windowStart('month', now));
+  assert.equal(month.getDate(), 1);
+  assert.equal(month.getMonth(), 9);
+  assert.equal(windowStart('total', now), 0);
+});
+
+check('daily series has one bucket per day', () => {
+  const days = summary(db).daily;
+  assert.equal(days.length, 14);
+  assert.equal(days.at(-1).tokens, 165);
+});
+
+/* ------------------------------------------------------------------ account */
+
+check('account round-trips through the database', () => {
+  assert.equal(readAccount(db), undefined);
+  saveAccount(db, { apiKey: 'secret-key', username: 'tester', isPro: true });
+  const account = readAccount(db);
+  assert.equal(account.apiKey, 'secret-key');
+  assert.equal(account.username, 'tester');
+  assert.equal(account.isPro, true);
+  assert.equal(account.allowance, null);
+
+  saveAllowance(db, { balance: '49.5', granted: '50', refreshAt: '2026-10-26T15:07:00Z' });
+  assert.equal(readAccount(db).allowance.balance, '49.5');
+});
+
+/* ------------------------------------------------------------------- auth */
+
+check('key extraction accepts bearer and x-api-key', () => {
+  assert.equal(keyFromRequest({ get: (name) => (name === 'authorization' ? 'Bearer sk-abc' : undefined) }), 'sk-abc');
+  assert.equal(keyFromRequest({ get: (name) => (name === 'x-api-key' ? 'sk-xyz' : undefined) }), 'sk-xyz');
+  assert.equal(keyFromRequest({ get: () => undefined }), undefined);
+});
+
+check('authenticate rejects a missing and an unknown key', () => {
+  const middleware = authenticate(db);
+  const run = (headers) => {
+    let status;
+    let body;
+    const req = { get: (name) => headers[name], gatewayKey: undefined };
+    const res = {
+      status(code) { status = code; return this; },
+      json(payload) { body = payload; return this; },
+    };
+    let passed = false;
+    middleware(req, res, () => { passed = true; });
+    return { status, body, passed };
+  };
+  assert.equal(run({}).status, 401);
+  assert.equal(run({ authorization: 'Bearer nope' }).status, 401);
+  assert.equal(run({ authorization: 'Bearer nope' }).body.error.code, 'invalid_api_key');
+});
+
+check('authenticate accepts a live key and rejects a revoked one', () => {
+  const key = generateKey();
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models)
+              VALUES ('k2', 'second', ?, ?, ?, 'month', '[]')`).run(key.prefix, key.hash, Date.now());
+  const middleware = authenticate(db);
+
+  const run = () => {
+    const req = { get: (name) => (name === 'authorization' ? `Bearer ${key.plaintext}` : undefined) };
+    const res = { status() { return this; }, json() { return this; } };
+    let passed = false;
+    middleware(req, res, () => { passed = true; });
+    return { passed, key: req.gatewayKey };
+  };
+
+  assert.equal(run().passed, true);
+  db.prepare('UPDATE api_keys SET revoked_at = ? WHERE id = ?').run(Date.now(), 'k2');
+  assert.equal(run().passed, false);
+});
+
+check('authenticate enforces a request limit', () => {
+  const key = generateKey();
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, limit_requests, allowed_models)
+              VALUES ('k3', 'limited', ?, ?, ?, 'total', 1, '[]')`).run(key.prefix, key.hash, Date.now());
+  const middleware = authenticate(db);
+  const run = () => {
+    let status;
+    const req = { get: (name) => (name === 'authorization' ? `Bearer ${key.plaintext}` : undefined) };
+    const res = { status(code) { status = code; return this; }, json() { return this; } };
+    let passed = false;
+    middleware(req, res, () => { passed = true; });
+    return { passed, status };
+  };
+  assert.equal(run().passed, true);
+  record(db, { keyId: 'k3', model: 'm', totalTokens: 1, ok: true });
+  const blocked = run();
+  assert.equal(blocked.passed, false);
+  assert.equal(blocked.status, 429);
+});
+
+/* ----------------------------------------------------------------- openai */
+
+check('stop sequences normalize from string and array', () => {
+  assert.deepEqual(stopSequences('END'), ['END']);
+  assert.deepEqual(stopSequences(['a', '', 'b']), ['a', 'b']);
+  assert.deepEqual(stopSequences(undefined), []);
+  assert.deepEqual(stopSequences(['1', '2', '3', '4', '5']), ['1', '2', '3', '4']);
+});
+
+check('effort mapping covers every harness id', () => {
+  assert.equal(effortOf('off'), 'none');
+  assert.equal(effortOf('max'), 'high');
+  assert.equal(effortOf('medium'), 'medium');
+  assert.equal(effortOf(undefined), undefined);
+});
+
+check('OpenAI usage re-inflates the prompt total', () => {
+  const usage = openAIUsage({
+    inputTokens: 50, outputTokens: 20, cacheReadTokens: 40,
+    cacheWriteTokens: 10, reasoningTokens: 5, totalTokens: 120,
+  });
+  assert.equal(usage.prompt_tokens, 100);
+  assert.equal(usage.completion_tokens, 20);
+  assert.equal(usage.total_tokens, 120);
+  assert.equal(usage.prompt_tokens_details.cached_tokens, 40);
+  assert.equal(usage.completion_tokens_details.reasoning_tokens, 5);
+  assert.equal(openAIUsage(undefined), undefined);
+});
+
+check('OpenAI messages convert into Responses items', () => {
+  const input = openAIToResponsesInput([
+    { role: 'system', content: 'be brief' },
+    { role: 'user', content: 'hi' },
+    { role: 'assistant', content: 'calling', tool_calls: [{ id: 'c1', function: { name: 'echo', arguments: '{"a":1}' } }] },
+    { role: 'tool', tool_call_id: 'c1', content: 'ok' },
+  ]);
+  assert.equal(input[0].role, 'system');
+  assert.equal(input.find((item) => item.type === 'function_call').call_id, 'c1');
+  assert.equal(input.find((item) => item.type === 'function_call_output').output, 'ok');
+  assert.equal(input.find((item) => item.type === 'message').content[0].type, 'output_text');
+});
+
+await checkAsync('Responses transport converts OpenAI messages exactly once', async () => {
+  // Regression: the Responses transport used to convert OpenAI messages into
+  // items and then convert that result again as if it were harness blocks,
+  // which sent an empty `input` array upstream.
+  const { streamResponsesCompletion } = await import('../src/deepai/client.js');
+
+  const captured = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    captured.push({ url: String(url), body: JSON.parse(init.body) });
+    const body = [
+      'data: {"type":"response.output_text.delta","delta":"ok"}',
+      'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":5,"output_tokens":1}}}',
+      'data: [DONE]',
+      '',
+    ].join('\n\n');
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+
+  try {
+    const events = [];
+    for await (const event of streamResponsesCompletion({
+      apiKey: 'k',
+      model: 'gpt-6-astra',
+      messages: [
+        { role: 'system', content: 'be brief' },
+        { role: 'user', content: 'hello there' },
+        { role: 'assistant', content: 'calling', tool_calls: [{ id: 'c1', function: { name: 'echo', arguments: '{}' } }] },
+        { role: 'tool', tool_call_id: 'c1', content: 'ok' },
+      ],
+      tools: [{ type: 'function', function: { name: 'echo', parameters: { type: 'object' } } }],
+    })) events.push(event);
+
+    assert.equal(captured.length, 1);
+    assert.ok(captured[0].url.endsWith('/deepai_code/responses'));
+    const { input, tools } = captured[0].body;
+
+    // The user turn must survive the round trip with its text intact.
+    assert.ok(Array.isArray(input) && input.length >= 4, `input had ${input?.length} items`);
+    assert.equal(input[0].role, 'system');
+    assert.equal(input[0].content[0].text, 'be brief');
+    assert.equal(input[1].content[0].text, 'hello there');
+    assert.equal(input.find((item) => item.type === 'function_call').name, 'echo');
+    assert.equal(input.find((item) => item.type === 'function_call_output').output, 'ok');
+
+    // Tools must be flattened, not nested under `function`.
+    assert.equal(tools[0].name, 'echo');
+    assert.equal(tools[0].function, undefined);
+
+    assert.equal(events.find((event) => event.type === 'text').text, 'ok');
+    assert.deepEqual(events.find((event) => event.type === 'usage').usage, {
+      inputTokens: 5, outputTokens: 1, totalTokens: 6,
+      cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0,
+    });
+    assert.equal(events.at(-1).reason, 'stop');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+/* -------------------------------------------------------------- deepai wire */
+
+check('completions usage subtracts cached input', () => {
+  const usage = completionsUsage({
+    prompt_tokens: 100, completion_tokens: 20,
+    prompt_tokens_details: { cached_tokens: 40, cache_write_tokens: 10 },
+    completion_tokens_details: { reasoning_tokens: 5 },
+  });
+  assert.deepEqual(usage, {
+    inputTokens: 50, outputTokens: 20, totalTokens: 120,
+    cacheReadTokens: 40, cacheWriteTokens: 10, reasoningTokens: 5,
+  });
+});
+
+check('responses usage subtracts cached input', () => {
+  const usage = responsesUsage({
+    input_tokens: 30, output_tokens: 7,
+    input_tokens_details: { cached_tokens: 10 },
+    output_tokens_details: { reasoning_tokens: 3 },
+  });
+  assert.deepEqual(usage, {
+    inputTokens: 20, outputTokens: 7, totalTokens: 37,
+    cacheReadTokens: 10, cacheWriteTokens: 0, reasoningTokens: 3,
+  });
+});
+
+/* ----------------------------------------------------------------- catalog */
+
+check('fallback catalog is complete and well formed', () => {
+  assert.ok(FALLBACK_MODELS.length >= 13);
+  const ids = FALLBACK_MODELS.map((model) => model.id);
+  assert.equal(new Set(ids).size, ids.length);
+  for (const model of FALLBACK_MODELS) {
+    assert.ok(model.contextWindow > 0);
+    assert.ok(model.maxTokens > 0);
+    for (const level of ['none', 'low', 'medium', 'high']) {
+      assert.equal(typeof model.theosPerSecond[level], 'string');
+    }
+  }
+});
+
+check('free models are labelled and Premier are not', () => {
+  for (const model of FALLBACK_MODELS) {
+    if (model.premier) {
+      assert.equal(displayName(model), model.name);
+    } else {
+      assert.equal(displayName(model), `${model.name} Free`);
+    }
+  }
+});
+
+check('rate labels distinguish unmetered from billed', () => {
+  assert.equal(rateLabel(findModel('glm-5.3-flash')), 'Unmetered');
+  assert.equal(rateLabel(findModel('glm-5.3'), 'high'), '1.2 Theos/min');
+  assert.equal(rateLabel(findModel('gpt-6-astra'), 'none'), '18 Theos/min');
+});
+
+/* ------------------------------------------------------------------- server */
+
+await checkAsync('app mounts; /healthz works and /v1/models requires a key', async () => {
+  const { createApp } = await import('../server.js');
+  const app = createApp(db, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  // A key for this check, unrestricted.
+  const key = generateKey();
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models)
+              VALUES ('khttp', 'http', ?, ?, ?, 'unlimited', '[]')`).run(key.prefix, key.hash, Date.now());
+
+  try {
+    const health = await fetch(`${base}/healthz`).then((res) => res.json());
+    assert.equal(health.ok, true);
+    assert.equal(health.signedIn, true);
+
+    // Without a key the catalog is refused.
+    const anon = await fetch(`${base}/v1/models`);
+    assert.equal(anon.status, 401);
+    assert.equal((await anon.json()).error.code, 'missing_api_key');
+
+    const models = await fetch(`${base}/v1/models`, {
+      headers: { authorization: `Bearer ${key.plaintext}` },
+    }).then((res) => res.json());
+    assert.equal(models.object, 'list');
+    assert.ok(models.data.length >= 13);
+    assert.ok(models.data.some((model) => model.id === 'deepseek-v4.1-flash'));
+
+    const details = await fetch(`${base}/v1/models/details`, {
+      headers: { authorization: `Bearer ${key.plaintext}` },
+    }).then((res) => res.json());
+    const free = details.data.find((model) => model.id === 'glm-5.3-flash');
+    assert.equal(free.tier, 'free');
+    assert.equal(free.displayName, 'GLM 5.3 Flash Free');
+
+    const unauthorized = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(unauthorized.status, 401);
+
+    const unknown = await fetch(`${base}/v1/nope`);
+    assert.equal(unknown.status, 404);
+    assert.equal((await unknown.json()).error.code, 'not_found');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('/v1/models only advertises the models a restricted key may use', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  const allowed = ['glm-5.3-flash', 'deepseek-v4.1-flash'];
+  const restricted = generateKey();
+  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, models_restricted)
+                 VALUES ('kr', 'restricted', ?, ?, ?, 'unlimited', ?, 1)`)
+    .run(restricted.prefix, restricted.hash, Date.now(), JSON.stringify(allowed));
+
+  // A restricted key with nothing selected must see nothing at all.
+  const empty = generateKey();
+  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, models_restricted)
+                 VALUES ('ke', 'empty', ?, ?, ?, 'unlimited', '[]', 1)`)
+    .run(empty.prefix, empty.hash, Date.now());
+
+  try {
+    const visible = await fetch(`${base}/v1/models`, {
+      headers: { authorization: `Bearer ${restricted.plaintext}` },
+    }).then((res) => res.json());
+    assert.deepEqual(visible.data.map((model) => model.id).sort(), [...allowed].sort());
+
+    const none = await fetch(`${base}/v1/models`, {
+      headers: { authorization: `Bearer ${empty.plaintext}` },
+    }).then((res) => res.json());
+    assert.equal(none.data.length, 0);
+
+    // The catalogue is still complete for the dashboard's own view.
+    const dashboard = await fetch(`${base}/api/models`).then((res) => res.json());
+    assert.ok(dashboard.models.length >= 13);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('/ serves the dashboard and /login is browser-navigable', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const root = await fetch(base, { redirect: 'manual' });
+    assert.equal(root.status, 200);
+    assert.match(root.headers.get('content-type'), /text\/html/);
+    assert.match(await root.text(), /DeepAI Gateway/);
+
+    // A deep link must return the shell, not a bare 404 page.
+    const deep = await fetch(`${base}/keys`);
+    assert.equal(deep.status, 404);
+    assert.match(await deep.text(), /DeepAI Gateway/);
+
+    // /login with ?json=1 answers with the DeepAI URL instead of redirecting.
+    const login = await fetch(`${base}/login?json=1`);
+    assert.equal(login.status, 200);
+    const payload = await login.json();
+    assert.equal(payload.ok, true);
+    assert.match(payload.url, /^https:\/\/api\.deepai\.org\/deepai_code\/desktop_auth\//);
+
+    // A second call reuses the pending flow rather than starting another.
+    const again = await fetch(`${base}/login?json=1`).then((res) => res.json());
+    assert.equal(again.url, payload.url);
+
+    // Cancel it so the callback server does not outlive this check.
+    await fetch(`${base}/api/cancel-login`, { method: 'POST' });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('the gateway refuses a sixth API key', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const { saveAccount } = await import('../src/store.js');
+  saveAccount(fresh, { apiKey: 'k', username: 'quota-user', isPro: false });
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const created = [];
+    for (let index = 0; index < 5; index += 1) {
+      const response = await fetch(`${base}/api/keys`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: `key ${index}`, limitWindow: 'unlimited', modelsRestricted: false }),
+      });
+      assert.equal(response.status, 201, `key ${index} should be created`);
+      created.push((await response.json()).key);
+    }
+    assert.equal(created.length, 5);
+
+    const sixth = await fetch(`${base}/api/keys`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'key 6', limitWindow: 'unlimited', modelsRestricted: false }),
+    });
+    assert.equal(sixth.status, 409);
+    assert.equal((await sixth.json()).code, 'key_limit_reached');
+
+    // The quota is reported so the UI can disable the button.
+    const listed = await fetch(`${base}/api/keys`).then((res) => res.json());
+    assert.equal(listed.quota.used, 5);
+    assert.equal(listed.quota.max, 5);
+    assert.equal(listed.quota.atLimit, true);
+
+    // Deleting one frees a slot.
+    await fetch(`${base}/api/keys/${created[0].id}`, { method: 'DELETE' });
+    const after = await fetch(`${base}/api/keys`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'replacement', limitWindow: 'unlimited', modelsRestricted: false }),
+    });
+    assert.equal(after.status, 201);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('a key records its DeepAI owner and unrestricted keys allow everything', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  saveAccount(fresh, { apiKey: 'owner-key', username: 'owner-user', isPro: false });
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const response = await fetch(`${base}/api/keys`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'owned', limitWindow: 'unlimited', modelsRestricted: false }),
+    });
+    const { key } = await response.json();
+    assert.equal(key.owner, 'owner-user');
+    assert.equal(key.modelsRestricted, false);
+
+    const row = fresh.prepare('SELECT owner_username, owner_key_hash FROM api_keys WHERE id = ?').get(key.id);
+    assert.equal(row.owner_username, 'owner-user');
+    assert.equal(row.owner_key_hash, hashKey('owner-key'));
+
+    // Signing out clears the account and closes the per-user views; the key
+    // itself stays stored so the history remains attributable.
+    await fetch(`${base}/api/logout`, { method: 'POST' });
+    const account = await fetch(`${base}/api/account`).then((res) => res.json());
+    assert.equal(account.signedIn, false);
+    assert.equal((await fetch(`${base}/api/keys`)).status, 401, 'keys are per account');
+
+    saveAccount(fresh, { apiKey: 'owner-key', username: 'owner-user', isPro: false });
+    const still = await fetch(`${base}/api/keys`).then((res) => res.json());
+    assert.equal(still.keys.length, 1);
+    assert.equal(still.keys[0].owner, 'owner-user');
+
+    // Sign-out is recorded in the audit trail.
+    const events = await fetch(`${base}/api/account/events`).then((res) => res.json());
+    assert.ok(events.events.some((event) => event.event === 'logout'));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('unlimited keys ignore token and request limits', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  saveAccount(fresh, { apiKey: 'k', username: 'u', isPro: false });
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const created = await fetch(`${base}/api/keys`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      // Limits are supplied but the window is unlimited, so they must be dropped.
+      body: JSON.stringify({ name: 'unlimited', limitWindow: 'unlimited', limitTokens: 5, limitRequests: 1 }),
+    }).then((res) => res.json());
+    assert.equal(created.key.limitTokens, null);
+    assert.equal(created.key.limitRequests, null);
+    assert.equal(created.key.limitWindow, 'unlimited');
+
+    // A monthly window keeps the supplied limits.
+    const monthly = await fetch(`${base}/api/keys`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'monthly', limitWindow: 'month', limitTokens: 1000, limitRequests: 10 }),
+    }).then((res) => res.json());
+    assert.equal(monthly.key.limitTokens, 1000);
+    assert.equal(monthly.key.limitRequests, 10);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('a signed-out gateway refuses completions with 503', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+
+  const key = generateKey();
+  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models)
+                 VALUES ('kx', 'temp', ?, ?, ?, 'month', '[]')`).run(key.prefix, key.hash, Date.now());
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${key.plaintext}` },
+      body: JSON.stringify({ model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.code, 'deepai_signed_out');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+/* ------------------------------------------------------- v1 model payload */
+
+await checkAsync('/v1/models carries modalities, reasoning levels and names', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+
+  const key = generateKey();
+  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models)
+                 VALUES ('kv', 'v', ?, ?, ?, 'unlimited', '[]')`).run(key.prefix, key.hash, Date.now());
+
+  try {
+    const payload = await fetch(`http://127.0.0.1:${port}/v1/models`, {
+      headers: { authorization: `Bearer ${key.plaintext}` },
+    }).then((res) => res.json());
+
+    const free = payload.data.find((model) => model.id === 'glm-5.3-flash');
+    assert.equal(free.display_name, 'GLM 5.3 Flash Free');
+    assert.equal(free.name, 'GLM 5.3 Flash');
+    assert.equal(free.tier, 'free');
+    assert.equal(free.premier, false);
+    assert.deepEqual(free.input_modalities, ['text', 'image']);
+    assert.deepEqual(free.output_modalities, ['text']);
+    assert.deepEqual(free.reasoning_levels, ['none', 'low', 'medium', 'high']);
+    assert.ok(free.context_window > 0);
+    assert.ok(free.max_output_tokens > 0);
+    assert.equal(typeof free.theos_per_second.high, 'string');
+    assert.equal(free.rate_label, 'Unmetered');
+    assert.ok(free.description.includes('Free tier'));
+
+    const textOnly = payload.data.find((model) => model.id === 'solar-mini-4');
+    assert.deepEqual(textOnly.input_modalities, ['text']);
+
+    const premier = payload.data.find((model) => model.id === 'glm-5.3');
+    assert.equal(premier.tier, 'premier');
+    assert.equal(premier.rate_label, '6 Theos/min');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+check('publicModel exposes per-level reasoning rates', () => {
+  const model = publicModel(findModel('glm-5.3'));
+  assert.equal(model.reasoningLevels.length, REASONING_LEVELS.length);
+  const high = model.reasoningLevels.find((level) => level.id === 'high');
+  assert.equal(high.rateLabel, '1.2 Theos/min');
+  assert.equal(high.name, 'High');
+  assert.deepEqual(publicModel(findModel('solar-mini-4')).reasoningLevels.length > 0, true);
+});
+
+/* ------------------------------------------------------------- hour window */
+
+check('windowStart understands the hour window', () => {
+  const now = new Date('2026-10-25T15:47:31').getTime();
+  const hour = new Date(startOfHour(now));
+  assert.equal(hour.getHours(), 15);
+  assert.equal(hour.getMinutes(), 0);
+  assert.equal(hour.getSeconds(), 0);
+  assert.equal(windowStart('hour', now), hour.getTime());
+  assert.ok(windowStart('hour', now) > windowStart('day', now));
+});
+
+await checkAsync('a per-hour key is accepted and enforced', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  saveAccount(fresh, { apiKey: 'k', username: 'u', isPro: false });
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const created = await fetch(`${base}/api/keys`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'hourly', limitWindow: 'hour', limitRequests: 1 }),
+    }).then((res) => res.json());
+    assert.equal(created.key.limitWindow, 'hour');
+    assert.equal(created.key.limitRequests, 1);
+
+    // The window is reported by the list endpoint too.
+    const listed = await fetch(`${base}/api/keys`).then((res) => res.json());
+    assert.ok(listed.windows.includes('hour'));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+/* --------------------------------------------------------------- SSE parser */
+
+check('findEventEnd handles LF, CRLF and partial buffers', () => {
+  assert.deepEqual(findEventEnd('data: {}\n\n'), { index: 8, length: 2 });
+  assert.deepEqual(findEventEnd('data: {}\r\n\r\n'), { index: 8, length: 4 });
+  // A lone CRLF inside the payload must not terminate the event early.
+  const mixed = 'data: {"a":"x\r\n"}\n\nrest';
+  assert.deepEqual(findEventEnd(mixed), { index: mixed.indexOf('\n\n'), length: 2 });
+  assert.deepEqual(findEventEnd('data: {"a":1}'), { index: -1, length: 0 });
+  assert.deepEqual(findEventEnd(''), { index: -1, length: 0 });
+});
+
+/* ------------------------------------------------------------------ pricing */
+
+check('every catalog model has a pricing decision', () => {
+  for (const model of FALLBACK_MODELS) {
+    // Either a mapping or an explicit null, never a silent gap.
+    assert.ok(model.id in MODEL_SOURCES, `no pricing decision for ${model.id}`);
+  }
+  assert.equal(MODEL_SOURCES['deepai-cyber'], null);
+  assert.equal(isPriced('deepai-cyber'), false);
+  assert.equal(publicPrices().length, FALLBACK_MODELS.length);
+});
+
+check('parsePrice converts per-token USD to per-million without float noise', () => {
+  const parsed = parsePrice({
+    pricing: {
+      prompt: '0.0000002', completion: '0.0000012',
+      input_cache_read: '0.00000002', input_cache_write: '0.00000025',
+    },
+    context_length: 1000000,
+  });
+  assert.equal(parsed.input, 0.2);
+  assert.equal(parsed.output, 1.2);
+  assert.equal(parsed.cacheRead, 0.02);
+  assert.equal(parsed.cacheWrite, 0.25);
+  assert.equal(parsed.contextLength, 1000000);
+
+  // Missing cache fields stay null rather than becoming a silent zero.
+  const sparse = parsePrice({ pricing: { prompt: '0.000001', completion: '0.000002' } });
+  assert.equal(sparse.cacheRead, null);
+  assert.equal(sparse.cacheWrite, null);
+  assert.equal(parsePrice({}), null);
+  assert.equal(parsePrice({ pricing: { prompt: 'free' } }), null);
+});
+
+check('buildPrices maps DeepAI ids and skips batch/alias variants', () => {
+  const entries = [
+    { id: 'z-ai/glm-5.3-flash', pricing: { prompt: '0.00000015', completion: '0.0000005' } },
+    { id: 'z-ai/glm-5.3-flash:batch', pricing: { prompt: '0.00000005', completion: '0.00000018' } },
+    { id: '~z-ai/glm-5.3-latest', pricing: { prompt: '0.00000001', completion: '0.00000001' } },
+    { id: 'anthropic/claude-opus-5.5', pricing: { prompt: '0.000004', completion: '0.00002', input_cache_read: '0.0000002' } },
+  ];
+  const { prices, matched, missing } = buildPrices(entries);
+  assert.ok(matched.includes('glm-5.3-flash'));
+  assert.ok(matched.includes('claude-opus-5-5'));
+  // The batch price must never win over the standard one.
+  assert.equal(prices['glm-5.3-flash'].input, 0.15);
+  assert.equal(prices['claude-opus-5-5'].cacheRead, 0.2);
+  assert.equal(prices['deepai-cyber'], null);
+  assert.ok(missing.includes('kimi-k3'), 'unmatched models must be reported');
+});
+
+check('priceUsage bills each token class at its own published rate', () => {
+  resetPricing();
+  // claude-opus-5-5: in 4, out 20, cacheRead 0.20, cacheWrite 5.00.
+  const cost = priceUsage('claude-opus-5-5', {
+    inputTokens: 1_000_000,
+    outputTokens: 1_000_000,
+    cacheReadTokens: 1_000_000,
+    cacheWriteTokens: 1_000_000,
+  });
+  assert.ok(Math.abs(cost.inputUsd - 4) < 1e-9);
+  assert.ok(Math.abs(cost.outputUsd - 20) < 1e-9);
+  // Regression: cached input used to be billed at the full input rate.
+  assert.ok(Math.abs(cost.cacheReadUsd - 0.2) < 1e-9, `cacheRead should be 0.2, got ${cost.cacheReadUsd}`);
+  assert.ok(Math.abs(cost.cacheWriteUsd - 5) < 1e-9, `cacheWrite should be 5, got ${cost.cacheWriteUsd}`);
+  assert.ok(Math.abs(cost.usd - 29.2) < 1e-9, `total should be 29.2, got ${cost.usd}`);
+
+  assert.equal(priceUsage('deepai-cyber', { inputTokens: 10 }), undefined);
+});
+
+check('priceUsage falls back to the input rate when no cache rate is published', () => {
+  resetPricing();
+  // glm-5.3-flash publishes a cacheRead but no cacheWrite.
+  const cost = priceUsage('glm-5.3-flash', {
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 1_000_000, cacheWriteTokens: 1_000_000,
+  });
+  assert.ok(Math.abs(cost.cacheReadUsd - 0.03) < 1e-9);
+  // Unpublished write rate falls back to input (0.15), overstating rather than
+  // understating the cost.
+  assert.ok(Math.abs(cost.cacheWriteUsd - 0.15) < 1e-9, `got ${cost.cacheWriteUsd}`);
+});
+
+check('estimateSavings totals priced models and reports the rest', () => {
+  resetPricing();
+  const result = estimateSavings([
+    { model: 'glm-5.3-flash', inputTokens: 1_000_000, outputTokens: 0, totalTokens: 1_000_000 },
+    { model: 'deepai-cyber', inputTokens: 500, outputTokens: 500, totalTokens: 1000 },
+  ]);
+  assert.ok(Math.abs(result.usd - 0.15) < 1e-9);
+  assert.equal(result.pricedTokens, 1_000_000);
+  assert.equal(result.unpricedTokens, 1000);
+  assert.deepEqual(result.unpricedModels, ['deepai-cyber']);
+  assert.equal(result.perModel[0].model, 'glm-5.3-flash');
+});
+
+check('formatUsd keeps sub-cent amounts readable', () => {
+  assert.equal(formatUsd(0), '$0.00');
+  assert.equal(formatUsd(0.0023), '$0.0023');
+  assert.equal(formatUsd(0.42), '$0.420');
+  assert.equal(formatUsd(12.5), '$12.50');
+});
+
+await checkAsync('refreshPrices adopts a live catalogue and ignores junk', async () => {
+  resetPricing();
+  const live = {
+    data: [
+      { id: 'z-ai/glm-5.3-flash', pricing: { prompt: '0.0000009', completion: '0.0000019', input_cache_read: '0.0000001' } },
+      { id: 'openai/gpt-6-astra', pricing: { prompt: '0.00002', completion: '0.00006' } },
+      { id: 'broken/entry', pricing: null },
+    ],
+  };
+  const fetchImpl = async () => new Response(JSON.stringify(live), { status: 200, headers: { 'content-type': 'application/json' } });
+
+  const result = await refreshPrices({ fetchImpl, log: () => {} });
+  assert.equal(result.ok, true);
+  assert.equal(result.source, 'live');
+  assert.ok(result.matched.includes('glm-5.3-flash'));
+
+  // The live numbers replaced the bundled ones.
+  const price = priceOf('glm-5.3-flash');
+  assert.equal(price.input, 0.9);
+  assert.equal(price.cacheRead, 0.1);
+  assert.equal(pricingStatus().source, 'live');
+
+  // A failed refresh keeps the last good table instead of blanking it.
+  const failing = async () => new Response('nope', { status: 503 });
+  const failed = await refreshPrices({ fetchImpl: failing, log: () => {} });
+  assert.equal(failed.ok, false);
+  assert.equal(priceOf('glm-5.3-flash').input, 0.9, 'a failed refresh must not lose prices');
+  assert.equal(pricingStatus().source, 'live');
+  resetPricing();
+});
+
+await checkAsync('refreshPrices rejects an empty or unusable catalogue', async () => {
+  resetPricing();
+  const empty = async () => new Response(JSON.stringify({ data: [] }), { status: 200 });
+  const result = await refreshPrices({ fetchImpl: empty, log: () => {} });
+  assert.equal(result.ok, false);
+  assert.ok(result.error.includes('empty'));
+  // The bundled snapshot is still in place.
+  assert.equal(priceOf('glm-5.3-flash').input, 0.15);
+});
+
+check('initPricing loads a disk cache and readCache tolerates junk', async () => {
+  const { mkdtempSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'deepai-pricing-'));
+
+  const cachePath = join(dir, 'pricing.json');
+  writeFileSync(cachePath, JSON.stringify({
+    capturedAt: '2026-01-02T03:04:05.000Z',
+    fetchedAt: Date.parse('2026-01-02T03:04:05.000Z'),
+    prices: { 'glm-5.3-flash': { input: 7, output: 8, cacheRead: 1, cacheWrite: null, source: 'x' }, 'deepai-cyber': null },
+  }));
+  assert.equal(readCache(cachePath).capturedAt, '2026-01-02T03:04:05.000Z');
+
+  initPricing({ cachePath, log: () => {} });
+  assert.equal(priceOf('glm-5.3-flash').input, 7);
+  assert.equal(pricingStatus().source, 'cache');
+  assert.equal(pricingStatus().capturedAt, '2026-01-02T03:04:05.000Z');
+
+  // Malformed cache files are ignored, not fatal.
+  writeFileSync(cachePath, '{not json');
+  assert.equal(readCache(cachePath), undefined);
+  writeFileSync(cachePath, JSON.stringify({ nope: true }));
+  assert.equal(readCache(cachePath), undefined);
+
+  resetPricing();
+  initPricing({ cachePath: join(dir, 'missing.json'), log: () => {} });
+  assert.equal(pricingStatus().source, 'bundled');
+  assert.equal(priceOf('glm-5.3-flash').input, FALLBACK_PRICES['glm-5.3-flash'].input);
+});
+
+await checkAsync('the summary endpoint reports savings and pricing status', async () => {
+  resetPricing();
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const { saveAccount } = await import('../src/store.js');
+  saveAccount(fresh, { apiKey: 'k', username: 'savings-user', isPro: false });
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    record(fresh, {
+      keyId: null, keyName: 'k', owner: 'savings-user', model: 'glm-5.3-flash',
+      inputTokens: 1_000_000, outputTokens: 1_000_000, totalTokens: 2_000_000, ok: true,
+    });
+    const payload = await fetch(`${base}/api/usage/summary`).then((res) => res.json());
+    assert.ok(payload.savings, 'summary must carry savings');
+    assert.ok(Math.abs(payload.savings.month.usd - 0.65) < 1e-9, `got ${payload.savings.month.usd}`);
+    assert.ok(payload.savings.pricing, 'summary must report where prices came from');
+    assert.equal(typeof payload.savings.pricing.source, 'string');
+
+    const pricing = await fetch(`${base}/api/pricing`).then((res) => res.json());
+    assert.equal(pricing.prices.length, FALLBACK_MODELS.length);
+    assert.equal(typeof pricing.status.capturedAt, 'string');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    resetPricing();
+  }
+});
+
+/* ------------------------------------------------------------- usage export */
+
+await checkAsync('usage export produces CSV and JSON with every row', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const { saveAccount } = await import('../src/store.js');
+  saveAccount(fresh, { apiKey: 'k', username: 'export-user', isPro: false });
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    // A real key row, because usage.key_id is a foreign key.
+    const key = generateKey();
+    fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+                   VALUES ('k1', 'comma, name', ?, ?, ?, 'unlimited', '[]', 'export-user')`)
+      .run(key.prefix, key.hash, Date.now());
+
+    record(fresh, {
+      keyId: 'k1', keyName: 'comma, name', owner: 'export-user', model: 'glm-5.3-flash',
+      inputTokens: 10, outputTokens: 5, totalTokens: 15, ok: true, status: 200,
+    });
+    record(fresh, {
+      keyId: 'k1', keyName: 'failed', owner: 'export-user', model: 'deepseek-v4.1-flash',
+      totalTokens: 0, ok: false, status: 500, errorCode: 'PROVIDER_ERROR',
+    });
+
+    const csv = await fetch(`${base}/api/usage/export?format=csv`);
+    assert.match(csv.headers.get('content-type'), /text\/csv/);
+    assert.match(csv.headers.get('content-disposition'), /attachment; filename="deepai-usage-\d{4}-\d{2}-\d{2}\.csv"/);
+    const csvText = await csv.text();
+    const lines = csvText.trim().split('\n');
+    assert.equal(lines.length, 3, 'header plus two rows');
+    assert.match(lines[0], /^id,created_at,key_id,key_name,owner_username,model/);
+    // A name containing a comma must be quoted, not split into two fields.
+    assert.ok(csvText.includes('"comma, name"'), 'CSV must quote fields with commas');
+
+    const json = await fetch(`${base}/api/usage/export?format=json`).then((res) => res.json());
+    assert.equal(json.rows.length, 2);
+    assert.equal(json.rows[0].model, 'glm-5.3-flash');
+    assert.equal(json.rows[1].ok, false);
+    assert.equal(json.rows[1].errorCode, 'PROVIDER_ERROR');
+    assert.match(json.rows[0].createdAtIso, /^\d{4}-\d{2}-\d{2}T/);
+
+    // The export honours the range filter.
+    const today = await fetch(`${base}/api/usage/export?format=json&range=today`).then((res) => res.json());
+    assert.equal(today.rows.length, 2);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+check('usage rows survive reopening the same database file', async () => {
+  // Durability of usage, not just keys: write, close, reopen, read back.
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const file = join(mkdtempSync(join(tmpdir(), 'deepai-usage-')), 'usage.db');
+
+  const first = openDatabase(file);
+  record(first, { keyId: null, keyName: 'k', model: 'glm-5.3-flash', inputTokens: 42, outputTokens: 7, totalTokens: 49, ok: true });
+  first.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  first.close();
+
+  const second = openDatabase(file);
+  const total = totals(second, 0);
+  assert.equal(total.requests, 1, 'the recorded request must survive a reopen');
+  assert.equal(total.totalTokens, 49);
+  assert.equal(total.inputTokens, 42);
+  const exported = [...exportRows(second, {})];
+  assert.equal(exported.length, 1);
+  assert.equal(exported[0].model, 'glm-5.3-flash');
+  second.close();
+});
+
+/* ------------------------------------------------------------- hidden fields */
+
+check('the stylesheet makes the hidden attribute win', async () => {
+  // Regression: `.field { display: flex }` used to override `[hidden]`, so
+  // "hidden" form fields still rendered and still took clicks.
+  const { readFileSync } = await import('node:fs');
+  const css = readFileSync(new URL('../public/app.css', import.meta.url), 'utf8');
+  assert.match(css, /\[hidden\]\s*\{\s*display:\s*none\s*!important/, 'missing the [hidden] override');
+  assert.match(css, /prefers-color-scheme:\s*dark/, 'the OS dark palette must be present');
+  assert.match(css, /:root:not\(\[data-theme\]\)/, 'a stored theme must stay authoritative');
+});
+
+/* ------------------------------------------------------------ per-user scope */
+
+await checkAsync('keys and usage are scoped to the signed-in account', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const { saveAccount } = await import('../src/store.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  const json = (path, init) => fetch(`${base}${path}`, init).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }));
+  const createKey = (name) => json('/api/keys', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name, limitWindow: 'unlimited', modelsRestricted: false }),
+  });
+
+  try {
+    saveAccount(fresh, { apiKey: 'alice-key', username: 'alice', isPro: false });
+    const alice1 = await createKey('alice-1');
+    const alice2 = await createKey('alice-2');
+    assert.equal(alice1.body.key.owner, 'alice');
+
+    saveAccount(fresh, { apiKey: 'bob-key', username: 'bob', isPro: false });
+    const bob1 = await createKey('bob-1');
+    assert.equal(bob1.body.key.owner, 'bob');
+
+    // Each account sees only its own keys.
+    const bobKeys = await json('/api/keys');
+    assert.deepEqual(bobKeys.body.keys.map((k) => k.name), ['bob-1']);
+    assert.equal(bobKeys.body.quota.used, 1, 'the quota is per account');
+
+    // Another account's key is invisible, not merely forbidden.
+    assert.equal((await json(`/api/usage/keys/${alice1.body.key.id}`)).status, 404);
+    assert.equal((await json(`/api/keys/${alice1.body.key.id}`, { method: 'DELETE' })).status, 404);
+    assert.equal((await json(`/api/keys/${alice1.body.key.id}/revoke`, { method: 'POST' })).status, 404);
+
+    // Alice's keys are untouched.
+    saveAccount(fresh, { apiKey: 'alice-key', username: 'alice', isPro: false });
+    const aliceKeys = await json('/api/keys');
+    assert.deepEqual(aliceKeys.body.keys.map((k) => k.name).sort(), ['alice-1', 'alice-2']);
+    assert.ok(aliceKeys.body.keys.every((k) => k.revokedAt === null));
+
+    // Usage is scoped too: record one row per owner.
+    record(fresh, { keyId: alice1.body.key.id, keyName: 'alice-1', owner: 'alice', model: 'glm-5.3-flash', inputTokens: 100, outputTokens: 10, totalTokens: 110, ok: true });
+    record(fresh, { keyId: bob1.body.key.id, keyName: 'bob-1', owner: 'bob', model: 'kimi-k3', inputTokens: 7, outputTokens: 3, totalTokens: 10, ok: true });
+
+    const aliceSummary = (await json('/api/usage/summary')).body;
+    assert.equal(aliceSummary.all.requests, 1);
+    assert.equal(aliceSummary.all.totalTokens, 110);
+    assert.deepEqual(aliceSummary.modelsAll.map((m) => m.model), ['glm-5.3-flash']);
+
+    const aliceRecent = (await json('/api/usage/recent')).body.requests;
+    assert.equal(aliceRecent.length, 1);
+    assert.equal(aliceRecent[0].model, 'glm-5.3-flash');
+
+    saveAccount(fresh, { apiKey: 'bob-key', username: 'bob', isPro: false });
+    const bobSummary = (await json('/api/usage/summary')).body;
+    assert.equal(bobSummary.all.totalTokens, 10);
+    assert.deepEqual(bobSummary.modelsAll.map((m) => m.model), ['kimi-k3']);
+
+    // The export is scoped as well.
+    const bobExport = await fetch(`${base}/api/usage/export?format=json`).then((res) => res.json());
+    assert.equal(bobExport.rows.length, 1);
+    assert.equal(bobExport.rows[0].owner, 'bob');
+    assert.equal(bobExport.rows[0].model, 'kimi-k3');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('an ownerless key cannot be created and nothing leaks when logged out', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  const json = (path, init) => fetch(`${base}${path}`, init).then(async (res) => ({ status: res.status, body: await res.json().catch(() => null) }));
+
+  try {
+    // Regression: creating a key while logged out used to succeed with
+    // owner '', which then vanished from the per-user dashboard.
+    const created = await json('/api/keys', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'orphan', limitWindow: 'unlimited', modelsRestricted: false }),
+    });
+    assert.equal(created.status, 401);
+    assert.equal(created.body.code, 'not_logged_in');
+    assert.equal(fresh.prepare('SELECT COUNT(*) AS n FROM api_keys').get().n, 0, 'no key may be stored');
+
+    // Every per-user read refuses rather than returning another account's data.
+    for (const path of ['/api/keys', '/api/usage/summary', '/api/usage/recent', '/api/usage/models', '/api/account/events']) {
+      assert.equal((await json(path)).status, 401, `${path} must require a session`);
+    }
+    assert.equal((await fetch(`${base}/api/usage/export`)).status, 401);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+check('usage rows carry the owner so history outlives the key', () => {
+  const fresh = openDatabase(':memory:');
+  record(fresh, { keyId: null, keyName: 'gone', owner: 'alice', model: 'glm-5.3-flash', totalTokens: 5, ok: true });
+  const rows = [...exportRows(fresh, { owner: 'alice' })];
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].owner_username, 'alice');
+  // And it is invisible to anyone else.
+  assert.equal([...exportRows(fresh, { owner: 'bob' })].length, 0);
+});
+
+/* --------------------------------------------------------------- auth screen */
+
+await checkAsync('the auth screen styles buttons by class and never closes a tab', async () => {
+  const { callbackPage } = await import('../src/deepai/account.js');
+  const html = callbackPage('Logged in', 'Done', 'ok', { returnTo: '/' });
+
+  // Regression 1: the rule was `a.btn`, which never matched a <button>, so the
+  // control kept its box but lost every visual style.
+  assert.match(html, /\.btn\{/, 'the button rule must be class-based');
+  assert.ok(!/a\.btn\{/.test(html), 'a.btn would miss a <button> element');
+  assert.match(html, /cursor:pointer/, 'interactive elements need a pointer cursor');
+
+  // Regression 2: the old control called window.close(), which browsers refuse
+  // for a tab the script did not open. Login now runs in this tab instead.
+  assert.ok(!html.includes('window.close'), 'the page must not try to close itself');
+  assert.ok(!html.includes('close-tab'), 'there is no second window to close');
+
+  // The success page hands the tab back to the dashboard on its own.
+  assert.match(html, /location\.replace\(returnTo \+ '\?logged-in=1'\)/);
+  assert.match(html, /var returnTo = "\/"/);
+
+  // An error page stays put: returnTo is null, so the guard never fires.
+  const error = callbackPage('Failed', 'Try again', 'error');
+  assert.match(error, /var returnTo = null/);
+  assert.ok(!error.includes('Taking you back'), 'no auto-return notice on failure');
+});
+
+/* -------------------------------------------------------------------- done */
+
+console.log(results.join('\n'));
+console.log(process.exitCode ? '\nFAILURES PRESENT' : '\nALL CHECKS PASSED');

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepAI Gateway</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="#/">
+      <span class="brand__mark" aria-hidden="true"></span>
+      <span class="brand__name">DeepAI Gateway</span>
+    </a>
+    <nav class="nav" id="nav">
+      <a class="nav__link" href="#/" data-route="home">Overview</a>
+      <a class="nav__link" href="#/models" data-route="models">Models</a>
+      <a class="nav__link" href="#/keys" data-route="keys">API Keys</a>
+    </nav>
+    <div class="topbar__right">
+      <span class="badge badge--gray" id="account-badge">
+        <span class="dot"></span><span id="account-badge-text">Checking…</span>
+      </span>
+      <button class="btn btn--sm" id="auth-button" hidden>Sign in</button>
+      <button class="btn btn--ghost btn--icon" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <path d="M8 1.5v1.6M8 12.9v1.6M14.5 8h-1.6M3.1 8H1.5M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1M12.6 12.6l-1.1-1.1M4.5 4.5 3.4 3.4"/>
+          <circle cx="8" cy="8" r="3.1"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main class="page" id="view" aria-live="polite"></main>
+
+<div class="toasts" id="toasts"></div>
+
+<div class="modal-backdrop" id="modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal__head">
+      <h2 class="modal__title" id="modal-title"></h2>
+      <button class="btn btn--ghost btn--icon" id="modal-close" aria-label="Close">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/>
+        </svg>
+      </button>
+    </div>
+    <div class="modal__body" id="modal-body"></div>
+  </div>
+</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

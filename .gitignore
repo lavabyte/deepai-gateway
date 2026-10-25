@@ -1,0 +1,13 @@
+# Dependencies are vendored next to the app so the gateway runs without a
+# network install step.
+node_modules/
+npm-debug.log*
+
+# Runtime state: SQLite database, WAL sidecars and the DeepAI account file.
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Local overrides.
+.env
