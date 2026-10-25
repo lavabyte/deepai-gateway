@@ -12,6 +12,7 @@
  */
 
 import express from 'express';
+import { randomUUID } from 'node:crypto';
 import { checkKey, startLogin } from '../deepai/account.js';
 import { loadCatalog, publicModel } from '../deepai/catalog.js';
 import {
@@ -57,9 +58,15 @@ import {
   startOfDay,
   startOfMonth,
   summary,
-  totals,
-  windowStart,
 } from '../usage.js';
+
+/**
+ * Ceiling on concurrent pending logins.
+ *
+ * Generous for real use — a person starts one at a time — but finite, so an
+ * unauthenticated flood cannot allocate state without limit.
+ */
+const MAX_PENDING_LOGINS = 64;
 
 /**
  * Mount the dashboard API.
@@ -192,7 +199,9 @@ export function adminRouter(db, runtime) {
 
   router.get('/keys', requireSession, (req, res) => {
     const owner = req.account.username;
-    const rows = db.prepare('SELECT * FROM api_keys WHERE owner_username = ? ORDER BY created_at DESC').all(owner);
+    // `id` breaks ties: keys created in the same millisecond would otherwise
+    // come back in an unspecified order.
+    const rows = db.prepare('SELECT * FROM api_keys WHERE owner_username = ? ORDER BY created_at DESC, id DESC').all(owner);
     res.json({
       keys: rows.map((row) => publicKey(row, keyUsage(db, row.id, row.limit_window))),
       windows: [...WINDOWS],
@@ -226,7 +235,9 @@ export function adminRouter(db, runtime) {
     if (typeof restriction === 'string') return res.status(400).json({ ok: false, error: restriction });
 
     const generated = generateKey();
-    const id = `key_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    // A UUID, not a timestamp plus Math.random(): the id is a primary key, and a
+    // collision would fail the insert with no retry.
+    const id = `key_${randomUUID()}`;
 
     db.prepare(`
       INSERT INTO api_keys (
@@ -420,10 +431,18 @@ export function adminRouter(db, runtime) {
     const window = typeof req.query.window === 'string' && WINDOWS.includes(req.query.window)
       ? req.query.window
       : row.limit_window;
+    // Every figure here describes *this key*. `totals()` is owner-scoped, which
+    // would report the whole account's traffic under a single key's heading; the
+    // same numbers are derived from the key's own window instead.
+    const usage = keyUsage(db, row.id, window);
     return res.json({
       key: publicKey(row, keyUsage(db, row.id, row.limit_window)),
-      usage: keyUsage(db, row.id, window),
-      totals: totals(db, windowStart(window), row.owner_username),
+      usage,
+      totals: {
+        requests: usage.requests,
+        totalTokens: usage.totalTokens,
+        since: usage.since,
+      },
       recent: recent(db, 25, row.id, row.owner_username),
     });
   });
@@ -502,8 +521,22 @@ export async function beginLogin(db, runtime, port, options = {}) {
   // visitor's pending login, which is a session-fixation bug.
   if (existing !== undefined) return existing.flow.url;
 
-  const flow = startLogin({ port });
+  /*
+   * Bound the map. `POST /api/login` is unauthenticated by design — it is how a
+   * visitor gets a session — and the slot key comes from a cookie the caller
+   * controls, with a fresh one minted for any request that lacks it. Without a
+   * cap, unauthenticated traffic could allocate a 256-bit state and a timer per
+   * request for as long as it kept coming. The oldest attempt is evicted first,
+   * so the cap costs a genuine visitor nothing.
+   */
   if (runtime.pendingLogins === undefined) runtime.pendingLogins = new Map();
+  while (runtime.pendingLogins.size >= MAX_PENDING_LOGINS) {
+    const oldest = runtime.pendingLogins.keys().next();
+    if (oldest.done === true) break;
+    cancelLogin(runtime, oldest.value);
+  }
+
+  const flow = startLogin({ port });
   runtime.pendingLogins.set(browser, { flow });
 
   const forget = () => {

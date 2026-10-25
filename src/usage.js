@@ -53,13 +53,24 @@ const insertCache = new WeakMap();
 function insertStatement(db) {
   let statement = insertCache.get(db);
   if (statement === undefined) {
+    /*
+     * `key_id` is resolved with a subquery rather than bound directly. A
+     * completion can run for tens of seconds, and the owner may revoke the key
+     * from the dashboard while it is in flight; revoking deletes the row, so a
+     * bound id would fail the foreign key and the usage row would be lost — even
+     * though the request was already billed upstream. A subquery that matches
+     * nothing yields NULL, which the foreign key permits, so the row is kept and
+     * stays attributable through `key_name` and `owner_username`.
+     */
     statement = db.prepare(`
       INSERT INTO usage (
         key_id, key_name, owner_username, model, requested_model, endpoint,
         status, ok, input_tokens, output_tokens, cache_read_tokens,
         cache_write_tokens, reasoning_tokens, total_tokens, duration_ms,
         first_token_ms, streamed, error_code, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (
+        (SELECT id FROM api_keys WHERE id = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      )
     `);
     insertCache.set(db, statement);
   }
@@ -326,6 +337,17 @@ export function publicUsage(row) {
 /** Totals for one key inside its own limit window. */
 export function keyUsage(db, keyId, window) {
   const since = windowStart(window);
+  /*
+   * Every attempt counts, successful or not.
+   *
+   * This deliberately includes failures, because a failed request has already
+   * passed the gateway and reached DeepAI: it consumed the owner's upstream
+   * capacity and may have been billed for partial work. Counting only successes
+   * would let a caller that keeps triggering upstream errors issue unlimited
+   * requests — exactly the abuse the request limit exists to bound. An upstream
+   * outage burning a key's allowance is the honest reading of "this key made N
+   * requests", and `ok` is still recorded per row for anyone analysing failures.
+   */
   const row = db.prepare(`
     SELECT COUNT(*) AS requests, COALESCE(SUM(total_tokens), 0) AS total_tokens
       FROM usage WHERE key_id = ? AND created_at >= ?

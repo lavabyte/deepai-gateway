@@ -1596,6 +1596,165 @@ await checkAsync('a streaming failure is still framed as an event stream', async
   }
 });
 
+/* --------------------------------------------------- bugs found in review */
+
+await checkAsync('a malformed cookie cannot take the whole server down', async () => {
+  // Regression: `decodeURIComponent` threw inside the session middleware, which
+  // runs before every route, so one bad cookie made *every* response a 500 —
+  // including /healthz — and the browser was never told to drop it.
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    for (const bad of ['%ZZ', '%E0%A4%A', '%', 'abc%']) {
+      for (const path of ['/healthz', '/api/account', '/api/pricing']) {
+        const response = await fetch(`${base}${path}`, {
+          headers: { cookie: `${SESSION_COOKIE}=${bad}` },
+        });
+        assert.notEqual(response.status, 500, `${path} must survive cookie ${bad}`);
+      }
+    }
+    // The bad cookie resolves to no session, so it is treated as logged out.
+    const account = await fetch(`${base}/api/account`, { headers: { cookie: `${SESSION_COOKIE}=%ZZ` } });
+    assert.equal((await account.json()).signedIn, false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+check('a newer database is refused rather than stamped downwards', async () => {
+  // Regression: `if (current !== SCHEMA_VERSION)` wrote this build's version
+  // into a database written by a newer one. The migrations are one-way and v5 is
+  // destructive, so a later run of the newer build would re-apply them.
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { DatabaseSync } = await import('node:sqlite');
+  const file = join(mkdtempSync(join(tmpdir(), 'deepai-newer-')), 'newer.db');
+
+  const newer = new DatabaseSync(file);
+  newer.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  newer.prepare('INSERT INTO meta VALUES (?, ?)').run('schema_version', '99');
+  newer.close();
+
+  assert.throws(() => openDatabase(file), /schema is v99/, 'a future schema must be refused');
+
+  // The version is untouched, not rewritten.
+  const after = new DatabaseSync(file);
+  assert.equal(after.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, '99');
+  after.close();
+});
+
+check('the v5 index is created even with no tombstones to clean', async () => {
+  // Regression: the CREATE INDEX sat inside `if (removed.changes > 0)`, so the
+  // common upgrade path — a database that never held a revoked key — ended up
+  // without it, making the schema depend on data rather than on version.
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { DatabaseSync } = await import('node:sqlite');
+  const file = join(mkdtempSync(join(tmpdir(), 'deepai-v5idx-')), 'v4.db');
+
+  const v4 = new DatabaseSync(file);
+  v4.exec(`
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO meta VALUES ('schema_version', '4');
+    CREATE TABLE accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE,
+      api_key TEXT NOT NULL, is_pro INTEGER NOT NULL DEFAULT 0, balance TEXT, granted TEXT,
+      refresh_at TEXT, checked_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE TABLE sessions (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
+      account_id INTEGER NOT NULL REFERENCES accounts (id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE api_keys (id TEXT PRIMARY KEY, name TEXT NOT NULL, prefix TEXT NOT NULL,
+      key_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_used_at INTEGER,
+      revoked_at INTEGER, expires_at INTEGER, limit_tokens INTEGER, limit_requests INTEGER,
+      limit_window TEXT NOT NULL DEFAULT 'month', allowed_models TEXT NOT NULL DEFAULT '[]',
+      owner_username TEXT NOT NULL DEFAULT '', owner_key_hash TEXT, models_restricted INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE usage (id INTEGER PRIMARY KEY AUTOINCREMENT, key_id TEXT REFERENCES api_keys (id) ON DELETE SET NULL,
+      key_name TEXT NOT NULL DEFAULT '', model TEXT NOT NULL, requested_model TEXT NOT NULL DEFAULT '',
+      endpoint TEXT NOT NULL DEFAULT 'chat.completions', status INTEGER NOT NULL DEFAULT 200,
+      ok INTEGER NOT NULL DEFAULT 1, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+      reasoning_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0,
+      duration_ms INTEGER NOT NULL DEFAULT 0, first_token_ms INTEGER, streamed INTEGER NOT NULL DEFAULT 0,
+      error_code TEXT, created_at INTEGER NOT NULL, owner_username TEXT NOT NULL DEFAULT '');
+    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE auth_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event TEXT NOT NULL,
+      username TEXT NOT NULL DEFAULT '', detail TEXT, created_at INTEGER NOT NULL);
+  `);
+  v4.prepare('INSERT INTO accounts (username, api_key, created_at, updated_at) VALUES (?,?,?,?)').run('u', 'k', 1, 1);
+  // Deliberately no revoked keys.
+  v4.close();
+
+  const upgraded = openDatabase(file);
+  const names = upgraded.prepare("SELECT name FROM sqlite_master WHERE type='index'").all().map((row) => row.name);
+  assert.ok(names.includes('api_keys_active'), 'the index is part of the schema, not a side effect of the DELETE');
+  upgraded.close();
+});
+
+check('usage survives the key being revoked mid-request', () => {
+  // Regression: `key_id` was bound directly, so deleting the key while its
+  // completion was still streaming made the usage INSERT fail the foreign key
+  // and the row was lost — even though the request had reached DeepAI.
+  const fresh = openDatabase(':memory:');
+  saveAccount(fresh, { apiKey: 'k', username: 'u', isPro: false });
+  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+                 VALUES ('k1', 'gone', 'sk-g', 'h-g', 1, 'unlimited', '[]', 'u')`).run();
+  fresh.prepare('DELETE FROM api_keys WHERE id = ?').run('k1');
+
+  record(fresh, { keyId: 'k1', keyName: 'gone', owner: 'u', model: 'glm-5.3-flash', totalTokens: 42, ok: true });
+  const row = fresh.prepare('SELECT key_id, key_name, total_tokens FROM usage').get();
+  assert.equal(row.key_id, null, 'the id resolves to NULL rather than failing the insert');
+  assert.equal(row.key_name, 'gone');
+  assert.equal(row.total_tokens, 42);
+  assert.equal(totals(fresh, 0, 'u').totalTokens, 42, 'the owner still sees the spend');
+});
+
+await checkAsync('unauthenticated login flooding cannot grow state without bound', async () => {
+  // Regression: the slot key comes from a caller-controlled cookie on an
+  // unauthenticated route, and a fresh cookie is minted for any request that
+  // lacks one — so every request allocated a 256-bit state and a timer, with no
+  // ceiling. The map must stay bounded no matter how many distinct callers ask.
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    // 150 distinct "browsers", each with no login cookie of its own.
+    for (let i = 0; i < 150; i += 1) {
+      await fetch(`${base}/api/login`, { method: 'POST' });
+    }
+    const pending = app.locals.runtime.pendingLogins;
+    assert.ok(pending instanceof Map, 'the runtime keeps a pending-login map');
+    assert.ok(pending.size <= 64, `pending logins must stay bounded, got ${pending.size}`);
+    // Bounded, but still usable: the newest caller has a working attempt.
+    const fresh_ = await fetch(`${base}/api/login`, { method: 'POST' }).then((r) => r.json());
+    assert.match(fresh_.url, /^https:\/\/api\.deepai\.org\/deepai_code\/desktop_auth\//);
+  } finally {
+    // Cancel everything so no callback server outlives this check.
+    const pending = app.locals.runtime.pendingLogins;
+    if (pending instanceof Map) {
+      for (const key of [...pending.keys()]) {
+        try {
+          pending.get(key)?.flow?.close?.();
+        } catch {
+          /* best effort */
+        }
+      }
+    }
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 /* ---------------------------------------------------------- multi-user scope */
 
 await checkAsync('two accounts on one gateway never see each other', async () => {

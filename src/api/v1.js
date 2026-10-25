@@ -89,7 +89,7 @@ export function v1Router(db) {
     }
   });
 
-  router.post('/chat/completions', authenticate(db), enforceModel, (req, res, next) => {
+  router.post('/chat/completions', authenticate(db), enforceModel(FALLBACK_MODEL), (req, res, next) => {
     handleChatCompletion(db, req, res).catch(next);
   });
 

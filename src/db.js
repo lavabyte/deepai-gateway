@@ -44,13 +44,28 @@ export function openDatabase(file) {
     db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version')?.value ?? 0,
   );
 
+  /*
+   * A database written by a newer build must never be stamped down to this
+   * one's version. The migrations below are one-way, and at least one is
+   * destructive (v5 deletes rows), so re-running them against an already
+   * migrated schema could delete data. Refuse rather than guess.
+   */
+  if (current > SCHEMA_VERSION) {
+    db.close();
+    throw new Error(
+      `database schema is v${current}, but this build understands v${SCHEMA_VERSION}. `
+      + 'Upgrade the gateway, or restore a backup taken with this version.',
+    );
+  }
+
   if (current < 1) migrateToV1(db);
   if (current < 2) migrateToV2(db);
   if (current < 3) migrateToV3(db);
   if (current < 4) migrateToV4(db);
   if (current < 5) migrateToV5(db);
 
-  if (current !== SCHEMA_VERSION) {
+  // Only ever move forwards.
+  if (current < SCHEMA_VERSION) {
     db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
       .run('schema_version', String(SCHEMA_VERSION));
   }
@@ -282,10 +297,11 @@ function migrateToV4(db) {
  * NULL by the foreign key, so history stays attributable to the name it had.
  */
 function migrateToV5(db) {
-  const removed = db.prepare('DELETE FROM api_keys WHERE revoked_at IS NOT NULL').run();
-  if (Number(removed.changes) > 0) {
-    db.exec('CREATE INDEX IF NOT EXISTS api_keys_active ON api_keys (owner_username, revoked_at)');
-  }
+  db.prepare('DELETE FROM api_keys WHERE revoked_at IS NOT NULL').run();
+  // The index is part of the schema, so it is created unconditionally: gating it
+  // on `changes > 0` made the schema depend on whether a deployment happened to
+  // hold a tombstone, and the common upgrade path ended up without it.
+  db.exec('CREATE INDEX IF NOT EXISTS api_keys_active ON api_keys (owner_username, revoked_at)');
 }
 
 /** Short stable digest used to derive a username when DeepAI gives none. */

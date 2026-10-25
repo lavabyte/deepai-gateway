@@ -11,6 +11,7 @@
  */
 
 import express from 'express';
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { openDatabase } from './src/db.js';
@@ -279,7 +280,25 @@ export function start(overrides = {}) {
   return { server, db, app };
 }
 
-// Start only when executed directly, not when imported by a test.
-if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+/*
+ * Start only when executed directly, not when imported by a test.
+ *
+ * Both sides are resolved through `realpathSync`: `import.meta.url` is already
+ * realpath-resolved, while `argv[1]` keeps the path the shell was given. A plain
+ * string comparison therefore failed for a symlinked launcher or deploy
+ * directory, and the process exited silently with status 0 instead of starting.
+ */
+function isDirectInvocation() {
+  const entry = process.argv[1];
+  if (entry === undefined) return false;
+  try {
+    return realpathSync(entry) === fileURLToPath(import.meta.url);
+  } catch {
+    // An unreadable argv[1] cannot be this module.
+    return false;
+  }
+}
+
+if (isDirectInvocation()) {
   start();
 }

@@ -87,17 +87,29 @@ export function authenticate(db) {
 
 /**
  * Reject a model the key is not allowed to use. Runs after the body is parsed.
+ *
+ * The effective model is resolved here, applying the same default the request
+ * handler would, and checked against the allow-list. Checking the raw field let
+ * a restricted key bypass its own restriction: `model` omitted, set to `''`, or
+ * sent as a non-string all read as "no model requested", passed the gate, and
+ * were then served with the fallback model — which the key was never entitled
+ * to.
+ *
+ * @param {string} fallback - model used when the request does not name one.
  */
-export function enforceModel(req, res, next) {
-  const requested = typeof req.body?.model === 'string' ? req.body.model : '';
-  if (requested === '' || allowsModel(req.gatewayKey, requested)) return next();
-  return apiError(
-    res,
-    403,
-    `This API key may not use model "${requested}".`,
-    'model_not_allowed',
-    'permission_error',
-  );
+export function enforceModel(fallback) {
+  return (req, res, next) => {
+    const raw = req.body?.model;
+    const requested = typeof raw === 'string' && raw !== '' ? raw : fallback;
+    if (allowsModel(req.gatewayKey, requested)) return next();
+    return apiError(
+      res,
+      403,
+      `This API key may not use model "${requested}".`,
+      'model_not_allowed',
+      'permission_error',
+    );
+  };
 }
 
 

@@ -257,7 +257,16 @@ export function tokenFromCookie(header) {
   return cookieValue(header, SESSION_COOKIE);
 }
 
-/** Read one named cookie out of a `Cookie` header. */
+/**
+ * Read one named cookie out of a `Cookie` header.
+ *
+ * An undecodable value is treated as absent, never thrown. Cookie values arrive
+ * straight from the network, and `decodeURIComponent` throws on a lone `%` or a
+ * malformed escape like `%ZZ`; that throw would happen inside the session
+ * middleware, which runs before every route — so one bad cookie would turn every
+ * response into a 500, including `/healthz`, and the browser would never be told
+ * to drop it.
+ */
 export function cookieValue(header, name) {
   if (typeof header !== 'string' || header === '') return undefined;
   for (const part of header.split(';')) {
@@ -265,7 +274,12 @@ export function cookieValue(header, name) {
     if (index === -1) continue;
     if (part.slice(0, index).trim() !== name) continue;
     const value = part.slice(index + 1).trim();
-    return value === '' ? undefined : decodeURIComponent(value);
+    if (value === '') return undefined;
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return undefined;
+    }
   }
   return undefined;
 }
