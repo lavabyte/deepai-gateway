@@ -286,8 +286,11 @@ async function handleChatCompletion(db, req, res) {
       },
     }));
   } else {
-    if (streamed && !res.headersSent) res.status(status);
     if (streamed) {
+      // A streaming failure still has to look like a stream: without the SSE
+      // content type an SDK parsing the response as an event stream would be
+      // reading an unknown content type, and a proxy could buffer or rewrite it.
+      openEventStream(res, status);
       res.write(`data: ${JSON.stringify({
         error: {
           message: failure?.message ?? 'Upstream request failed.',
@@ -333,6 +336,29 @@ async function handleChatCompletion(db, req, res) {
 }
 
 /**
+ * Send the response headers for a server-sent-events stream.
+ *
+ * Shared by the success path and the failure path: a stream that fails before
+ * its first delta must still be framed as a stream. Setting the status only when
+ * headers have not been sent keeps this safe to call after a partial stream.
+ *
+ * @param {import('express').Response} res
+ * @param {number} [status] - status to use when the headers are still ours.
+ */
+function openEventStream(res, status) {
+  if (res.headersSent) return;
+  res.status(status ?? 200);
+  res.setHeader('content-type', 'text/event-stream; charset=utf-8');
+  res.setHeader('cache-control', 'no-cache, no-transform');
+  res.setHeader('connection', 'keep-alive');
+  res.setHeader('x-accel-buffering', 'no');
+  res.flushHeaders?.();
+  // Without this, small writes can be held back by Nagle's algorithm and
+  // arrive in bursts instead of streaming.
+  res.socket?.setNoDelay?.(true);
+}
+
+/**
  * Write one SSE chunk, opening the stream on first use.
  *
  * The envelope up to and including `"delta":` is built once per request, so a
@@ -345,15 +371,7 @@ function makeWriter(res, id, model, created) {
   return (delta, finishReason = null) => {
     if (!opened) {
       opened = true;
-      res.status(200);
-      res.setHeader('content-type', 'text/event-stream; charset=utf-8');
-      res.setHeader('cache-control', 'no-cache, no-transform');
-      res.setHeader('connection', 'keep-alive');
-      res.setHeader('x-accel-buffering', 'no');
-      res.flushHeaders?.();
-      // Without this, small writes can be held back by Nagle's algorithm and
-      // arrive in bursts instead of streaming.
-      res.socket?.setNoDelay?.(true);
+      openEventStream(res, 200);
     }
     res.write(`${envelope}${JSON.stringify(delta)},"finish_reason":${finishReason === null ? 'null' : JSON.stringify(finishReason)}}]}\n\n`);
   };

@@ -1548,6 +1548,54 @@ await checkAsync('/api/account never reports another account\'s key count', asyn
   }
 });
 
+await checkAsync('a streaming failure is still framed as an event stream', async () => {
+  // Regression: the error path wrote `data: {...}` bytes without ever setting
+  // the SSE content type, so a client parsing the response as an event stream
+  // received an untyped body it could not classify.
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const { hashKey } = await import('../src/keys.js');
+  saveAccount(fresh, { apiKey: 'k', username: 'sse-user', isPro: false });
+  const plaintext = 'sk-' + 'a'.repeat(40);
+  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+                 VALUES ('ksse', 'sse', 'sk-aaaa', ?, 1, 'unlimited', '[]', 'sse-user')`)
+    .run(hashKey(plaintext));
+
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    // This reaches DeepAI, which rejects the unknown model. The point under test
+    // is the response framing, not the upstream verdict, so any non-2xx proves
+    // the failure path was taken.
+    const response = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${plaintext}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'definitely-not-a-real-model',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      }),
+    });
+
+    assert.notEqual(response.status, 200, 'the request must have failed');
+    assert.match(
+      String(response.headers.get('content-type')),
+      /text\/event-stream/,
+      'a failed stream must still declare the event-stream content type',
+    );
+    assert.match(String(response.headers.get('cache-control')), /no-cache/);
+    const body = await response.text();
+    assert.match(body, /^data: /, 'the body is SSE');
+    assert.match(body, /"error"/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 /* ---------------------------------------------------------- multi-user scope */
 
 await checkAsync('two accounts on one gateway never see each other', async () => {
