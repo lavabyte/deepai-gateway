@@ -308,6 +308,9 @@ code, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .step__lead { margin-bottom: 8px; }
 .step__lead:last-of-type { margin-bottom: 0; }
 .step__aside { display: block; opacity: .75; font-size: 12px; }
+/* A disclosure that reads as a quiet secondary route, not as a button. */
+.step__summary { cursor: pointer; color: var(--link); }
+.step__summary:hover { text-decoration: underline; }
 .step__list { margin: 0 0 2px; padding-left: 18px; }
 .step__list li { margin-bottom: 4px; }
 .step__list li:last-child { margin-bottom: 0; }

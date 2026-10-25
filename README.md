@@ -135,7 +135,7 @@ The dashboard does the explaining, so nobody has to know why the page failed:
 - On `127.0.0.1` the redirect just works, so nothing is said at all beyond a quiet
   *"Signed in on DeepAI already? Paste the address it sent you"* escape hatch.
 
-Either route goes through the same validation: the gateway checks the address
+Both paste routes go through the same validation: the gateway checks the address
 against the sign-in that this browser started — only that browser can finish it, and
 an address without a matching `state` is refused — then exchanges its code exactly
 as the callback route would. A paste that is cut off says so in as many words
@@ -144,6 +144,32 @@ itself.
 
 The dashboard shows the exact address to expect, and the gateway logs it at boot
 when `HOST` is not loopback.
+
+**3. Sign in with an API key (simplest).** `POST /api/login/key` takes a DeepAI API
+key and turns it into a session, with no callback, no address to copy and no
+password. The dashboard offers it under **"Or paste a DeepAI API key"**. A key is
+the same credential the sign-in exchange would have produced, so nothing is lost by
+arriving with it directly — it is simply the shortest route when the gateway is
+reached over the network.
+
+The key is checked the same way a stored account is (`GET /deepai_code/theos`), so a
+key that is refused says which kind of refusal it was:
+
+| What DeepAI said | What the visitor is told |
+| --- | --- |
+| `theos` returns 401 and the public API does not recognise the key either | "DeepAI did not recognise that key" |
+| `theos` returns 401 but the public model API *does* accept it | the key is valid but **not enabled for DeepAI Code** — which is what this gateway uses |
+| anything else | DeepAI is unreachable; not the visitor's mistake |
+
+That middle case is the likeliest failure of all, because `deepai.org` issues a key
+for the public model API and it is not automatically enabled for DeepAI Code.
+
+**Ownership is derived from the key, never typed by the visitor.** `api_keys.owner_username`
+decides who sees and pays for a key, so a name the visitor could choose would let
+them claim someone else's account. The owner is therefore
+`key-<sha256(key)[0..16]>`: one-to-one with the key, non-reversible, and impossible
+to point at another account. A test signs in with two keys and asserts that the
+second cannot see the first's gateway keys.
 
 **2. Forward the port.** Make the loopback address reach the gateway:
 
@@ -363,6 +389,7 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | `GET` | `/login` | Browser sign-in; redirects to DeepAI (`?json=1` returns the URL and the callback address) |
 | `GET` | `/auth-callback` · `/callback` | Where DeepAI sends the browser back. The host is DeepAI's — always loopback — so see [Signing in from another machine](#signing-in-from-another-machine) |
 | `POST` | `/api/login/complete` | Finish that sign-in from the dashboard by pasting the address the browser was sent to |
+| `POST` | `/api/login/key` | Sign in directly with a DeepAI API key — no callback and no password |
 | `GET` | `/logout` | Sign out, then redirect to `/` |
 | `GET` | `/api/account` | This session's account, allowance, default model, key quota |
 | `GET` | `/api/account/events` | That account's auth trail (login, logout, refresh, denied) |

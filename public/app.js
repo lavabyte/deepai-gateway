@@ -103,11 +103,6 @@ function isAuthFailure(error) {
   return error instanceof ApiError && error.status === 401;
 }
 
-/**
- * Render a view that needs a session, or a log-in prompt when there is none.
- *
- * @returns {boolean} true when the caller should stop rendering.
- */
 /** Whether an origin points at the machine the browser itself is running on. */
 function isLoopbackOrigin(origin) {
   return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(origin);
@@ -121,17 +116,17 @@ function isLoopbackOrigin(origin) {
  * public address therefore lands on a page that cannot load — while DeepAI is
  * holding a sign-in that is still perfectly valid.
  *
- * Two states, because the same explanation is useful at different moments:
+ * Three states, because the same explanation is useful at different moments:
  *
  *   - **before** the visitor leaves, and only when their browser is *not* on the
  *     gateway's own host (so the failure is certain, not hypothetical): what is
- *     about to happen, and the one thing they need to remember;
- *   - **while** a sign-in is waiting: the single action that finishes it.
- *
- * The address is shown because it is the thing to look for in the address bar.
+ *     about to happen, and the two ways to finish it;
+ *   - **while** a sign-in is waiting: the single action that finishes it;
+ *   - **on the gateway's own host**: nothing, beyond a quiet fallback, because the
+ *     redirect simply works there.
  *
  * @param {{pending: boolean, remote: boolean}} options
- * @returns {string} markup, always containing the paste field and its button.
+ * @returns {string} markup; every state but the last contains the paste field.
  */
 function finishStep({ pending, remote }) {
   const address = state.callbackUrl;
@@ -189,9 +184,9 @@ function finishStep({ pending, remote }) {
       </section>`;
   }
 
-  // On the gateway's own host the redirect just works, so stay out of the way and
-  // keep the escape hatch one click away rather than explaining a problem the
-  // visitor is unlikely to hit.
+  // On the gateway's own host the redirect works, so stay out of the way and keep
+  // the fallback one click away rather than explaining a problem this visitor is
+  // unlikely to hit.
   return `
     <p class="card__sub mt-3" id="finish-step">
       Signed in on DeepAI already?
@@ -200,6 +195,33 @@ function finishStep({ pending, remote }) {
     <div id="finish-fields" hidden>${field}</div>`;
 }
 
+/**
+ * The second way in: a pasted API key.
+ *
+ * A key is the same credential the browser sign-in would have produced, so it
+ * needs no callback, no address to copy and no password — which makes it the
+ * shortest route on a gateway reached over the network. Kept as a quiet
+ * disclosure so it never competes with the ordinary sign-in.
+ */
+function keyForm() {
+  return `
+    <details class="mt-3" id="key-step">
+      <summary class="card__sub step__summary">Or paste a DeepAI API key</summary>
+      <div class="field mt-3">
+        <label class="field__label" for="api-key">DeepAI API key</label>
+        <input class="input" id="api-key" type="password" spellcheck="false" autocomplete="off"
+          placeholder="Paste your key">
+        <div class="field__hint">The key is stored on the server so it can serve your requests.</div>
+      </div>
+      <div class="row mt-3"><button class="btn" id="login-with-key">Continue</button></div>
+    </details>`;
+}
+
+/**
+ * Render a view that needs a session, or a log-in prompt when there is none.
+ *
+ * @returns {boolean} true when the caller should stop rendering.
+ */
 function needsLogin() {
   if (state.account?.signedIn === true) return false;
   const pending = state.account?.pendingLogin === true;
@@ -216,10 +238,19 @@ function needsLogin() {
       <div class="card__sub mt-2">Log in with DeepAI to see your API keys and usage.</div>
       <div class="row mt-3"><button class="btn btn--primary" id="login-inline">Log in with DeepAI</button></div>
       ${finishStep({ pending, remote })}
+      ${keyForm()}
     </div>`;
 
   $('login-inline')?.addEventListener('click', () => void startLoginFlow());
   $('login-complete')?.addEventListener('click', () => void completeLoginManually());
+  $('login-with-key')?.addEventListener('click', () => void signInWithKey());
+  $('api-key')?.addEventListener('keydown', (event) => {
+    // Enter submits, as it would in any other one-field form.
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void signInWithKey();
+    }
+  });
   $('login-reveal')?.addEventListener('click', () => {
     const fields = $('finish-fields');
     if (fields) fields.hidden = false;
@@ -229,6 +260,44 @@ function needsLogin() {
   // A waiting sign-in is the moment to type, so put the caret where it is needed.
   if (pending) $('callback-url')?.focus();
   return true;
+}
+
+/**
+ * Sign in with a pasted DeepAI API key.
+ *
+ * The key is cleared from the field as soon as it has been accepted, so it does not
+ * linger in the page after it is no longer needed.
+ */
+async function signInWithKey() {
+  const field = $('api-key');
+  const key = field?.value?.trim() ?? '';
+  if (key === '') {
+    toast('Paste your DeepAI API key first.', 'error');
+    field?.focus();
+    return;
+  }
+
+  const button = $('login-with-key');
+  const label = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Checking…';
+  }
+  try {
+    await api('/login/key', { method: 'POST', body: { key } });
+    if (field) field.value = '';
+    toast('Signed in with your API key');
+    await loadAccount();
+    await render();
+  } catch (error) {
+    toast(String(error.message ?? error), 'error');
+    if (button) {
+      button.disabled = false;
+      button.textContent = label ?? 'Continue';
+    }
+    field?.focus();
+    field?.select();
+  }
 }
 
 /**

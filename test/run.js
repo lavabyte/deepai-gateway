@@ -2188,6 +2188,17 @@ await checkAsync('the sign-in step speaks to the visitor, not to the protocol', 
   assert.match(pending, /Finish signing in/, 'the control names the outcome');
   assert.match(pending, /note--warning/, 'and it is visually prominent');
 
+  // Every state offers the API-key route, kept secondary so it never competes
+  // with the ordinary sign-in.
+  for (const [name, html] of [['local', local], ['remote', remote], ['pending', pending]]) {
+    assert.match(html, /id="key-step"/, `${name} must offer the API-key route`);
+    assert.match(html, /<input class="input" id="api-key" type="password"/, `${name} must hide the key as it is typed`);
+    assert.match(html, /id="login-with-key"/, `${name} needs a way to submit the key`);
+    assert.match(html, /Or paste a DeepAI API key/, `${name} must name the route plainly`);
+    // It is the second route, not the warning: it must not be styled as one.
+    assert.ok(!/<section class="note note--warning[^>]*id="key-step"/.test(html), `${name} must not alarm about the key route`);
+  }
+
   // No state may leak the old developer-facing wording.
   for (const [name, html] of [['local', local], ['remote', remote], ['pending', pending]]) {
     for (const jargon of ['Browser did not come back', 'Finish manually', 'login-manual', 'window.close']) {
@@ -2204,23 +2215,49 @@ check('every sign-in failure has something useful to say', async () => {
   const { join } = await import('node:path');
   const root = new URL('..', import.meta.url).pathname;
 
-  // Every reason the flow can report must have a message, or it silently degrades
-  // to a generic one that tells the visitor nothing.
   const flow = readFileSync(join(root, 'src', 'deepai', 'account.js'), 'utf8');
-  const reported = new Set([...flow.matchAll(/reason: '([a-z_-]+)'/g)].map((match) => match[1]));
-  assert.ok(reported.size >= 8, `expected the flow's reasons to be found, saw ${reported.size}`);
-
   const admin = readFileSync(join(root, 'src', 'api', 'admin.js'), 'utf8');
-  const table = admin.slice(admin.indexOf('const COMPLETION_FAILURES'), admin.indexOf('const TERMINAL_COMPLETION_REASONS'));
-  const answered = new Set([...table.matchAll(/^\s{2}'?([a-z_-]+)'?:/gm)].map((match) => match[1]));
 
-  const missing = [...reported].filter((reason) => !answered.has(reason));
-  assert.deepEqual(missing, [], `these reasons would fall back to a generic message: ${missing}`);
+  /** The `reason:` values inside one slice of a module. */
+  const reasonsIn = (text) => new Set([...text.matchAll(/reason: '([a-z_-]+)'/g)].map((m) => m[1]));
+  /** The keys of one `const NAME = { ... }` table. */
+  const keysOf = (name) => {
+    const from = admin.indexOf(`const ${name} = {`);
+    const table = admin.slice(from, admin.indexOf('};', from));
+    return new Set([...table.matchAll(/^\s{2}'?([a-z_-]+)'?:/gm)].map((m) => m[1]));
+  };
+  const messagesIn = (name) => {
+    const from = admin.indexOf(`const ${name} = {`);
+    return admin.slice(from, admin.indexOf('};', from));
+  };
 
-  // The messages are read by someone looking at a page that would not load, so
-  // they must not name protocol parameters.
-  for (const message of table.matchAll(/'([^']{20,})'/g)) {
-    assert.ok(!/\bstate\b|`code`/.test(message[1]), `jargon in: ${message[1]}`);
+  /*
+   * There are two families of failure and two tables, so each table is checked
+   * against the code that actually produces *its* reasons. A single scan of the
+   * module would demand that every reason everywhere be answered in one table —
+   * which is how this check first failed when the API-key route was added.
+   */
+  const completion = reasonsIn(flow.slice(
+    flow.indexOf('export function parseCallbackInput'),
+    // The callback flow ends where the landing page begins; the key helpers live
+    // after it.
+    flow.indexOf(' * Landing page shown in the browser'),
+  ));
+  assert.ok(completion.size >= 8, `expected the callback reasons to be found, saw ${completion.size}`);
+  const unanswered = [...completion].filter((reason) => !keysOf('COMPLETION_FAILURES').has(reason));
+  assert.deepEqual(unanswered, [], `these completion reasons would fall back to a generic message: ${unanswered}`);
+
+  const keyLogin = reasonsIn(flow.slice(flow.indexOf('export async function checkPastedKey')));
+  assert.ok(keyLogin.size >= 3, `expected the API-key reasons to be found, saw ${keyLogin.size}`);
+  const unansweredKey = [...keyLogin].filter((reason) => !keysOf('KEY_LOGIN_FAILURES').has(reason));
+  assert.deepEqual(unansweredKey, [], `these API-key reasons would fall back to a generic message: ${unansweredKey}`);
+
+  // The messages are read by someone looking at a page that would not load or a key
+  // that was refused, so they must not name protocol parameters.
+  for (const table of ['COMPLETION_FAILURES', 'KEY_LOGIN_FAILURES']) {
+    for (const message of messagesIn(table).matchAll(/'([^']{20,})'/g)) {
+      assert.ok(!/\bstate\b|`code`/.test(message[1]), `jargon in ${table}: ${message[1]}`);
+    }
   }
 
   // Nothing may be terminal by accident: a mistyped paste must stay retryable.
@@ -2228,6 +2265,188 @@ check('every sign-in failure has something useful to say', async () => {
   const terminalSet = terminal.slice(0, terminal.indexOf('];'));
   for (const retryable of ['not-an-address', 'too-long', 'no-code', 'no-state', 'invalid_state', 'busy']) {
     assert.ok(!terminalSet.includes(retryable), `${retryable} must leave the sign-in retryable`);
+  }
+});
+
+check('a pasted key owns itself, so nobody can claim another account', async () => {
+  const { usernameForKey } = await import('../src/deepai/account.js');
+
+  const owner = usernameForKey('sk-aaaa');
+  assert.match(owner, /^key-[0-9a-f]{16}$/);
+  // The owner is the ownership key for `api_keys`, so it must be one-to-one: the
+  // same key always resolves to the same account, and different keys never merge.
+  assert.equal(usernameForKey('sk-aaaa'), owner, 'the same key is always the same account');
+  assert.notEqual(usernameForKey('sk-aaab'), owner, 'a different key is a different account');
+  // Only the fingerprint is stored, never anything reversible.
+  assert.ok(!owner.includes('aaaa'), 'the owner name must not carry the key');
+  assert.equal(usernameForKey('sk-aaaa').length, 20);
+  // Bounded whatever was pasted, since this becomes a database key.
+  assert.ok(usernameForKey('x'.repeat(4096)).length === 20);
+});
+
+await checkAsync('signing in with a pasted API key skips the browser round trip', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const { usernameForKey } = await import('../src/deepai/account.js');
+  const logs = [];
+  const app = createApp(fresh, { log: (message) => logs.push(message), logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const json = (body, status = 200) => new Response(JSON.stringify(body), {
+    status, headers: { 'content-type': 'application/json' },
+  });
+  const realFetch = globalThis.fetch;
+  const http = (...args) => realFetch(...args);
+  const answer = (url) => {
+    const target = String(url);
+    if (target.endsWith('/deepai_code/theos')) {
+      return json({ enabled: true, balance: '10.50000', granted: '50.00000', refresh_at: '2026-01-01T00:00:00+00:00' });
+    }
+    if (target.endsWith('/get_usage_summary')) return json({ is_authenticated: true, is_pro: true });
+    return json({ err: 'unexpected' }, 404);
+  };
+
+  try {
+    globalThis.fetch = async (url) => answer(url);
+
+    const signIn = (key, cookie) => http(`${base}/api/login/key`, {
+      method: 'POST',
+      headers: cookie === undefined ? { 'content-type': 'application/json' } : { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ key }),
+    });
+
+    // Whitespace around a pasted key is normal and must not matter.
+    const first = await signIn('  sk-good-key  ');
+    const firstText = await first.text();
+    assert.equal(first.status, 200, firstText);
+    // The key must never come back, in any form.
+    assert.ok(!firstText.includes('sk-good-key'), 'the response must not echo the key');
+    const body = JSON.parse(firstText);
+    assert.equal(body.created, true);
+    assert.equal(body.username, usernameForKey('sk-good-key'));
+
+    const cookie = String(first.headers.get('set-cookie') ?? '').split(';')[0];
+    assert.match(cookie, /deepai_gateway_session=/);
+
+    // The account works immediately, with the balance we already read.
+    const account = await http(`${base}/api/account`, { headers: { cookie } }).then((r) => r.json());
+    assert.equal(account.signedIn, true);
+    assert.equal(account.username, usernameForKey('sk-good-key'));
+    assert.equal(account.isPro, true);
+    assert.equal(account.allowance?.balance, '10.50000');
+
+    // The same key again re-attaches to the same account rather than duplicating it.
+    const again = await signIn('sk-good-key', cookie);
+    assert.equal(again.status, 200);
+    assert.equal((await again.json()).created, false, 'the same key must not create a second owner');
+    assert.equal(listAccounts(fresh).length, 1);
+
+    // A different key is a different account, and cannot see the first one's keys.
+    const created = await http(`${base}/api/keys`, {
+      method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'owned-by-first' }),
+    });
+    assert.equal(created.status, 201, await created.text());
+
+    const second = await signIn('sk-other-key');
+    const secondCookie = String(second.headers.get('set-cookie') ?? '').split(';')[0];
+    const secondAccount = await http(`${base}/api/account`, { headers: { cookie: secondCookie } }).then((r) => r.json());
+    assert.equal(secondAccount.username, usernameForKey('sk-other-key'));
+    assert.notEqual(secondAccount.username, account.username);
+    const stolen = await http(`${base}/api/keys`, { headers: { cookie: secondCookie } }).then((r) => r.json());
+    assert.deepEqual(stolen.keys, [], 'a second key must not inherit the first key\'s gateway keys');
+    assert.equal(listAccounts(fresh).length, 2);
+
+    // A key is a credential: it must not reach the log either.
+    assert.ok(logs.length > 0, 'the sign-in should be logged');
+    assert.ok(!logs.join('\n').includes('sk-good-key'), 'the key must never be logged');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('a refused API key explains which kind of refusal it was', async () => {
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const json = (body, status = 200) => new Response(JSON.stringify(body), {
+    status, headers: { 'content-type': 'application/json' },
+  });
+  const realFetch = globalThis.fetch;
+  const http = (...args) => realFetch(...args);
+  const post = (body) => http(`${base}/api/login/key`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+
+  /** Emulate one response shape per endpoint. */
+  const lane = ({ theos, usage }) => async (url) => {
+    const target = String(url);
+    if (target.endsWith('/deepai_code/theos')) {
+      return theos === 'ok'
+        ? json({ enabled: true, balance: '1.0', granted: '1.0', refresh_at: null })
+        : json({ err: 'no' }, theos);
+    }
+    if (target.endsWith('/get_usage_summary')) {
+      return usage === 'auth' ? json({ is_authenticated: true }) : json({ err: 'no' }, 401);
+    }
+    return json({}, 404);
+  };
+
+  try {
+    // Shapes that are not a key at all: refused before any network call.
+    globalThis.fetch = async () => { throw new Error('must not be called'); };
+    for (const body of [{}, { key: '' }, { key: '   ' }, { key: 42 }, { key: null }, { key: 'a\nb' }, { key: 'x'.repeat(600) }]) {
+      const bad = await post(body);
+      assert.equal(bad.status, 400, `${JSON.stringify(body).slice(0, 40)} must be refused`);
+      assert.equal((await bad.json()).code, 'invalid_key');
+    }
+    assert.equal(listAccounts(fresh).length, 0, 'nothing may be created from a malformed key');
+
+    // A key DeepAI does not recognise.
+    globalThis.fetch = lane({ theos: 401, usage: 401 });
+    const rejected = await post({ key: 'sk-nonsense' });
+    assert.equal(rejected.status, 401);
+    assert.equal((await rejected.json()).code, 'rejected');
+
+    // A real DeepAI key that is not enabled for the Code lane: the likeliest
+    // failure of all, and the one that must not be reported as a typo.
+    globalThis.fetch = lane({ theos: 401, usage: 'auth' });
+    const wrongLane = await post({ key: 'sk-model-api-only' });
+    assert.equal(wrongLane.status, 403);
+    const wrongLaneBody = await wrongLane.json();
+    assert.equal(wrongLaneBody.code, 'not-for-code');
+    assert.match(wrongLaneBody.error, /not enabled for DeepAI Code/);
+
+    // DeepAI is down, which is not the visitor's mistake.
+    globalThis.fetch = lane({ theos: 500, usage: 401 });
+    const down = await post({ key: 'sk-fine' });
+    assert.equal(down.status, 502);
+    assert.equal((await down.json()).code, 'unreachable');
+
+    // And a network failure is reported as one rather than as a bad key.
+    globalThis.fetch = async () => { throw new Error('offline'); };
+    const offline = await post({ key: 'sk-fine' });
+    assert.equal(offline.status, 502);
+    assert.equal((await offline.json()).code, 'unreachable');
+
+    // No refusal may have created an account or handed out a session.
+    assert.equal(listAccounts(fresh).length, 0);
+    // No refusal may hand out a session. (`deepai_gateway_login` is the
+    // browser-grouping cookie, not a credential, so only the session counts.)
+    for (const response of [rejected, wrongLane, down, offline]) {
+      const cookies = String(response.headers.get('set-cookie') ?? '');
+      assert.ok(!cookies.includes('deepai_gateway_session='), 'a refused key must not create a session');
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 

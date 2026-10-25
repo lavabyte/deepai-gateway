@@ -13,7 +13,7 @@
 
 import express from 'express';
 import { randomUUID } from 'node:crypto';
-import { checkKey, loopbackCallbackUrl, startLogin } from '../deepai/account.js';
+import { checkKey, checkPastedKey, loopbackCallbackUrl, startLogin, usernameForKey } from '../deepai/account.js';
 import { loadCatalog, publicModel } from '../deepai/catalog.js';
 import {
   MAX_KEYS,
@@ -96,6 +96,26 @@ const COMPLETION_FAILURES = {
  * mistyped paste must not cost the visitor their sign-in.
  */
 const TERMINAL_COMPLETION_REASONS = new Set(['expired', 'too_many_attempts', 'exchange_failed']);
+
+/**
+ * What each API-key sign-in failure says to the visitor.
+ *
+ * A separate table from the completion failures because these are a different
+ * situation: there is no waiting sign-in and nothing to retry, only a key that
+ * DeepAI would not accept. The `not-for-code` case is the one worth the words —
+ * `deepai.org` issues a key for the public model API, and it is not automatically
+ * enabled for DeepAI Code, so "wrong key" would send the visitor looking for a
+ * mistake they did not make.
+ */
+const KEY_LOGIN_FAILURES = {
+  invalid_key: [400, 'Paste the API key itself — one line, with nothing else around it.'],
+  rejected: [401, 'DeepAI did not recognise that key. Copy it again from your DeepAI profile.'],
+  'not-for-code': [
+    403,
+    'That key works for the DeepAI model API, but it is not enabled for DeepAI Code, which is what this gateway uses. Use the key the DeepAI Code app shows, or log in with DeepAI instead.',
+  ],
+  unreachable: [502, 'Could not reach DeepAI to check that key. Try again in a moment.'],
+};
 
 /**
  * Mount the dashboard API.
@@ -258,6 +278,59 @@ export function adminRouter(db, runtime) {
     const [status, message] = COMPLETION_FAILURES[result.reason]
       ?? [400, 'That sign-in could not be completed. Start a new login.'];
     return res.status(status).json({ ok: false, error: message, code: result.reason });
+  });
+
+  /**
+   * Sign in by pasting a DeepAI API key.
+   *
+   * The browser sign-in has to end at a loopback address DeepAI chooses, which a
+   * browser elsewhere cannot open. A key sidesteps the whole dance: it is the same
+   * credential the exchange would have produced, so nothing is lost by arriving
+   * with it directly. No callback, no password, no proxy.
+   *
+   * The owner is derived from the key rather than supplied, because
+   * `api_keys.owner_username` decides who sees and pays for a key — a name the
+   * visitor could type would let them claim someone else's account.
+   */
+  router.post('/login/key', async (req, res) => {
+    const raw = typeof req.body?.key === 'string' ? req.body.key : '';
+    // A key travels upstream in a header, so a newline inside it would be a header
+    // injection; whitespace around a pasted key is normal and harmless.
+    const key = raw.trim();
+    if (key === '' || key.length > 512 || /[\r\n]/.test(key)) {
+      const [status, message] = KEY_LOGIN_FAILURES.invalid_key;
+      return res.status(status).json({ ok: false, error: message, code: 'invalid_key' });
+    }
+
+    let check;
+    try {
+      check = await checkPastedKey(key, AbortSignal.timeout(20_000));
+    } catch (error) {
+      runtime.log?.(`api key sign-in failed: ${error?.message ?? error}`);
+      const [status, message] = KEY_LOGIN_FAILURES.unreachable;
+      return res.status(status).json({ ok: false, error: message, code: 'unreachable' });
+    }
+
+    if (check.ok !== true) {
+      const [status, message] = KEY_LOGIN_FAILURES[check.reason] ?? [400, 'That key could not be used.'];
+      runtime.log?.(`api key sign-in refused: ${check.reason}`);
+      return res.status(status).json({ ok: false, error: message, code: check.reason });
+    }
+
+    const username = usernameForKey(key);
+    const completed = completeLogin(db, runtime, {
+      apiKey: key,
+      username,
+      isPro: check.isPro,
+    }, { secure: runtime.trustProxy === true });
+
+    // Persist the allowance just read, so the badge shows a balance immediately
+    // rather than waiting for the background refresh.
+    saveAllowance(db, username, check.allowance);
+    if (typeof check.isPro === 'boolean') savePro(db, username, check.isPro);
+
+    res.setHeader('set-cookie', completed.cookie);
+    return res.json({ ok: true, username: completed.username, created: completed.created });
   });
 
   router.post('/cancel-login', (req, res) => {
