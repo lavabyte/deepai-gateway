@@ -121,17 +121,16 @@ function isAuthFailure(error) {
 function profilePasteHelp(prefix = '') {
   return `
     <section class="step" id="${prefix}profile-step">
+      <!--
+        The list is split so the hint sits between the two steps it concerns. The second
+        list restarts at 2, so the numbering stays honest while a paragraph separates
+        them visually.
+      -->
       <ol class="step__list">
         <li>
           Go to <a href="https://deepai.org" target="_blank" rel="noreferrer noopener">https://deepai.org</a>
           and log in or register
         </li>
-        <li>
-          Go to
-          <a href="https://api.deepai.org/daily-time-sync/user/" target="_blank" rel="noreferrer noopener">https://api.deepai.org/daily-time-sync/user/</a>,
-          scroll down and choose the <strong>Raw Data</strong> tab
-        </li>
-        <li>Copy the <strong>Content</strong> and paste it below</li>
       </ol>
 
       <div class="note note--info mt-3">
@@ -139,6 +138,15 @@ function profilePasteHelp(prefix = '') {
         <code>200</code> with your account and <code>201 OK</code> without one. Go back to
         step 1, sign in, then reload step 2.
       </div>
+
+      <ol class="step__list mt-3" start="2">
+        <li>
+          Go to
+          <a href="https://api.deepai.org/daily-time-sync/user/" target="_blank" rel="noreferrer noopener">https://api.deepai.org/daily-time-sync/user/</a>,
+          scroll down and choose the <strong>Raw Data</strong> tab
+        </li>
+        <li>Copy the <strong>Content</strong> and paste it below</li>
+      </ol>
 
       <div class="field mt-3">
         <label class="field__label" for="${prefix}profile-paste">Content</label>
@@ -282,6 +290,74 @@ function openModal(title, bodyNode, onClose) {
   modalOnClose = onClose;
   const focusable = body.querySelector('input, select, textarea, button');
   focusable?.focus();
+}
+
+/**
+ * Ask for confirmation in the app, not in a browser dialog.
+ *
+ * `window.confirm` blocks the whole page, cannot be styled, is rendered by the browser
+ * rather than as part of this interface, and on some platforms can be suppressed
+ * entirely — so a destructive action would either look foreign or lose its guard. This
+ * reuses the modal the key editor already opens, which means Escape, the backdrop and
+ * the focus handling all behave the same way.
+ *
+ * @param {object} options
+ * @param {string} options.title - the action being confirmed, as a heading.
+ * @param {string[]} options.lines - the consequences, one paragraph each.
+ * @param {string} [options.confirmLabel] - what the button says; it should name the act.
+ * @param {boolean} [options.danger] - style the button as destructive.
+ * @returns {Promise<boolean>} whether the visitor confirmed.
+ */
+function confirmAction({ title, lines, confirmLabel = 'Confirm', danger = false }) {
+  return new Promise((resolve) => {
+    const body = document.createElement('div');
+    body.className = 'stack';
+
+    for (const line of lines) {
+      const paragraph = document.createElement('p');
+      paragraph.className = 'card__sub';
+      paragraph.textContent = line;
+      body.append(paragraph);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'row row--right mt-3';
+
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn btn--ghost';
+    cancel.textContent = 'Cancel';
+
+    const confirm = document.createElement('button');
+    confirm.type = 'button';
+    confirm.className = danger ? 'btn btn--danger' : 'btn btn--primary';
+    confirm.textContent = confirmLabel;
+
+    actions.append(cancel, confirm);
+    body.append(actions);
+
+    let answered = false;
+    const settle = (value) => {
+      if (answered) return;
+      answered = true;
+      resolve(value);
+    };
+
+    cancel.addEventListener('click', () => {
+      settle(false);
+      closeModal();
+    });
+    // The destructive control is never the default: Escape, the backdrop and the close
+    // button all mean "no", and only the named button means "yes".
+    confirm.addEventListener('click', () => {
+      settle(true);
+      closeModal();
+    });
+
+    openModal(title, body, () => settle(false));
+    // Cancel takes the caret, so a stray Enter does not perform the destructive action.
+    cancel.focus();
+  });
 }
 
 function closeModal() {
@@ -828,11 +904,16 @@ function wireAccountCard(rerender) {
   // separate, destructive decision, so it gets its own confirm step.
   $('forget-account')?.addEventListener('click', async () => {
     const username = accountName(state.account);
-    const confirmed = window.confirm(
-      `Remove the DeepAI account "${username}" from this gateway?\n\n`
-      + 'Its API keys will be deleted and its DeepAI credential forgotten. '
-      + 'Usage history is kept. This cannot be undone.',
-    );
+    const confirmed = await confirmAction({
+      title: 'Remove this account?',
+      lines: [
+        `“${username}” will be removed from this gateway.`,
+        'Its API keys are deleted and its DeepAI credential is forgotten, so anything using those keys stops working.',
+        'Usage history is kept. This cannot be undone.',
+      ],
+      confirmLabel: 'Remove account',
+      danger: true,
+    });
     if (!confirmed) return;
     try {
       await api('/account/forget', { method: 'POST' });
@@ -1206,12 +1287,17 @@ async function renderKeys() {
       }
 
       if (action === 'revoke') {
-        if (!confirm(
-          `Revoke the key "${key.name}"?\n\n`
-          + 'The key is deleted and stops working immediately. This cannot be undone, '
-          + 'and you will need a new key to keep using the API.\n\n'
-          + 'Usage already recorded is kept.',
-        )) return;
+        const confirmed = await confirmAction({
+          title: 'Revoke this key?',
+          lines: [
+            `“${key.name}” is deleted and stops working immediately.`,
+            'This cannot be undone, and anything using this key will need a new one.',
+            'Usage already recorded is kept.',
+          ],
+          confirmLabel: 'Revoke key',
+          danger: true,
+        });
+        if (!confirmed) return;
         await api(`/keys/${id}/revoke`, { method: 'POST' });
         toast('Key revoked');
         return renderKeys();

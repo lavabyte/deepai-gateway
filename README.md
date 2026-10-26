@@ -122,6 +122,10 @@ That JSON carries both the account's `email` and its `userprofile.api_key` — t
 key the Code lane accepts — so pressing **Log In** signs in with a key DeepAI has already
 issued and names the account from DeepAI's own answer rather than from anything typed.
 
+The hint about `OK` sits **between steps 1 and 2**, because it warns about what step 2
+will show and is useless once step 2 has been read. The list is split into two so it can,
+the second resuming at 2.
+
 **If the page shows a plain `OK`, the visitor is not logged in.** The API answers `200`
 with the account JSON and `201 OK` without one, so the dashboard calls this out in an
 info note rather than leaving `OK` to be mistaken for success.
@@ -616,6 +620,16 @@ own copies of the sign-in markup. Rewriting the primary form therefore changed o
 of them, and the overview kept a control that existed nowhere else. They now share one
 wiring function and one set of forms, and a test renders both and requires the same
 three routes in each, so a third screen added later cannot quietly diverge.
+
+### Confirmation dialogs
+
+Destructive actions confirm in the app's own modal, never with `window.confirm` or
+`window.alert`. A browser dialog blocks the page, cannot be styled, is drawn by the
+browser rather than by this interface, and on some platforms can be suppressed — which
+would drop the guard on the very actions that need one. `confirmAction()` reuses the modal
+the key editor opens, so Escape, the backdrop and focus behave the same, the destructive
+button is styled as such and is never the default, and a test renders it and asserts both
+answers are present.
 
 ### Brand marks
 

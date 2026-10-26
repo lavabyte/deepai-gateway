@@ -2670,7 +2670,8 @@ await checkAsync('the sign-in card gives one instruction, and it is the one that
       innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
       dataset: {}, style: {}, value: '',
       classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
-      addEventListener() {}, appendChild() {}, remove() {}, replaceChildren() {},
+      addEventListener() {}, appendChild() {}, remove() {},
+      replaceChildren(...children) { this.children = children; },
       querySelector: () => null, querySelectorAll: () => [], setAttribute() {},
       getAttribute: () => null, closest: () => null, focus() {}, select() {},
       insertAdjacentHTML() {}, scrollIntoView() {},
@@ -2719,6 +2720,19 @@ await checkAsync('the sign-in card gives one instruction, and it is the one that
   assert.match(html, /<strong>Raw Data<\/strong> tab/, 'step 2 names the tab to click');
   assert.match(html, /Copy the <strong>Content<\/strong> and paste it below/, 'step 3 says what to copy');
 
+  /*
+   * The hint belongs between the two steps it concerns: it warns about what step 2 will
+   * show, so it is useless after step 2 has already been read. Asserted by position in
+   * the rendered markup, since that is the only thing that decides what is read first.
+   */
+  const hintAt = html.indexOf('note--info');
+  const step2At = html.indexOf('daily-time-sync/user/');
+  assert.ok(hintAt !== -1, 'the "plain OK" hint is present');
+  assert.ok(hintAt < step2At, 'the hint must come before step 2');
+  assert.ok(html.indexOf('log in or register') < hintAt, 'and after step 1');
+  // The split list has to keep counting from 2, or the steps read 1, 1, 2.
+  assert.match(html, /<ol class="step__list mt-3" start="2">/, 'the second list resumes at 2');
+
   // The signed-out case is called out in blue, because `OK` is what they will see.
   assert.match(html, /note--info/, 'the "plain OK" hint is an info note, not an error');
   assert.match(html, /shows a plain <code>OK<\/code>, you are not logged in/);
@@ -2757,7 +2771,8 @@ await checkAsync('both signed-out screens offer the one route', async () => {
       innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
       dataset: {}, style: {}, value: '',
       classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
-      addEventListener() {}, appendChild() {}, remove() {}, replaceChildren() {},
+      addEventListener() {}, appendChild() {}, remove() {},
+      replaceChildren(...children) { this.children = children; },
       querySelector: () => null, querySelectorAll: () => [], setAttribute() {},
       getAttribute: () => null, closest: () => null, focus() {}, select() {},
       insertAdjacentHTML() {}, scrollIntoView() {},
@@ -2814,6 +2829,106 @@ await checkAsync('both signed-out screens offer the one route', async () => {
   for (const gone of ['id="password-form"', 'id="api-key"', 'id="signin"', 'passwordForm(', 'keyForm(']) {
     assert.ok(!source.includes(gone), `${gone} must not remain in the source`);
   }
+});
+
+await checkAsync('nothing asks the visitor through a browser dialog', async () => {
+  /*
+   * `window.confirm` and `window.alert` block the page, cannot be styled, are drawn by
+   * the browser instead of by this interface, and on some platforms can be suppressed
+   * altogether — which would silently drop the guard on a destructive action. Every
+   * confirmation is the app's own modal instead.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const vm = await import('node:vm');
+  const root = new URL('..', import.meta.url).pathname;
+  const source = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+
+  // No native dialog may be called anywhere in the client.
+  for (const banned of ['window.confirm', 'window.alert', 'window.prompt']) {
+    const calls = source.split('\n').filter((line) => line.includes(banned) && !line.trim().startsWith('*'));
+    assert.deepEqual(calls, [], `${banned} must not be called: ${calls.join(' | ')}`);
+  }
+  // A bare `confirm(`/`alert(` is the same thing without the prefix.
+  assert.ok(!/[^.\w]confirm\(/.test(source.replace(/confirmAction\(/g, '')), 'no bare confirm(');
+  assert.ok(!/[^.\w]alert\(/.test(source), 'no bare alert(');
+
+  /*
+   * And the replacement must be a real dialog, not a stub: it has to render in the app's
+   * modal, offer both answers, and style the destructive one as such. Rendered here so
+   * the check is about behaviour rather than the presence of a function name.
+   */
+  const nodes = new Map();
+  const node = () => ({
+    innerHTML: '', textContent: '', hidden: true, disabled: false, className: '',
+    dataset: {}, style: {}, value: '',
+    children: [],
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    addEventListener() {}, appendChild(child) { this.children.push(child); },
+    // `append` is what the dialog uses; a stub without it would fail the render rather
+    // than the behaviour being checked.
+    append(...children) { this.children.push(...children); },
+    remove() {}, // `openModal` swaps the body in, so the stub must keep what it is given.
+    replaceChildren(...children) { this.children = children; },
+    querySelector: () => null, querySelectorAll: () => [],
+    setAttribute() {}, getAttribute: () => null, closest: () => null,
+    focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
+  });
+  for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
+    'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle']) nodes.set(id, node());
+  const sandbox = {
+    document: {
+      getElementById: (id) => nodes.get(id) ?? null,
+      createElement: () => node(), querySelector: () => null, querySelectorAll: () => [],
+      addEventListener() {}, documentElement: node(), visibilityState: 'visible', body: node(),
+    },
+    window: { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }), location: { assign() {} } },
+    location: { search: '', pathname: '/', hash: '' },
+    history: { replaceState() {} },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    fetch: async () => new Response('{"ok":true,"signedIn":false,"models":[]}', {
+      status: 200, headers: { 'content-type': 'application/json' },
+    }),
+    setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
+    console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
+    Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
+  };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  new vm.Script(source, { filename: 'app.js' }).runInContext(sandbox);
+
+  // Ask, without awaiting: the promise settles when a button is chosen.
+  const answer = vm.runInContext(
+    "confirmAction({ title: 'Revoke this key?', lines: ['It stops working.'], confirmLabel: 'Revoke key', danger: true })",
+    sandbox,
+  );
+  assert.equal(nodes.get('modal').hidden, false, 'the app modal must open');
+  assert.equal(nodes.get('modal-title').textContent, 'Revoke this key?');
+  const body = nodes.get('modal-body');
+  assert.ok(body.children.length > 0, 'the dialog must have content');
+
+  /*
+   * Walk down to the buttons rather than indexing a fixed depth: the dialog is built as
+   * paragraphs, then a row holding the two answers. The stub nests them, and a test that
+   * assumed one level would break on any layout change while proving nothing.
+   */
+  const flat = [];
+  const walk = (list) => {
+    for (const child of list) {
+      if (child.textContent !== '') flat.push(child);
+      walk(child.children ?? []);
+    }
+  };
+  walk(body.children);
+  const labels = flat.map((child) => child.textContent);
+  assert.ok(labels.includes('Cancel'), `both answers must be present, saw ${JSON.stringify(labels)}`);
+  assert.ok(labels.includes('Revoke key'), `both answers must be present, saw ${JSON.stringify(labels)}`);
+  // The destructive answer is styled as one, so it does not read like the safe default.
+  const destructive = flat.find((child) => child.textContent === 'Revoke key');
+  assert.equal(destructive.className, 'btn btn--danger', 'the destructive answer is styled as such');
+
+  // Both answers must settle the promise; a dialog that cannot be dismissed is a trap.
+  assert.equal(typeof answer.then, 'function', 'the caller gets an answer it can await');
 });
 
 check('every sign-in failure has something useful to say', async () => {
