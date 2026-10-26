@@ -2814,6 +2814,85 @@ await checkAsync('the sign-in step speaks to the visitor, not to the protocol', 
   }
 });
 
+await checkAsync('every signed-out screen offers the same ways in', async () => {
+  /*
+   * There are two: the log-in screen, and the account card on the overview. They each
+   * carried their own copy of the sign-in markup, so when the primary form was
+   * rewritten only one of them changed — the overview kept a button that no longer
+   * existed anywhere else, which is why an old screen stayed visible after a deploy
+   * that had, in fact, shipped.
+   *
+   * Each is rendered here and must offer the same three routes. A third screen added
+   * later without them fails this on purpose.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const vm = await import('node:vm');
+  const root = new URL('..', import.meta.url).pathname;
+  const source = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+
+  const boot = async (account) => {
+    const nodes = new Map();
+    const node = () => ({
+      innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
+      dataset: {}, style: {}, value: '',
+      classList: { add() {}, remove() {}, contains: () => false },
+      addEventListener() {}, appendChild() {}, remove() {}, replaceChildren() {},
+      querySelector: () => null, querySelectorAll: () => [], setAttribute() {},
+      getAttribute: () => null, closest: () => null, focus() {}, select() {},
+      insertAdjacentHTML() {}, scrollIntoView() {},
+    });
+    for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
+      'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle']) nodes.set(id, node());
+    const sandbox = {
+      document: {
+        getElementById: (id) => nodes.get(id) ?? null,
+        createElement: () => node(), querySelector: () => null, querySelectorAll: () => [],
+        addEventListener() {}, documentElement: node(), visibilityState: 'visible', body: node(),
+      },
+      window: { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }), location: { assign() {} } },
+      location: { search: '', pathname: '/', hash: '' },
+      history: { replaceState() {} },
+      localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      fetch: async (url) => new Response(
+        JSON.stringify(String(url).includes('/account') ? account : { ok: true, models: [] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+      setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
+      console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
+      Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
+    };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    new vm.Script(source, { filename: 'app.js' }).runInContext(sandbox);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    return { nodes, sandbox };
+  };
+
+  const signedOut = {
+    ok: true, signedIn: false, username: '', displayName: '', pendingLogin: false,
+    origin: 'http://gw.example.test:25912', callbackUrl: 'http://127.0.0.1:25912/auth-callback',
+    authProxy: false, allowance: null, balanceLow: false,
+    keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false },
+  };
+
+  const loginScreen = (await boot(signedOut)).nodes.get('view').innerHTML;
+  const card = (await boot(signedOut)).sandbox.accountCard();
+
+  for (const [name, html] of [['the log-in screen', loginScreen], ['the account card', card]]) {
+    assert.match(html, /id="password-form"/, `${name} must offer the password form`);
+    assert.match(html, /id="login-submit"/, `${name} must have a way to submit it`);
+    assert.match(html, /Google or Apple/, `${name} must offer the route for accounts without a password`);
+    assert.match(html, /id="key-step"/, `${name} must offer the API-key route`);
+    // And none may keep the control that was replaced.
+    assert.ok(!html.includes('id="signin"'), `${name} must not resurrect the old button`);
+    assert.ok(!/id="login-inline"/.test(html) || name === 'the log-in screen', `${name} uses one primary control`);
+  }
+
+  // The old control has to be gone from the source entirely, not merely unreachable.
+  assert.ok(!source.includes('id="signin"'), 'the replaced control must not remain in the source');
+});
+
 check('every sign-in failure has something useful to say', async () => {
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');

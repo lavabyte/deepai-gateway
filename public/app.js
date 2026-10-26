@@ -301,6 +301,45 @@ async function signInWithProfile() {
  * used to claim another account — and it is scoped to the session that typed it.
  */
 /**
+ * Wire every sign-in control a card may contain.
+ *
+ * All of them are optional, because a card can show any subset — but the two cards
+ * that can show them must not each carry their own copy of this. They did, and the
+ * overview's copy kept the old button while the log-in screen got the new form, so
+ * one of them silently served a screen that no longer existed anywhere else.
+ */
+function wireSignInForms() {
+  $('login-inline')?.addEventListener('click', () => void startLoginFlow());
+
+  // Google and Apple have no password to give, so they are offered the profile route
+  // rather than the browser flow, which cannot complete for them on a public host.
+  const revealProfile = (event) => {
+    const host = event.currentTarget?.parentElement;
+    if (host === null || host === undefined) return;
+    host.insertAdjacentHTML('afterend', profilePasteHelp());
+    host.remove();
+    $('login-with-profile')?.addEventListener('click', () => void signInWithProfile());
+    $('profile-paste')?.focus();
+  };
+  $('login-browser')?.addEventListener('click', revealProfile);
+  $('signin-profile')?.addEventListener('click', revealProfile);
+
+  $('password-form')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void signInWithPassword();
+  });
+  $('login-complete')?.addEventListener('click', () => void completeLoginManually());
+  $('login-with-key')?.addEventListener('click', () => void signInWithKey());
+  $('api-key')?.addEventListener('keydown', (event) => {
+    // Enter submits, as it would in any other field.
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void signInWithKey();
+    }
+  });
+}
+
+/**
  * The primary way in: DeepAI's own email and password, posted to this gateway.
  *
  * The Gateway performs DeepAI's three requests itself, so the browser never follows
@@ -382,30 +421,7 @@ function needsLogin() {
       ${keyForm()}
     </div>`;
 
-  $('login-inline')?.addEventListener('click', () => void startLoginFlow());
-  // Sending a Google or Apple account into the browser flow lands it on a dead
-  // address on a public host, so the helper comes first and the flow is opt-in.
-  $('login-browser')?.addEventListener('click', () => {
-    const host = $('login-browser')?.parentElement;
-    if (host === null || host === undefined) return;
-    host.insertAdjacentHTML('afterend', profilePasteHelp());
-    $('login-with-profile')?.addEventListener('click', () => void signInWithProfile());
-    $('profile-paste')?.focus();
-    host.remove();
-  });
-  $('password-form')?.addEventListener('submit', (event) => {
-    event.preventDefault();
-    void signInWithPassword();
-  });
-  $('login-complete')?.addEventListener('click', () => void completeLoginManually());
-  $('login-with-key')?.addEventListener('click', () => void signInWithKey());
-  $('api-key')?.addEventListener('keydown', (event) => {
-    // Enter submits, as it would in any other one-field form.
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      void signInWithKey();
-    }
-  });
+  wireSignInForms();
   $('login-reveal')?.addEventListener('click', () => {
     const fields = $('finish-fields');
     if (fields) fields.hidden = false;
@@ -779,7 +795,7 @@ async function onAuthButton() {
  * so the dashboard can show it as the thing to copy when that fails.
  */
 async function startLoginFlow() {
-  const buttons = [$('auth-button'), $('signin'), $('login-inline')].filter(Boolean);
+  const buttons = [$('auth-button'), $('login-inline')].filter(Boolean);
   for (const button of buttons) {
     button.disabled = true;
     button.dataset.label = button.textContent;
@@ -944,9 +960,13 @@ function accountCard() {
           <span class="badge badge--red"><span class="dot"></span>Not signed in</span>
         </div>
         <div class="mt-3 stack">
-          <div class="note">Log in with the same browser flow the DeepAI desktop app uses. The account key is stored in the gateway database and never leaves this machine.</div>
-          <div class="row"><button class="btn btn--primary" id="signin">Log in with DeepAI</button></div>
-          <div class="tiny muted">The same control lives in the top bar.</div>
+          <div class="note">Sign in with your DeepAI account to let the gateway reach the models. The account key is stored in the gateway database and never leaves this machine.</div>
+          ${passwordForm()}
+          <p class="card__sub">
+            Signed in with Google or Apple?
+            <button class="linklike" id="signin-profile" type="button">Use your DeepAI profile</button>
+          </p>
+          ${keyForm()}
         </div>
       </div>`;
   }
@@ -1091,7 +1111,8 @@ function savingsCard(savings) {
 
 /** Wire the account card buttons. */
 function wireAccountCard(rerender) {
-  $('signin')?.addEventListener('click', () => void startLoginFlow());
+  // The same sign-in controls as the log-in screen, so the two cannot drift apart.
+  wireSignInForms(rerender);
 
   $('refresh-allowance')?.addEventListener('click', async (event) => {
     const button = event.currentTarget;

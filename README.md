@@ -672,10 +672,15 @@ scripts and styles with a version taken from their own bytes
 (`/app.js?v=<sha256 prefix>`). A deploy therefore changes the URL, so a browser cannot
 keep an old screen after new code ships.
 
-This exists because it happened: a rewritten sign-in screen was deployed and the old
-one stayed visible, because `/app.js` was the same URL and the browser was entitled to
-reuse what it had. If you ever change an asset's URL by hand, keep the pattern — an
-unversioned reference reintroduces the problem.
+If you ever change an asset's URL by hand, keep the pattern — an unversioned
+reference reintroduces the problem this solves.
+
+There is a second, related trap worth knowing: there are **two** signed-out screens —
+the log-in screen and the account card on the overview — and they used to carry their
+own copies of the sign-in markup. Rewriting the primary form therefore changed only one
+of them, and the overview kept a control that existed nowhere else. They now share one
+wiring function and one set of forms, and a test renders both and requires the same
+three routes in each, so a third screen added later cannot quietly diverge.
 
 ### Brand marks
 
