@@ -16,10 +16,7 @@ import { randomUUID } from 'node:crypto';
 import {
   checkKey,
   checkPastedKey,
-  loopbackCallbackUrl,
   parseAccountPaste,
-  signInWithPassword,
-  startLogin,
   usernameForKey,
 } from '../deepai/account.js';
 import { loadCatalog, publicModel } from '../deepai/catalog.js';
@@ -70,74 +67,18 @@ import {
 } from '../usage.js';
 
 /**
- * Ceiling on concurrent pending logins.
+ * What each sign-in failure says to the visitor.
  *
- * Generous for real use — a person starts one at a time — but finite, so an
- * unauthenticated flood cannot allocate state without limit.
+ * These are the reasons the paste parser and the key check can report, and no others.
+ * A separate table from any protocol vocabulary because these are read by someone
+ * looking at a page, not at a response: each says what happened and what to do next.
+ * The `not-for-code` case is the one worth the words — `deepai.org` issues a key for
+ * the public model API, and it is not automatically enabled for DeepAI Code, so
+ * "wrong key" would send the visitor looking for a mistake they did not make.
  */
-const MAX_PENDING_LOGINS = 64;
-
-/**
- * What each out-of-band completion failure says to the visitor.
- *
- * Written for someone who is looking at a page that would not load, not at the
- * protocol: every message says what happened to the *sign-in* and what to do
- * next. Mapped from the reason the flow reports, so the message cannot drift from
- * the check that produced it.
- */
-const COMPLETION_FAILURES = {
-  'not-an-address': [400, 'That does not look like an address. Copy the whole address from the page that did not load — including everything after the “?”.'],
-  'too-long': [400, 'That is longer than any address DeepAI sends, so something else must have been pasted.'],
-  'no-code': [400, 'That address is missing the sign-in code, so it looks cut off. Copy the entire address from the page that did not load.'],
-  'no-state': [400, 'That address is missing its second half, so it looks cut off. Copy the entire address from the page that did not load.'],
-  invalid_state: [400, 'That address belongs to a different sign-in than this browser started. Use the address from the page DeepAI just sent you to.'],
-  exchange_failed: [400, 'DeepAI did not accept that sign-in code. Press “Log in with DeepAI” to start again.'],
-  expired: [410, 'This sign-in timed out. Press “Log in with DeepAI” to start again.'],
-  too_many_attempts: [429, 'Too many tries for this sign-in. Press “Log in with DeepAI” to start again.'],
-  busy: [409, 'This sign-in is already being finished — give it a moment.'],
-};
-
-/**
- * The completion failures that end the attempt.
- *
- * The sign-in flow has already closed itself for each of these, so the entry is
- * dropped too. The address-shaped failures and `busy` are deliberately absent: a
- * mistyped paste must not cost the visitor their sign-in.
- */
-const TERMINAL_COMPLETION_REASONS = new Set(['expired', 'too_many_attempts', 'exchange_failed']);
-
-/**
- * What each API-key sign-in failure says to the visitor.
- *
- * A separate table from the completion failures because these are a different
- * situation: there is no waiting sign-in and nothing to retry, only a key that
- * DeepAI would not accept. The `not-for-code` case is the one worth the words —
- * `deepai.org` issues a key for the public model API, and it is not automatically
- * enabled for DeepAI Code, so "wrong key" would send the visitor looking for a
- * mistake they did not make.
- */
-/**
- * What each password sign-in failure says to the visitor.
- *
- * `social-only` carries a placeholder because DeepAI reports *which* providers the
- * account uses, and naming them is the difference between "use another method" and
- * something the visitor can act on.
- */
-const PASSWORD_LOGIN_FAILURES = {
-  invalid_email: [400, 'Enter the email address of your DeepAI account.'],
-  invalid_password: [400, 'Enter your DeepAI password.'],
-  'no-account': [404, 'There is no DeepAI account with that email address.'],
-  'social-only': [409, 'That DeepAI account has no password — it signs in with {providers}. Use the browser sign-in button instead.'],
-  'bad-credentials': [401, 'That email and password do not match. Check the password and try again.'],
-  'no-code': [502, 'DeepAI accepted the password but did not return a sign-in code. Try again in a moment.'],
-  unreachable: [502, 'Could not reach DeepAI. Try again in a moment, or log in with an API key.'],
-  signIn: [400, 'That sign-in could not be completed. Try again.'],
-};
-
 const KEY_LOGIN_FAILURES = {
-  invalid_key: [400, 'Paste the API key itself — one line, with nothing else around it.'],
-  invalid_email: [400, 'That does not look like an email address — it is shown as your account name.'],
   empty: [400, 'Paste what your browser console printed first.'],
+  'too-long': [400, 'That is far longer than the account details DeepAI sends, so something else must have been pasted.'],
   'not-json': [400, 'That is not the console output. Copy everything it printed, starting with “{”.'],
   'no-key': [400, 'That output has no API key in it. Sign in at deepai.org in the same browser, then run the command again.'],
   rejected: [401, 'DeepAI did not recognise that key. Copy it again from your DeepAI profile.'],
@@ -152,7 +93,7 @@ const KEY_LOGIN_FAILURES = {
  * Mount the dashboard API.
  *
  * @param {import('node:sqlite').DatabaseSync} db
- * @param {object} runtime - shared sign-in state.
+ * @param {object} runtime - logging, trust-proxy and cookie settings.
  * @returns {import('express').Router}
  */
 export function adminRouter(db, runtime) {
@@ -190,11 +131,6 @@ export function adminRouter(db, runtime) {
   router.get('/account', (req, res) => {
     const account = req.account;
     const view = publicAccount(account);
-    // The address DeepAI will send *this* browser to, derived from the request
-    // the dashboard is being served on. It is fixed to loopback by DeepAI, so the
-    // dashboard shows it and offers to accept it back; computing it here means the
-    // port is right even on a fresh page load, with no client-side bookkeeping.
-    const callbackPort = localPort(req, runtime.publicUrl);
     res.json({
       signedIn: account !== undefined,
       username: view?.username ?? '',
@@ -206,14 +142,6 @@ export function adminRouter(db, runtime) {
       allowance: view?.allowance ?? null,
       signedInSince: view?.signedInSince ?? null,
       sessionExpiresAt: view?.sessionExpiresAt ?? null,
-      // Only this browser's own pending attempt, never another visitor's.
-      pendingLogin: runtime.pendingLogins?.get(browserOf(req)) !== undefined,
-      origin: publicOrigin(req, runtime.publicUrl),
-      callbackUrl: loopbackCallbackUrl(callbackPort),
-      callbackPort,
-      // Whether the sign-in page is relayed here, in which case the redirect that
-      // used to be unreachable is rewritten and the visitor needs no workaround.
-      authProxy: runtime.authProxy === true,
       defaultModel: account === undefined
         ? 'glm-5.3-flash'
         : getSetting(db, account.username, 'default_model', 'glm-5.3-flash'),
@@ -232,101 +160,11 @@ export function adminRouter(db, runtime) {
   });
 
   /**
-   * Begin the DeepAI login. Returns the URL so the SPA can navigate to it; the
-   * browser-navigable `GET /login` uses the same flow.
-   *
-   * `callbackUrl` is the address DeepAI will send the browser to. It is the only
-   * one it will ever use — loopback, with the port read off this request — so the
-   * dashboard shows it and offers to accept it back when a browser elsewhere
-   * cannot open it. `listenPort` is the socket this gateway is actually serving
-   * on, which is what a port forward has to target.
-   */
-  router.post('/login', async (req, res) => {
-    try {
-      const port = localPort(req, runtime.publicUrl);
-      const url = await beginLogin(db, runtime, port, {
-        browser: browserOf(req),
-        pageBase: signInPageBase(req, runtime),
-      });
-      res.json({
-        ok: true,
-        url,
-        origin: publicOrigin(req, runtime.publicUrl),
-        callbackPort: port,
-        callbackUrl: loopbackCallbackUrl(port),
-        listenPort: req.socket?.localPort ?? 0,
-        path: '/auth-callback',
-      });
-    } catch (error) {
-      runtime.log?.(`login could not start: ${error?.message ?? error}`);
-      res.status(500).json({ ok: false, error: String(error?.message ?? error) });
-    }
-  });
-
-  /**
-   * Finish a login out of band.
-   *
-   * DeepAI hard-codes the callback to `127.0.0.1`, so a browser on any other
-   * machine lands on a dead address. That address stays in its address bar, and
-   * the one-shot code in it is still redeemable, so the dashboard lets the visitor
-   * paste it back here.
-   *
-   * Only the browser that started the attempt can finish it: the pending flow is
-   * looked up by this request's login cookie, and the pasted `state` must match
-   * the one generated for it. That is why the flow, not the request, owns the
-   * validation — and why a bare code with no `state` is refused.
-   */
-  router.post('/login/complete', async (req, res) => {
-    const browser = browserOf(req);
-    const flow = runtime.pendingLogins?.get(browser)?.flow;
-    if (flow === undefined) {
-      return res.status(410).json({
-        ok: false,
-        error: 'There is no sign-in waiting. Press “Log in with DeepAI” first, then paste the address it sends you to.',
-        code: 'no_pending_login',
-      });
-    }
-
-    const body = req.body ?? {};
-    const pasted = typeof body.url === 'string' ? body.url.trim() : '';
-    const paired = typeof body.code === 'string' && typeof body.state === 'string'
-      && body.code !== '' && body.state !== '';
-    if (pasted === '' && !paired) {
-      return res.status(400).json({
-        ok: false,
-        error: 'Paste the address from the page that did not load, then press “Finish signing in”.',
-        code: 'missing_address',
-      });
-    }
-
-    const result = pasted !== ''
-      ? await flow.complete(pasted)
-      : await flow.submit(body.code, body.state);
-
-    if (result.ok) {
-      runtime.pendingLogins.delete(browser);
-      const completed = completeLogin(db, runtime, result.account, {
-        secure: runtime.trustProxy === true,
-      });
-      res.setHeader('set-cookie', completed.cookie);
-      return res.json({ ok: true, username: completed.username });
-    }
-
-    // Only a reason that ends the attempt forgets it. A rejected address or a
-    // truncated paste must leave the flow usable, because the whole point is that
-    // the visitor tries again with the address copied properly.
-    if (TERMINAL_COMPLETION_REASONS.has(result.reason)) runtime.pendingLogins.delete(browser);
-    const [status, message] = COMPLETION_FAILURES[result.reason]
-      ?? [400, 'That sign-in could not be completed. Start a new login.'];
-    return res.status(status).json({ ok: false, error: message, code: result.reason });
-  });
-
-  /**
    * Turn a DeepAI key into a session.
    *
-   * Shared by both key routes — a key pasted on its own, and a key that arrived inside
-   * the account JSON its owner copied out of their browser — so the validation, the
-   * owner resolution and the cookie cannot drift apart between them.
+   * The key arrives inside the account JSON its owner copied out of their browser, so
+   * DeepAI has already issued it; this validates it, resolves the owner and mints the
+   * cookie.
    *
    * @param {import('express').Response} res
    * @param {{key: string, displayName?: string}} input
@@ -392,131 +230,6 @@ export function adminRouter(db, runtime) {
       return res.status(status).json({ ok: false, error: message, code: parsed.reason });
     }
     return signInWithKey(res, { key: parsed.apiKey, displayName: parsed.email });
-  });
-
-  /**
-   * Sign in by pasting a DeepAI API key.
-   *
-   * The browser sign-in has to end at a loopback address DeepAI chooses, which a
-   * browser elsewhere cannot open. A key sidesteps the whole dance: it is the same
-   * credential the exchange would have produced, so nothing is lost by arriving
-   * with it directly. No callback, no password, no proxy.
-   *
-   * The owner is derived from the key rather than supplied, because
-   * `api_keys.owner_username` decides who sees and pays for a key — a name the
-   * visitor could type would let them claim someone else's account.
-   */
-  router.post('/login/key', async (req, res) => {
-    const raw = typeof req.body?.key === 'string' ? req.body.key : '';
-    // A key travels upstream in a header, so a newline inside it would be a header
-    // injection; whitespace around a pasted key is normal and harmless.
-    const key = raw.trim();
-    if (key === '' || key.length > 512 || /[\r\n]/.test(key)) {
-      const [status, message] = KEY_LOGIN_FAILURES.invalid_key;
-      return res.status(status).json({ ok: false, error: message, code: 'invalid_key' });
-    }
-
-    // A DeepAI key carries no identity, so the name to show is asked for. It is
-    // only ever a label: the owner still comes from the key below, which is what
-    // stops a typed name from claiming another account.
-    const email = typeof req.body?.email === 'string' ? req.body.email.trim() : '';
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
-      const [status, message] = KEY_LOGIN_FAILURES.invalid_email;
-      return res.status(status).json({ ok: false, error: message, code: 'invalid_email' });
-    }
-
-    return signInWithKey(res, { key, displayName: email });
-  });
-
-  /**
-   * Sign in with a DeepAI email and password, handled here.
-   *
-   * The browser page DeepAI serves is only a means to an end: its own three requests
-   * are enough, and doing them here means no loopback redirect, no rewritten HTML
-   * and no list of requests to pass through. The password is used once and never
-   * logged or stored.
-   *
-   * A sign-in attempt must already be waiting: the state it was started with is what
-   * DeepAI echoes back in the redirect, and requiring it keeps this endpoint from
-   * being a password oracle for anyone who has not started a sign-in.
-   */
-  router.post('/login/password', async (req, res) => {
-    const browser = browserOf(req);
-    const flow = runtime.pendingLogins?.get(browser)?.flow;
-    if (flow === undefined) {
-      return res.status(410).json({
-        ok: false,
-        error: 'This sign-in has expired. Press “Log in with DeepAI” and try again.',
-        code: 'no_pending_login',
-      });
-    }
-
-    const email = typeof req.body?.email === 'string' ? req.body.email.trim() : '';
-    const password = typeof req.body?.password === 'string' ? req.body.password : '';
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
-      const [status, message] = PASSWORD_LOGIN_FAILURES.invalid_email;
-      return res.status(status).json({ ok: false, error: message, code: 'invalid_email' });
-    }
-    if (password === '' || password.length > 1024 || password.includes('\u0000')) {
-      const [status, message] = PASSWORD_LOGIN_FAILURES.invalid_password;
-      return res.status(status).json({ ok: false, error: message, code: 'invalid_password' });
-    }
-
-    let result;
-    try {
-      result = await signInWithPassword({
-        email,
-        password,
-        state: flow.state,
-        port: flow.port,
-        apiOrigin: runtime.authApiOrigin,
-        signal: AbortSignal.timeout(30_000),
-      });
-    } catch (error) {
-      runtime.log?.(`password sign-in failed: ${error?.message ?? error}`);
-      result = { ok: false, reason: 'unreachable' };
-    }
-
-    if (result.ok !== true) {
-      runtime.log?.(`password sign-in refused: ${result.reason}`);
-      const [status, message] = PASSWORD_LOGIN_FAILURES[result.reason]
-        ?? [400, 'DeepAI did not accept that sign-in.'];
-      const providers = result.providers !== undefined && result.providers.length > 0
-        ? result.providers.join(' or ')
-        : 'Google or Apple';
-      return res.status(status).json({
-        ok: false,
-        error: result.reason === 'social-only' ? message.replace('{providers}', providers) : message,
-        code: result.reason,
-      });
-    }
-
-    // The code is redeemed through the flow, so its attempt accounting — and the
-    // single-use check on the state — stays in one place.
-    const submitted = await flow.submit(result.code, flow.state);
-    if (submitted.ok !== true) {
-      runtime.pendingLogins.delete(browser);
-      const [status, message] = PASSWORD_LOGIN_FAILURES.signIn
-        ?? [400, 'DeepAI did not accept that sign-in.'];
-      return res.status(status).json({ ok: false, error: message, code: 'sign_in_failed' });
-    }
-
-    runtime.pendingLogins.delete(browser);
-    const completed = completeLogin(db, runtime, submitted.account, {
-      secure: runtime.trustProxy === true,
-    });
-    // Name the account from DeepAI's own answer rather than from what was typed, so
-    // this route cannot display an email that belongs to somebody else.
-    if (result.identity?.email !== undefined) {
-      setSetting(db, completed.username, 'display_name', result.identity.email);
-    }
-    res.setHeader('set-cookie', completed.cookie);
-    return res.json({ ok: true, username: completed.username });
-  });
-
-  router.post('/cancel-login', (req, res) => {
-    cancelLogin(runtime, browserOf(req));
-    res.json({ ok: true });
   });
 
   /**
@@ -844,196 +557,12 @@ export function adminRouter(db, runtime) {
 }
 
 /**
- * The origin the **browser** reached the gateway on.
- *
- * Read from the request rather than from a constant, because the address that
- * matters is the one in the visitor's address bar. An explicit `PUBLIC_URL` wins
- * when a deployment knows its own name; behind a proxy the forwarded pair is
- * next; otherwise the `Host` header is the browser's own answer, which is exactly
- * right.
- *
- * Forwarding headers are only honoured when Express' `trust proxy` is on, since
- * otherwise any client could name its own origin.
- *
- * @param {import('express').Request} req
- * @param {string} [configured] - an explicit `PUBLIC_URL`.
- * @returns {string} `scheme://host[:port]`, or `''` when nothing usable exists.
- */
-export function publicOrigin(req, configured) {
-  if (typeof configured === 'string' && configured.trim() !== '') {
-    try {
-      return new URL(configured.trim()).origin;
-    } catch {
-      /* malformed PUBLIC_URL: fall back to the request itself */
-    }
-  }
-
-  const forwarded = req.app?.get?.('trust proxy') === true;
-  const host = (firstForwarded(forwarded ? req.get('x-forwarded-host') : undefined)
-    ?? req.get('host')
-    ?? '').trim();
-  if (host === '') return '';
-
-  const proto = (firstForwarded(forwarded ? req.get('x-forwarded-proto') : undefined)
-    ?? (req.secure === true ? 'https' : 'http')).trim().toLowerCase();
-  if (proto !== 'http' && proto !== 'https') return '';
-
-  return `${proto}://${host}`;
-}
-
-/**
- * Where to send the browser to sign in.
- *
- * With the relay on, this gateway's own origin: the sign-in page is served here and
- * the redirect DeepAI ends with is rewritten back here, which is the only way a
- * browser that cannot reach loopback can finish. With it off, DeepAI's own page,
- * and the visitor finishes by pasting the address back.
- *
- * @param {import('express').Request} req
- * @param {object} runtime
- * @returns {string|undefined} `undefined` leaves DeepAI's own origin in place.
- */
-export function signInPageBase(req, runtime) {
-  if (runtime?.authProxy !== true) return undefined;
-  // Without a usable origin the relay could not be reached anyway, so DeepAI's own
-  // page is the safer answer.
-  return publicOrigin(req, runtime.publicUrl) || undefined;
-}
-
-/** The first hop of a comma-separated forwarding header. */
-function firstForwarded(value) {
-  if (typeof value !== 'string') return undefined;
-  const first = value.split(',')[0].trim();
-  return first === '' ? undefined : first;
-}
-
-/**
- * The port the browser used to reach the gateway.
- *
- * DeepAI takes the callback port as a plain integer, so it has to end up as a
- * number DeepAI accepts. The request's own address is preferred over the
- * listening socket: behind a proxy the socket port is the internal one, which is
- * not an address the browser could ever be sent back to.
- *
- * This is only the port DeepAI will put in `http://127.0.0.1:<port>/auth-callback`.
- * No port makes a public host reachable, so the value is used for the port-forward
- * hint and for telling the visitor what to expect.
- *
- * @param {import('express').Request} req
- * @param {string} [configured] - an explicit `PUBLIC_URL`.
- * @returns {number} the port, or `0` when none could be determined.
- */
-export function localPort(req, configured) {
-  const origin = publicOrigin(req, configured);
-  if (origin !== '') {
-    const explicit = /:(\d+)$/.exec(new URL(origin).host);
-    if (explicit !== null) return Number(explicit[1]);
-    // No explicit port, so the browser used the scheme's default.
-    return origin.startsWith('https://') ? 443 : 80;
-  }
-
-  const fromSocket = req.socket?.localPort;
-  if (Number.isInteger(fromSocket) && fromSocket > 0) return fromSocket;
-  return 0;
-}
-
-/**
- * Start a DeepAI login flow and remember it on the runtime.
- *
- * The flow's promise settles when the browser callback completes, but the
- * callback route owns the HTTP response — so this only starts the attempt. The
- * route calls {@link completeLogin} to persist the account and mint the session.
- *
- * @param {import('node:sqlite').DatabaseSync} db
- * @param {object} runtime
- * @param {number} port - the port the gateway listens on.
- * @param {object} [options]
- * @param {string} [options.browser] - which browser owns the attempt.
- * @param {string} [options.pageBase] - origin serving the sign-in page: this
- *   gateway's when the relay is on, otherwise DeepAI's.
- * @returns {Promise<string>} the DeepAI authorization URL.
- */
-export async function beginLogin(db, runtime, port, options = {}) {
-  if (!Number.isInteger(port) || port <= 0) {
-    throw new Error('the gateway port is unknown, so DeepAI cannot call back');
-  }
-
-  const browser = options.browser ?? 'default';
-  const existing = runtime.pendingLogins?.get(browser);
-  // The same browser asking twice reuses its attempt; a *different* browser gets
-  // its own. Sharing one global slot let a second visitor take over the first
-  // visitor's pending login, which is a session-fixation bug.
-  if (existing !== undefined) return existing.flow.url;
-
-  /*
-   * Bound the map. `POST /api/login` is unauthenticated by design — it is how a
-   * visitor gets a session — and the slot key comes from a cookie the caller
-   * controls, with a fresh one minted for any request that lacks it. Without a
-   * cap, unauthenticated traffic could allocate a 256-bit state and a timer per
-   * request for as long as it kept coming. The oldest attempt is evicted first,
-   * so the cap costs a genuine visitor nothing.
-   */
-  if (runtime.pendingLogins === undefined) runtime.pendingLogins = new Map();
-  while (runtime.pendingLogins.size >= MAX_PENDING_LOGINS) {
-    const oldest = runtime.pendingLogins.keys().next();
-    if (oldest.done === true) break;
-    cancelLogin(runtime, oldest.value);
-  }
-
-  const flow = startLogin({
-    port,
-    // The relay needs the browser on this origin; without it DeepAI's own page is
-    // the right answer, and the visitor finishes by pasting the address back.
-    ...(options.pageBase === undefined ? {} : { pageBase: options.pageBase }),
-  });
-  runtime.pendingLogins.set(browser, { flow });
-
-  const forget = () => {
-    // Only clear this browser's attempt, never another's.
-    if (runtime.pendingLogins?.get(browser)?.flow === flow) runtime.pendingLogins.delete(browser);
-  };
-  flow.done.then(forget, (error) => {
-    forget();
-    const message = String(error?.message ?? error);
-    // A cancelled attempt is routine, not a refusal worth auditing.
-    if (!/cancelled/i.test(message)) {
-      recordAuthEvent(db, 'denied', { detail: message });
-    }
-    runtime.log?.(`login failed: ${message}`);
-  });
-  return flow.url;
-}
-
-/** Cancel one browser's pending login. */
-export function cancelLogin(runtime, browser = 'default') {
-  try {
-    runtime.pendingLogins?.get(browser)?.flow?.close?.();
-  } catch {
-    /* best effort */
-  }
-  runtime.pendingLogins?.delete(browser);
-}
-
-/**
- * Identify the browser that owns a login attempt.
- *
- * A short-lived random cookie is minted on first use. It is not a credential —
- * it only groups one browser's sequential requests so two visitors cannot
- * interfere — so it is not `HttpOnly`-critical, but it is still scoped and
- * cleared once the flow finishes.
- */
-export function browserOf(req) {
-  return typeof req.loginBrowser === 'string' && req.loginBrowser !== '' ? req.loginBrowser : 'default';
-}
-
-/**
  * Finish a login: persist the DeepAI account, mint a session for this browser and
  * return the cookie value to send.
  *
- * Called by the `/auth-callback` route once DeepAI has handed back a code and the
- * exchange succeeded. Keeping this out of the flow object means the account and
- * the cookie are written *before* the response is sent, so the browser never
- * lands on the dashboard without its session.
+ * Called by the sign-in routes once a key has been validated. The account and the
+ * cookie are written *before* the response is sent, so the browser never lands on
+ * the dashboard without its session.
  *
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {object} runtime

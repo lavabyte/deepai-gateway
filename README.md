@@ -39,8 +39,6 @@ export OPENAI_API_KEY=sk-…
 | `HOST` | `127.0.0.1` | Listen address. Set `0.0.0.0` to expose on the network |
 | `DATABASE` | `./data/deepai.db` | SQLite file |
 | `TRUST_PROXY` | unset | Set `1` behind a TLS proxy: trust `X-Forwarded-*` and set `Secure` cookies |
-| `AUTH_PROXY` | `0` | Relay DeepAI's sign-in through the gateway so the browser never needs loopback — see [Signing in from another machine](#signing-in-from-another-machine). Set `0` to disable; the sign-in password then never passes through the gateway |
-| `PUBLIC_URL` | unset | The address visitors use, e.g. `https://gw.example.com`. Reported to the dashboard as your origin; it cannot change where DeepAI sends the browser (see [Signing in from another machine](#signing-in-from-another-machine)) |
 | `LOG_REQUESTS` | `1` | Set `0` to silence per-request logging |
 | `PRICING_CACHE` | `./data/pricing.json` | Where the fetched price table is cached |
 
@@ -78,58 +76,55 @@ Without a session those endpoints answer `401 not_logged_in`, and the dashboard
 shows a **Log in required** prompt instead of empty tables. Creating a key without
 a session is refused, so an ownerless key cannot exist.
 
-### Concurrent logins
-
-Login attempts are keyed per browser by a short-lived `deepai_gateway_login`
-cookie. A single global slot would let a second visitor take over the first
-visitor's pending login; with per-browser slots each attempt can only be
-completed by the browser that started it.
-
 ### Behind a proxy
 
 Set `TRUST_PROXY=1` when terminating TLS in front of the gateway. It enables
 `X-Forwarded-*` handling and marks the session cookie `Secure`. Leave it off for
 plain-HTTP localhost, where a `Secure` cookie would never be sent.
 
-## Signing in from another machine
+## Signing in
 
-**DeepAI chooses the sign-in callback host, and it always chooses `127.0.0.1`.**
-The gateway cannot override it:
+**DeepAI chooses the sign-in callback host, and it always chooses `127.0.0.1`.** That is
+why this gateway does not use DeepAI's browser sign-in at all:
 
-- The sign-in request carries only `state` and `port`. DeepAI parses `port` as a
-  plain TCP port — a full URL, a `host:port` pair, `0`, `-1` or an empty value are
-  all rejected with `400 Invalid desktop sign-in request` — so there is no
-  parameter through which a public origin could be passed.
+- The sign-in request carries only `state` and `port`. DeepAI parses `port` as a plain
+  TCP port — a full URL, a `host:port` pair, `0`, `-1` or an empty value are all rejected
+  with `400 Invalid desktop sign-in request` — so there is no parameter through which a
+  public origin could be passed.
 - The sign-in page builds nothing client-side either: it polls
-  `/daily-time-sync/user/` and reloads *itself*, leaving the redirect to DeepAI's
-  server, which only ever learns a port number.
+  `/daily-time-sync/user/` and reloads *itself*, leaving the redirect to DeepAI's server,
+  which only ever learns a port number.
 
-This is the RFC 8252 native-app pattern: the official DeepAI Code desktop app
-binds `127.0.0.1:0`, hands over the ephemeral port, and expects the browser to
-come back to loopback. `PUBLIC_URL` therefore changes what the dashboard *reports*
-as your origin, never where DeepAI sends the browser.
+This is the RFC 8252 native-app pattern: the official DeepAI Code desktop app binds
+`127.0.0.1:0`, hands over the ephemeral port, and expects the browser to come back to
+loopback. A browser on any other machine cannot open that address, and **no setting
+changes it** — which is why there is no `PUBLIC_URL` and no relay to configure.
 
-### 1. Copy the account JSON from DeepAI's API page (the only route)
+### The one route: copy the account JSON
 
-The dashboard gives one instruction, and it is one a browser can carry out:
+The visitor signs in at `deepai.org` in their own browser — with a password, or with
+Google or Apple — and then reads the account JSON out of DeepAI's own API:
 
 1. Go to `https://deepai.org` and log in or register.
 2. Go to `https://api.deepai.org/daily-time-sync/user/`, scroll down and choose the
    **Raw Data** tab. A browser asks for a JSON page and gets the account itself.
-3. Copy the **Content** and paste it below.
+3. Copy the **Content** and paste it into the dashboard.
 
 That JSON carries both the account's `email` and its `userprofile.api_key` — the account
 key the Code lane accepts — so pressing **Log In** signs in with a key DeepAI has already
-issued and names the account from DeepAI's own answer rather than from anything typed.
+issued, and names the account from DeepAI's own answer rather than from anything typed.
+
+It is the only route that works for a Google or Apple account without a tunnel: the page
+is rendered for a session the visitor already has, so nothing is typed from memory and
+nothing has to be trusted but the key, which DeepAI validates.
 
 The hint about `OK` sits **between steps 1 and 2**, because it warns about what step 2
 will show and is useless once step 2 has been read. The list is split into two so it can,
 the second resuming at 2.
 
 **If the page shows a plain `OK`, the visitor is not logged in.** The API answers `200`
-with the account JSON and `201 OK` without one. The dashboard says this in an info note
-between the two steps, in as few words as it takes: *"If you get plain `OK` in step 2,
-make sure you are logged in."*
+with the account JSON and `201 OK` without one, so the dashboard says it in as few words
+as it takes: *"If you get plain `OK` in step 2, make sure you are logged in."*
 
 Two earlier versions of this instruction were worse, and both were taught by trying them:
 
@@ -138,100 +133,14 @@ Two earlier versions of this instruction were worse, and both were taught by try
 - the steps once sat behind a click, so the instructions a visitor needed were the ones
   they could not see.
 
-The password form and the bare-key form were removed with it. A DeepAI account created
-with Google or Apple has no password, and a bare key cannot say whose account it is, so
-three doors meant two of them were the wrong one for most visitors. `POST /api/login/password`
-and `POST /api/login/key` still exist as endpoints and are reached by the tests; only the
-dashboard stopped offering them.
+There is no password form and no bare-key form. A DeepAI account created with Google or
+Apple has no password to give, and a key pasted on its own cannot say whose account it is,
+so three doors meant two of them were the wrong one for most visitors.
 
-### 2. Relay DeepAI's page (opt-in, `AUTH_PROXY=1`)### 2. Relay DeepAI's page (opt-in, `AUTH_PROXY=1`)
+### What a refusal says
 
-Off by default, because route 1 does not need it. It serves DeepAI's own sign-in page
-from this origin and rewrites the redirect that ends it — useful for the browser flow
-on a public host when a port forward is not possible. It cannot help with Google or
-Apple, for the reasons above. The dashboard sends the browser to **this gateway**
-rather than to DeepAI, the gateway relays the sign-in page and its API calls, and
-DeepAI's final redirect — the one to `http://127.0.0.1:<port>/auth-callback` that a
-browser elsewhere can never open — is **rewritten back onto this origin**. Nothing to
-copy, nothing to paste, no address to edit.
-
-What it took to make that work, and why each piece is needed:
-
-| The page does | What the relay does |
-| --- | --- |
-| bounces the browser to `deepai.org` from any host except `deepai.org` and `127.0.0.1` | disarms that one comparison, which is exactly why the flow works locally and fails on a public host |
-| calls `app_base_url + path` for every API request, and reloads itself with `app_base_url + pathname + search` | empties `app_base_url`, so both resolve here. A prefix would make the self-reload recurse |
-| loads assets from absolute paths (`/static/…`) | relays `/static/` too, so the page still looks like itself |
-| sets its session cookie for `.deepai.org` | re-scopes it to this origin under a `dai_` prefix, so it cannot collide with the gateway's own cookies |
-
-**The trade-off, stated plainly: the visitor's DeepAI password passes through this
-process.** It is streamed straight upstream and never buffered to disk, never logged
-and never stored — but it does pass through, and that is a real difference from the
-other two routes. Set `AUTH_PROXY=0` to turn the relay off; the API-key route below
-needs no password, no callback and no proxy at all.
-
-Two limits are worth knowing before you rely on it:
-
-- **Google and Apple sign-in cannot work through a relay.** They return the browser to
-  `deepai.org`, where the session cookie is of no use to the gateway. Those buttons
-  answer with an explanation instead of leaving silently, so sign in with the email
-  and password form.
-- **It rewrites somebody else's page.** If DeepAI changes either construct above, the
-  relay cannot do its job — it then serves an explanation pointing at the API-key
-  route rather than half-working, and logs which marker went missing. A check against
-  DeepAI's live page is part of the test suite's manual verification, not its offline
-  run.
-
-### 3. Without the relay: the browser must reach loopback
-
-For the browser flow the browser has to run where `http://127.0.0.1:<port>` resolves to
-this gateway. There are two ways to arrange that:
-
-**a. Give the dead address a working host.** After signing in
-at DeepAI, the browser is sent to `http://127.0.0.1:<port>/auth-callback?code=…`
-and shows a connection error. The sign-in is not lost — the code is still valid and
-the address is still in the address bar. Both of these finish it:
-
-- **Rewrite the host in the address bar.** Replace `127.0.0.1` with the host you
-  are browsing from (e.g. `id-jkt01.altare.global:25912`) and press Enter. The
-  gateway serves `/auth-callback` and `/callback` on its own origin, so this is the
-  same request DeepAI meant to make, with the host it should have used — it lands
-  on the real sign-in. No paste, nothing to install.
-- **Paste the address into the dashboard.** Same result, for when copy-and-paste is
-  easier than editing a URL. Which host the address names does not matter: only its
-  `code` and `state` are read.
-
-The dashboard does the explaining, so nobody has to know why the page failed:
-
-- On a browser that is *not* on the gateway's own host, the sign-in card says up
-  front that the last page may not load, and offers both routes above — naming the
-  real host to substitute, and showing the address to look for.
-- Once a sign-in is waiting, that becomes the only step on the card — **"One more
-  step to finish"** — with the paste field already focused.
-- On `127.0.0.1` the redirect just works, so nothing is said at all beyond a quiet
-  *"Signed in on DeepAI already? Paste the address it sent you"* escape hatch.
-
-Both paste routes go through the same validation: the gateway checks the address
-against the sign-in that this browser started — only that browser can finish it, and
-an address without a matching `state` is refused — then exchanges its code exactly
-as the callback route would. A paste that is cut off says so in as many words
-("missing its second half"), and costs one of five tries rather than the sign-in
-itself.
-
-The dashboard shows the exact address to expect, and the gateway logs it at boot
-when `HOST` is not loopback.
-
-**b. Sign in with an API key.** `POST /api/login/key` takes a DeepAI API
-key and turns it into a session, with no callback, no address to copy and no
-password. The dashboard offers it under **"Or log in with a DeepAI API key"**, as
-three steps: open `deepai.org/dashboard/profile`, copy the key, paste it.
-
-A key is the same credential the sign-in exchange would have produced, so nothing is
-lost by arriving with it directly — it is simply the shortest route when the gateway
-is reached over the network.
-
-The key is checked the same way a stored account is (`GET /deepai_code/theos`), so a
-key that is refused says which kind of refusal it was:
+The key inside the pasted JSON is checked the same way a stored account is
+(`GET /deepai_code/theos`), so a refusal says which kind it was:
 
 | What DeepAI said | What the visitor is told |
 | --- | --- |
@@ -239,57 +148,40 @@ key that is refused says which kind of refusal it was:
 | `theos` returns 401 but the public model API *does* accept it | the key is valid but **not enabled for DeepAI Code** — which is what this gateway uses |
 | anything else | DeepAI is unreachable; not the visitor's mistake |
 
-That middle case is the likeliest failure of all, because `deepai.org` issues a key
-for the public model API and it is not automatically enabled for DeepAI Code.
+That middle case is the likeliest failure of all, because `deepai.org` issues a key for
+the public model API and it is not automatically enabled for DeepAI Code.
 
-### Why the email is asked for, and why it is not verified
+The paste itself is refused before any network call when it carries no key: `empty`,
+`not-json`, `no-key` and `too-long` each say which part was wrong. A test asserts that
+every reason either parser can return has a message, and that no message describes a
+reason nothing can produce.
 
-A DeepAI key genuinely does not say who it belongs to, and no request can make it:
+### Why ownership does not come from the pasted email
+
+The email is taken from DeepAI's own JSON, so it is fact rather than a claim — but it is
+still only a **label**, and ownership is derived from the key:
+
+`api_keys.owner_username` decides who sees and pays for a key, so an owner the visitor
+could choose would let them claim someone else's account. The owner is therefore
+`key-<sha256(key)[0..16]>`: one-to-one with the key, non-reversible, and impossible to
+point at another account. The email is stored as a per-account `display_name` setting, and
+the dashboard shows it in place of that fingerprint.
+
+**A key already known to the gateway keeps its account.** DeepAI mints a fresh key on
+every sign-in, so one DeepAI account can hold several, and the same key can arrive twice.
+Matching on the key keeps that on one owner instead of splitting the account, its keys and
+its usage across two identities that look unrelated in the dashboard.
+
+### Why a key alone cannot be asked who it belongs to
+
+No request makes a DeepAI key reveal its account — which is why the JSON route reads the
+email from DeepAI's page rather than trying to derive it:
 
 | Attempt | Result |
 | --- | --- |
 | `GET /deepai_code/theos`, `GET /get_usage_summary` with the key | allowance only, no identity |
 | `GET /daily-time-sync/user/` — the endpoint DeepAI's own sign-in page uses to ask "who am I" — with the key | answers **201**, not 200, which that page reads as "not signed in" |
 | `POST /deepai_code/desktop_auth/exchange/` with a key instead of a code | `400 invalid code` |
-
-So the name to display is asked for alongside the key, and the UI says plainly that
-it cannot be checked rather than presenting it as a fact.
-
-**It is a label, not a credential, and it is scoped to the session that typed it.**
-`/api/account` answers only for the session asking, and the gateway logs the *derived
-owner* rather than the label — both asserted by tests — so a wrong name misinforms
-only the person who typed it. Ownership is still the key's fingerprint, so a typed
-name can never claim another account.
-
-The one route that does not ask is the browser sign-in: DeepAI's exchange response
-carries the real username, so that account is named from fact rather than from a
-field.
-
-**Ownership is still derived from the key, never typed by the visitor.** The name is
-only a label. `api_keys.owner_username` decides who sees and pays for a key, so an
-owner the visitor could choose would let them claim someone else's account. The owner
-is therefore `key-<sha256(key)[0..16]>`: one-to-one with the key, non-reversible, and
-impossible to point at another account. Two tests cover this — one signs in with two
-keys and asserts the second cannot see the first's gateway keys, and the other asserts
-that the badge shows `milo@example.com` while the stored owner is still the
-fingerprint.
-
-**A key already known to the gateway keeps its account.** DeepAI mints a fresh key on
-every sign-in, so one DeepAI account can hold several, and the same key can arrive
-twice — pasted, or pasted after a browser sign-in. Matching on the key keeps that on
-one owner instead of splitting the account, its keys and its usage across two
-identities that look unrelated in the dashboard.
-
-**c. Forward the port.** Make the loopback address reach the gateway:
-
-```sh
-ssh -L 25912:127.0.0.1:8787 you@gateway-host
-```
-
-Then browse to `http://127.0.0.1:25912`, sign in, and the redirect resolves. The
-port on the left must be the one DeepAI was given: the port visitors use, which
-the gateway reads from the request (`PUBLIC_URL`, then `X-Forwarded-Host` when
-`TRUST_PROXY=1`, otherwise `Host`).
 
 ## Dashboard
 
@@ -495,18 +387,11 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/` | The dashboard |
-| `GET` | `/login` | Browser sign-in; redirects to DeepAI (`?json=1` returns the URL and the callback address) |
-| `GET` | `/auth-callback` · `/callback` | Where DeepAI sends the browser back. The host is DeepAI's — always loopback — so see [Signing in from another machine](#signing-in-from-another-machine) |
-| `POST` | `/api/login/complete` | Finish that sign-in from the dashboard by pasting the address the browser was sent to |
-| `POST` | `/api/login/profile` | Sign in with the account JSON copied out of the visitor's own browser — the route for Google and Apple |
-| `POST` | `/api/login/password` | Sign in with a DeepAI email and password; the gateway performs DeepAI's own requests |
-| `POST` | `/api/login/key` | Sign in directly with a DeepAI API key — no callback and no password |
-| `GET` | `/deepai_code/desktop_auth/` and the paths its page calls (`/daily-time-sync/…`, `/get_user_login_type`, `/static/…`) | The relay: allowlisted, fixed-upstream, and only when `AUTH_PROXY` is on |
+| `POST` | `/api/login/profile` | The only way in: the account JSON copied out of the visitor's own browser — see [Signing in](#signing-in) |
 | `GET` | `/logout` | Sign out, then redirect to `/` |
 | `GET` | `/api/account` | This session's account, allowance, default model, key quota |
 | `GET` | `/api/account/events` | That account's auth trail (login, logout, refresh, denied) |
 | `POST` | `/api/account/forget` | Remove the account, its keys and its DeepAI credential |
-| `POST` | `/api/login` · `/api/cancel-login` · `/api/logout` | DeepAI login flow |
 | `POST` | `/api/account/refresh` | Re-read the Theos balance |
 | `GET` `POST` | `/api/keys` | List / create |
 | `PATCH` `DELETE` | `/api/keys/:id` | Edit / delete |
@@ -617,10 +502,10 @@ reference reintroduces the problem this solves.
 
 There is a second, related trap worth knowing: there are **two** signed-out screens —
 the log-in screen and the account card on the overview — and they used to carry their
-own copies of the sign-in markup. Rewriting the primary form therefore changed only one
-of them, and the overview kept a control that existed nowhere else. They now share one
-wiring function and one set of forms, and a test renders both and requires the same
-three routes in each, so a third screen added later cannot quietly diverge.
+own copies of the sign-in markup. Rewriting the form therefore changed only one of them,
+and the overview kept a control that existed nowhere else. They now render the same block
+through one function, and a test renders both and requires the same fields in each, so a
+third screen added later cannot quietly diverge.
 
 ### Confirmation dialogs
 
@@ -640,7 +525,7 @@ opposite background, the visible one is chosen per theme:
 
 | Where | How it adapts |
 | --- | --- |
-| Header logo and the sign-in callback page | two `<img>` elements, one shown by `html[data-theme]` in CSS — a logo that waits for JavaScript is a logo that can be missing |
+| Header logo | two `<img>` elements, one shown by `html[data-theme]` in CSS — a logo that waits for JavaScript is a logo that can be missing |
 | Favicon (`public/icon-32.png`, `public/icon-black-32.png`) | set from JavaScript, because a stylesheet cannot reach a favicon; `index.html` decides it before the first paint so the tab never shows the wrong mark |
 | `/favicon.ico` | a 16/32/48 fallback for clients that ask for it by convention |
 
@@ -664,7 +549,7 @@ scripts/backup.js       WAL-safe database backup
 src/api/v1.js           /v1 OpenAI surface
 src/api/admin.js        /api dashboard surface
 src/deepai/catalog.js   model catalog with cache and offline snapshot
-src/deepai/account.js   browser sign-in flow and allowance check
+src/deepai/account.js   key check, owner derivation, account-JSON parsing
 src/deepai/client.js    the two upstream transports
 src/deepai/wire.js      shared headers, SSE parsing, usage normalization
 public/                 dashboard (no framework, no build step)
@@ -681,23 +566,17 @@ and no external database. The only runtime dependency is Express.
   `/deepai_code/responses` and converted automatically.
 - The model catalog is fetched from `GET /deepai_code/models` and cached for ten
   minutes; an embedded snapshot keeps the gateway usable offline.
-- Login mirrors the desktop app, except the callback is served by the panel
-  itself, so the flow needs no second listener. DeepAI still chooses the callback
-  **host** — always `127.0.0.1` — so read
-  [Signing in from another machine](#signing-in-from-another-machine) before
-  exposing the panel.
-- **Login runs in the current tab**, not a popup. The panel navigates to DeepAI
-  and DeepAI returns the browser to the panel, so there is no second window to
-  close and no opener relationship to lose. The confirmation page hands the tab
-  back on its own after a moment.
-- The landing page follows the OS light/dark preference.
+- DeepAI's browser sign-in is **not** used: it always calls back to `127.0.0.1`, which
+  no setting can move. Sign-in is the account JSON copied out of DeepAI's own API page —
+  see [Signing in](#signing-in).
 
 ## Limits
 
 - Text only. Image inputs are not forwarded.
 - At most 5 gateway keys per account.
-- The dashboard has no password: authentication *is* the DeepAI login. Anyone
-  who can reach the port and complete a DeepAI login gets their own account.
+- The dashboard has no password of its own: authentication *is* the DeepAI account,
+  proven by a key only DeepAI could have issued. Anyone who can reach the port and
+  paste their own account JSON gets their own account, isolated from the others.
 - The Responses route has no stop-sequence field, so `stop` is dropped for
   `gpt-6-astra`.
 - Premier models require Theos balance on the DeepAI account; free models are
@@ -710,14 +589,19 @@ npm test
 ```
 
 Runs offline against an in-memory database and a stubbed `fetch` — no account
-and no network needed. Covers the schema and the v1→v2 migration, key
+and no network needed. Covers the schema and the v1→v5 migrations, key
 generation, ownership and limits, authentication, **multi-user isolation** (two
 accounts on one gateway, cross-account reads refused, ownerless keys refused,
 per-account settings), **sessions** (resolution, expiry, hashing, cookie
-parsing, per-browser concurrent logins), usage aggregation, live price parsing
-and cache accounting, usage export and durability, both usage normalizers, the
-catalog and the `/v1/models` payload, the OpenAI conversions, the `[hidden]`
-and OS-theme CSS invariants,
-routing (`/` is HTML, `/v1` and `/api` are JSON), the same-origin sign-in
-callback, `/v1/models` scoping, the 5-key cap, the per-hour window, the SSE
-splitter, and the Responses transport regression.
+parsing), usage aggregation, live price parsing and cache accounting, usage
+export and durability, both usage normalizers, the catalog and the `/v1/models`
+payload, the OpenAI conversions, the `[hidden]` and OS-theme CSS invariants,
+routing (`/` is HTML, `/v1` and `/api` are JSON), the removal of the browser
+sign-in routes, the sign-in card's one route and its copyable instructions,
+`/v1/models` scoping, the 5-key cap, the per-hour window, the SSE splitter, and
+the Responses transport regression.
+
+A few checks are guards rather than descriptions: the stylesheet may carry no class or
+custom property with no reader, no client code may call `window.confirm`, and the
+sign-in card's command must survive rendering unescaped — each verified by breaking it
+on purpose and watching the check fail.

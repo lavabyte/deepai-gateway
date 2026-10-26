@@ -107,10 +107,10 @@ function isAuthFailure(error) {
 /**
  * The one way in: the account JSON, read out of DeepAI's own API page.
  *
- * DeepAI has no public endpoint that turns a password into the account's API key for a
- * Google or Apple account, and its sign-in page cannot be relayed for them. But the
- * account JSON is served to their own browser, and a browser shows it as a plain page —
- * so the visitor opens that address and copies what it says.
+ * DeepAI's own browser sign-in always calls back to `127.0.0.1`, which nothing here can
+ * change, and a Google or Apple account has no password to post anywhere. But the account
+ * JSON is served to the visitor's own browser, and a browser shows it as a plain page — so
+ * they open that address, where they are already signed in, and copy what it says.
  *
  * Two earlier versions of this instruction were worse, and both were taught by trying
  * them: a browser-console command returns `'OK'` unless the console happens to be on

@@ -14,9 +14,6 @@
 
 import {
   clearSessionCookie,
-  loginCookie,
-  loginIdFromCookie,
-  newLoginId,
   sessionAccount,
   tokenFromCookie,
 } from '../store.js';
@@ -41,16 +38,6 @@ export function attachSession(db, options = {}) {
       res.append('set-cookie', clearSessionCookie());
     }
 
-    // Give every browser an identifier that groups its login requests, so two
-    // visitors starting a login at the same time cannot take over each other's
-    // pending attempt.
-    const loginId = loginIdFromCookie(cookieHeader);
-    if (loginId === undefined) {
-      req.loginBrowser = newLoginId();
-      res.append('set-cookie', loginCookie(req.loginBrowser, { secure: options.secure === true }));
-    } else {
-      req.loginBrowser = loginId;
-    }
     next();
   };
 }

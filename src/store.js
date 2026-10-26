@@ -18,41 +18,6 @@ import { createHash, randomBytes } from 'node:crypto';
 /** Session cookie name. */
 export const SESSION_COOKIE = 'deepai_gateway_session';
 
-/**
- * Cookie that groups one browser's login requests.
- *
- * Not a credential: it only lets the gateway tell two visitors' pending logins
- * apart. It must be a cookie rather than a header because DeepAI's callback is a
- * top-level navigation that carries cookies but no custom headers.
- */
-export const LOGIN_COOKIE = 'deepai_gateway_login';
-
-/** Lifetime of the login-grouping cookie. */
-const LOGIN_COOKIE_TTL_MS = 15 * 60_000;
-
-/** A fresh login-browser identifier. */
-export function newLoginId() {
-  return randomBytes(16).toString('hex');
-}
-
-/** Read the login-grouping cookie, or undefined. */
-export function loginIdFromCookie(header) {
-  return cookieValue(header, LOGIN_COOKIE);
-}
-
-/** Set the login-grouping cookie. `SameSite=Lax` so the callback still sends it. */
-export function loginCookie(id, { secure = false } = {}) {
-  const parts = [
-    `${LOGIN_COOKIE}=${encodeURIComponent(id)}`,
-    'Path=/',
-    // Not HttpOnly: nothing secret, and the dashboard reads it to reuse the slot.
-    'SameSite=Lax',
-    `Max-Age=${Math.floor(LOGIN_COOKIE_TTL_MS / 1000)}`,
-  ];
-  if (secure) parts.push('Secure');
-  return parts.join('; ');
-}
-
 /** How long a session stays valid without being used. */
 const SESSION_TTL_MS = 14 * 24 * 60 * 60_000;
 

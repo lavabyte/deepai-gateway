@@ -16,17 +16,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { openDatabase } from './src/db.js';
-import {
-  adminRouter,
-  beginLogin,
-  browserOf,
-  completeLogin,
-  localPort,
-  publicOrigin,
-  signInPageBase,
-} from './src/api/admin.js';
-import { callbackPage, loopbackCallbackUrl } from './src/deepai/account.js';
-import { DEFAULT_API_ORIGIN, DEFAULT_PAGE_ORIGIN, authProxyRouter } from './src/deepai/auth-proxy.js';
+import { adminRouter } from './src/api/admin.js';
 import { initPricing, pricingStatus, startPricingRefresh } from './src/pricing.js';
 import { v1Router } from './src/api/v1.js';
 import { prefetchCatalog } from './src/deepai/catalog.js';
@@ -46,74 +36,20 @@ export function config(env = process.env) {
     logRequests: env.LOG_REQUESTS !== '0',
     // Trust `X-Forwarded-*` and mark cookies `Secure` when behind TLS.
     trustProxy: env.TRUST_PROXY === '1' || env.TRUST_PROXY === 'true',
-    // The address visitors use, when the deployment knows its own name. It is
-    // used to report the origin back to the dashboard; it cannot change where
-    // DeepAI sends the browser, because DeepAI fixes that to loopback.
-    publicUrl: usableOrigin(env.PUBLIC_URL) ?? '',
-    // Relay DeepAI's *page* through this gateway. Off by default: the direct
-    // password sign-in below performs DeepAI's own three requests server-side, which
-    // needs no relay at all and no list of requests to pass through. Turn it on with
-    // AUTH_PROXY=1 only for the browser flow — and note that the visitor's password
-    // then passes through this process.
-    authProxy: env.AUTH_PROXY === '1' || env.AUTH_PROXY === 'true',
-    // Overridable so a test can point the relay at a fixture.
-    authPageOrigin: env.AUTH_PAGE_ORIGIN || DEFAULT_PAGE_ORIGIN,
-    authApiOrigin: env.AUTH_API_ORIGIN || DEFAULT_API_ORIGIN,
   };
-}
-
-/**
- * Normalise a configured public address, or reject it.
- *
- * A typo in `PUBLIC_URL` would otherwise be dropped in silence, leaving the
- * operator to wonder why the dashboard reports the wrong origin. Returning
- * `undefined` lets the caller fall back to the request instead.
- *
- * @param {string|undefined} value
- * @returns {string|undefined} the canonical origin.
- */
-function usableOrigin(value) {
-  if (typeof value !== 'string' || value.trim() === '') return undefined;
-  try {
-    return new URL(value.trim()).origin;
-  } catch {
-    console.warn(`[deepai-gateway] PUBLIC_URL is not a usable URL: ${JSON.stringify(value)} — ignoring it`);
-    return undefined;
-  }
 }
 
 /** Build the Express app. Exported so tests can mount it without listening. */
 export function createApp(db, options = {}) {
   const runtime = {
-    // One pending login per browser. A single global slot let a second visitor
-    // take over the first visitor's attempt.
-    pendingLogins: new Map(),
     log: options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`)),
     trustProxy: options.trustProxy === true,
-    publicUrl: options.publicUrl ?? '',
-    authProxy: options.authProxy === true,
-    authPageOrigin: options.authPageOrigin ?? DEFAULT_PAGE_ORIGIN,
-    authApiOrigin: options.authApiOrigin ?? DEFAULT_API_ORIGIN,
   };
 
   const app = express();
   app.disable('x-powered-by');
   app.set('etag', false);
   if (options.trustProxy === true) app.set('trust proxy', true);
-
-  /*
-   * DeepAI's sign-in, relayed. Mounted before the JSON parser on purpose: the login
-   * POST carries a password, and a body parser would read it into this process for
-   * no reason. The relay streams it straight upstream instead, and logs neither the
-   * body nor the cookies.
-   */
-  if (runtime.authProxy) {
-    app.use(authProxyRouter({
-      pageOrigin: runtime.authPageOrigin,
-      apiOrigin: runtime.authApiOrigin,
-      log: runtime.log,
-    }));
-  }
 
   app.use(express.json({ limit: '16mb' }));
 
@@ -153,102 +89,6 @@ export function createApp(db, options = {}) {
    */
   app.get('/healthz', (req, res) => {
     res.json({ ok: true });
-  });
-
-  /**
-   * DeepAI sends the browser here after sign-in.
-   *
-   * The host is DeepAI's choice, not ours: it always builds
-   * `http://127.0.0.1:<port>/auth-callback`, so this route can only be reached
-   * when the browser runs where the redirect can resolve — the gateway's own host,
-   * or through a port forward. A visitor anywhere else finishes the login by
-   * pasting that address into the dashboard instead, which `POST /api/login/complete`
-   * handles. `/callback` is the same handler under the shorter name.
-   *
-   * The response is also the one that hands the browser its session cookie.
-   */
-  const handleCallback = async (req, res) => {
-    // The browser coming back carries the same login cookie it started with, so
-    // it can only ever complete its own attempt.
-    const browser = browserOf(req);
-    const pending = runtime.pendingLogins.get(browser);
-    if (pending === undefined) {
-      return res
-        .status(410)
-        .type('html')
-        .send(callbackPage(
-          'Nothing to confirm',
-          'No sign-in is waiting. Start one from the dashboard and finish it in the browser.',
-          'error',
-        ));
-    }
-
-    try {
-      const result = await pending.flow.handleCallback(req);
-      if (result.finished) runtime.pendingLogins.delete(browser);
-      // The exchange succeeded: persist the account and mint this browser's
-      // session *before* sending the page, so the dashboard it redirects to is
-      // already authenticated.
-      if (result.account !== undefined) {
-        const completed = completeLogin(db, runtime, result.account, {
-          secure: options.trustProxy === true,
-        });
-        res.setHeader('set-cookie', completed.cookie);
-      }
-      return res.status(result.status).type('html').send(result.html);
-    } catch (error) {
-      runtime.pendingLogins.delete(browser);
-      runtime.log(`callback failed: ${error?.message ?? error}`);
-      return res.status(500).type('html').send(callbackPage(
-        'Sign-in failed',
-        'The callback could not be processed. Return to the dashboard and try again.',
-        'error',
-      ));
-    }
-  };
-
-  app.get('/auth-callback', handleCallback);
-  app.get('/callback', handleCallback);
-
-  /**
-   * Browser-navigable login: `/login` starts the flow and redirects to DeepAI, so
-   * the dashboard can simply navigate to it. `?json=1` answers with the URL
-   * instead of redirecting, so the SPA can report a failure in place.
-   *
-   * The JSON answer also carries the address DeepAI will send the browser back
-   * to, because that address is fixed to loopback and a browser elsewhere cannot
-   * open it unaided.
-   */
-  app.get('/login', async (req, res) => {
-    try {
-      const port = localPort(req, runtime.publicUrl);
-      const url = await beginLogin(db, runtime, port, {
-        browser: browserOf(req),
-        pageBase: signInPageBase(req, runtime),
-      });
-      if (req.query.json === '1') {
-        return res.json({
-          ok: true,
-          url,
-          origin: publicOrigin(req, runtime.publicUrl),
-          callbackPort: port,
-          callbackUrl: loopbackCallbackUrl(port),
-          listenPort: req.socket?.localPort ?? 0,
-          path: '/auth-callback',
-        });
-      }
-      return res.redirect(302, url);
-    } catch (error) {
-      runtime.log(`login could not start: ${error?.message ?? error}`);
-      return res.status(500).json({
-        error: {
-          message: `Could not start the DeepAI login: ${String(error?.message ?? error)}`,
-          type: 'api_error',
-          code: 'login_unavailable',
-          param: null,
-        },
-      });
-    }
   });
 
   /**
@@ -374,22 +214,6 @@ export function start(overrides = {}) {
       console.log('[deepai-gateway] note: HOST is not loopback — the dashboard is reachable from the network');
     }
 
-    /*
-     * `settings`, not the runtime object: this callback belongs to `start()`, where
-     * the runtime built inside `createApp` is not in scope. Reading it here crashed
-     * the process the moment the server began listening.
-     */
-    if (settings.authProxy) {
-      // The operator should know what the relay implies, and how to turn it off.
-      console.log('[deepai-gateway] note: DeepAI sign-in is relayed through this gateway, so a visitor who signs in');
-      console.log('[deepai-gateway]       with their DeepAI password sends it through this process (never stored or logged).');
-      console.log('[deepai-gateway]       Set AUTH_PROXY=0 to disable; the API-key sign-in needs no password at all.');
-    } else if (exposed) {
-      // Without the relay, DeepAI's redirect to loopback really is unreachable from
-      // another machine, so say so at boot rather than at the first failed login.
-      console.log(`[deepai-gateway] note: the DeepAI sign-in callback is fixed to ${loopbackCallbackUrl(port)}`);
-      console.log('[deepai-gateway]       a browser elsewhere cannot open it; finish sign-in by pasting that address into the dashboard');
-    }
   });
 
   const shutdown = () => {

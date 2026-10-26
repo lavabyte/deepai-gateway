@@ -655,7 +655,7 @@ await checkAsync('/v1/models only advertises the models a restricted key may use
   }
 });
 
-await checkAsync('/ serves the dashboard and /login is browser-navigable', async () => {
+await checkAsync('/ serves the dashboard shell and nothing else is browser-navigable', async () => {
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
   const app = createApp(fresh, { log: () => {}, logRequests: false });
@@ -675,59 +675,20 @@ await checkAsync('/ serves the dashboard and /login is browser-navigable', async
     assert.equal(deep.status, 404);
     assert.match(await deep.text(), /DeepAI Gateway/);
 
-    // /login with ?json=1 answers with the sign-in URL instead of redirecting.
-    // The relay is opt-in, so by default the browser is sent to DeepAI's own page.
-    const login = await fetch(`${base}/login?json=1`);
-    assert.equal(login.status, 200);
-    const payload = await login.json();
-    assert.equal(payload.ok, true);
-    assert.match(payload.url, /^https:\/\/api\.deepai\.org\/deepai_code\/desktop_auth\//);
-    assert.match(payload.url, /[?&]state=[0-9a-f]{64}/);
-
-    // The response that starts a login also hands this browser its login cookie.
-    // Sending it back identifies the same browser, which reuses its attempt
-    // instead of starting another.
-    const loginCookie = String(login.headers.get('set-cookie') ?? '').split(';')[0];
-    assert.match(loginCookie, /deepai_gateway_login=/);
-    const again = await fetch(`${base}/login?json=1`, { headers: { cookie: loginCookie } })
-      .then((res) => res.json());
-    assert.equal(again.url, payload.url, 'the same browser reuses its own attempt');
-
-    // A different browser gets its own attempt, not the first one's.
-    const other = await fetch(`${base}/login?json=1`).then((res) => res.json());
-    assert.notEqual(other.url, payload.url, 'a second browser must not hijack the first attempt');
-
-    // Cancel it so the callback server does not outlive this check.
-    await fetch(`${base}/api/cancel-login`, { method: 'POST' });
-  } finally {
-    await new Promise((resolve) => server.close(resolve));
-  }
-});
-
-await checkAsync('turning the relay on sends the browser to this gateway', async () => {
-  /*
-   * The relay exists so DeepAI's loopback redirect can be rewritten onto this host.
-   * Without it the browser must go to DeepAI directly, and the visitor finishes by
-   * pasting the address back — so the URL that starts a sign-in has to change with
-   * the setting. An operator disabling the relay still has to be able to sign in.
-   */
-  const fresh = openDatabase(':memory:');
-  const { createApp } = await import('../server.js');
-  const app = createApp(fresh, { log: () => {}, logRequests: false, authProxy: true });
-  const server = app.listen(0, '127.0.0.1');
-  await new Promise((resolve) => server.once('listening', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-
-  try {
-    const login = await fetch(`${base}/api/login`, { method: 'POST' }).then((r) => r.json());
-    // With the relay on, the page is served here — that is what makes DeepAI's
-    // loopback redirect rewritable.
-    assert.match(login.url, new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/deepai_code/desktop_auth/`));
-
-    // And the dashboard is told, so it stops offering the workaround.
-    const account = await fetch(`${base}/api/account`).then((r) => r.json());
-    assert.equal(account.authProxy, true);
-    await fetch(`${base}/api/cancel-login`, { method: 'POST' });
+    /*
+     * The browser sign-in is gone, so nothing may answer on its routes any more. A
+     * leftover that still did would be a route with no UI to reach it and no flow
+     * behind it, which is exactly what this removal was for.
+     */
+    for (const path of ['/login', '/auth-callback', '/callback']) {
+      const gone = await fetch(`${base}${path}`, { redirect: 'manual' });
+      assert.ok(gone.status !== 200, `${path} must no longer serve a sign-in page`);
+    }
+    // The JSON endpoints behind it are gone too, and answer JSON rather than HTML.
+    for (const path of ['/api/login', '/api/login/key', '/api/login/password', '/api/login/complete', '/api/cancel-login']) {
+      const gone = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      assert.equal(gone.status, 404, `${path} must be gone`);
+    }
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -1844,50 +1805,6 @@ check('usage survives the key being revoked mid-request', () => {
   assert.equal(totals(fresh, 0, 'u').totalTokens, 42, 'the owner still sees the spend');
 });
 
-await checkAsync('unauthenticated login flooding cannot grow state without bound', async () => {
-  // Regression: the slot key comes from a caller-controlled cookie on an
-  // unauthenticated route, and a fresh cookie is minted for any request that
-  // lacks one — so every request allocated a 256-bit state and a timer, with no
-  // ceiling. The map must stay bounded no matter how many distinct callers ask.
-  const fresh = openDatabase(':memory:');
-  const { createApp } = await import('../server.js');
-  const app = createApp(fresh, { log: () => {}, logRequests: false });
-  const server = app.listen(0, '127.0.0.1');
-  await new Promise((resolve) => server.once('listening', resolve));
-  const { port } = server.address();
-  const base = `http://127.0.0.1:${port}`;
-
-  try {
-    // 150 distinct "browsers", each with no login cookie of its own.
-    for (let i = 0; i < 150; i += 1) {
-      await fetch(`${base}/api/login`, { method: 'POST' });
-    }
-    const pending = app.locals.runtime.pendingLogins;
-    assert.ok(pending instanceof Map, 'the runtime keeps a pending-login map');
-    assert.ok(pending.size <= 64, `pending logins must stay bounded, got ${pending.size}`);
-    // Bounded, but still usable: the newest caller has a working attempt.
-    const fresh_ = await fetch(`${base}/api/login`, { method: 'POST' }).then((r) => r.json());
-    // Which origin serves the page depends on the relay, but an evicted visitor must
-    // always get a usable attempt back rather than the evicted one's.
-    assert.match(fresh_.url, /\/deepai_code\/desktop_auth\//);
-  } finally {
-    // Cancel everything so no callback server outlives this check.
-    const pending = app.locals.runtime.pendingLogins;
-    if (pending instanceof Map) {
-      for (const key of [...pending.keys()]) {
-        try {
-          pending.get(key)?.flow?.close?.();
-        } catch {
-          /* best effort */
-        }
-      }
-    }
-    await new Promise((resolve) => server.close(resolve));
-  }
-});
-
-/* ---------------------------------------------------------- multi-user scope */
-
 await checkAsync('two accounts on one gateway never see each other', async () => {
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
@@ -2085,29 +2002,25 @@ check('usage rows carry the owner so history outlives the key', () => {
 
 /* --------------------------------------------------------------- auth screen */
 
-await checkAsync('the auth screen styles buttons by class and never closes a tab', async () => {
-  const { callbackPage } = await import('../src/deepai/account.js');
-  const html = callbackPage('Logged in', 'Done', 'ok', { returnTo: '/' });
+await checkAsync('the auth screen styles its buttons by class, not by element', async () => {
+  /*
+   * Regression: the rule was `a.btn`, which never matched a `<button>`, so the control
+   * kept its box but lost every visual style. The landing page that carried its own copy
+   * of these rules is gone with the browser flow; the panel's stylesheet is the one that
+   * matters now.
+   */
+  const { readFileSync } = await import('node:fs');
+  const css = readFileSync(new URL('../public/app.css', import.meta.url), 'utf8');
 
-  // Regression 1: the rule was `a.btn`, which never matched a <button>, so the
-  // control kept its box but lost every visual style.
-  assert.match(html, /\.btn\{/, 'the button rule must be class-based');
-  assert.ok(!/a\.btn\{/.test(html), 'a.btn would miss a <button> element');
-  assert.match(html, /cursor:pointer/, 'interactive elements need a pointer cursor');
+  assert.match(css, /\.btn\s*\{/, 'the button rule must be class-based');
+  assert.ok(!/a\.btn\s*\{/.test(css), 'a.btn would miss a <button> element');
+  assert.match(css, /\.btn[^{]*\{[^}]*cursor: pointer/, 'interactive elements need a pointer cursor');
 
-  // Regression 2: the old control called window.close(), which browsers refuse
-  // for a tab the script did not open. Login now runs in this tab instead.
-  assert.ok(!html.includes('window.close'), 'the page must not try to close itself');
-  assert.ok(!html.includes('close-tab'), 'there is no second window to close');
-
-  // The success page hands the tab back to the dashboard on its own.
-  assert.match(html, /location\.replace\(returnTo \+ '\?logged-in=1'\)/);
-  assert.match(html, /var returnTo = "\/"/);
-
-  // An error page stays put: returnTo is null, so the guard never fires.
-  const error = callbackPage('Failed', 'Try again', 'error');
-  assert.match(error, /var returnTo = null/);
-  assert.ok(!error.includes('Taking you back'), 'no auto-return notice on failure');
+  // And the dashboard must not try to close a tab it did not open: browsers refuse it,
+  // and the removed flow did it as a matter of course.
+  const app = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.ok(!app.includes('window.close'), 'the page must not try to close itself');
+  assert.ok(!app.includes('close-tab'), 'there is no second window to close');
 });
 
 await checkAsync('booting the server does not crash and says what it is doing', async () => {
@@ -2141,7 +2054,6 @@ await checkAsync('booting the server does not crash and says what it is doing', 
       database: ':memory:',
       pricingCache: join(scratch, 'pricing.json'),
       logRequests: false,
-      authProxy: true,
     });
     // `listen` was already called, so wait for the address rather than the event.
     await new Promise((resolve) => {
@@ -2151,13 +2063,11 @@ await checkAsync('booting the server does not crash and says what it is doing', 
 
     const said = lines.join('\n');
     assert.match(said, /listening on http:\/\/127\.0\.0\.1:\d+/, 'the boot banner must be printed');
-    // The relay is a real trust decision, so it is announced at boot.
-    assert.match(said, /sign-in is relayed through this gateway/);
-    assert.match(said, /never stored or logged/);
-    assert.match(said, /Set AUTH_PROXY=0/);
-    // Loopback means there is no workaround to warn about.
-    assert.ok(!said.includes('cannot open it'), 'no loopback warning on a loopback host');
+    assert.match(said, /OpenAI base URL: http:\/\/127\.0\.0\.1:\d+\/v1/, 'and the endpoint to point a client at');
+    assert.match(said, /no DeepAI accounts yet/, 'a fresh database is worth reporting');
+    // Loopback means there is nothing exposed to warn about.
     assert.ok(!said.includes('not loopback'), 'no exposure note on a loopback host');
+    assert.ok(!said.includes('cannot open it'), 'no workaround to explain for a flow that no longer exists');
   } finally {
     console.log = realLog;
     globalThis.fetch = realFetch;
@@ -2170,7 +2080,6 @@ await checkAsync('booting the server does not crash and says what it is doing', 
 });
 
 await checkAsync('a non-loopback boot warns about what it exposes', async () => {
-  // The other branch, and the one an operator on a public host actually reads.
   const { start } = await import('../server.js');
   const { mkdtempSync, rmSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
@@ -2187,25 +2096,24 @@ await checkAsync('a non-loopback boot warns about what it exposes', async () => 
 
   let booted;
   try {
-    // A relay-less gateway still has to explain the loopback problem it now has.
     booted = start({
       port: 0,
       host: '0.0.0.0',
       database: ':memory:',
       pricingCache: join(scratch, 'pricing.json'),
       logRequests: false,
-      authProxy: false,
     });
     await new Promise((resolve) => {
       const poll = () => (booted.server.address() === null ? setTimeout(poll, 10) : resolve());
       poll();
     });
 
+    // The dashboard is cookie-protected but reachable, and an operator should know.
     const said = lines.join('\n');
     assert.match(said, /not loopback/, 'an exposed host must be called out');
-    assert.match(said, /sign-in callback is fixed to http:\/\/127\.0\.0\.1:/);
-    assert.match(said, /cannot open it/);
-    assert.ok(!said.includes('is relayed through this gateway'), 'no relay note when the relay is off');
+    assert.match(said, /dashboard is reachable from the network/);
+    // Nothing may promise a workaround for the sign-in flow that was removed.
+    assert.ok(!said.includes('cannot open it'), 'no advice about a flow that no longer exists');
   } finally {
     console.log = realLog;
     globalThis.fetch = realFetch;
@@ -2216,336 +2124,6 @@ await checkAsync('a non-loopback boot warns about what it exposes', async () => 
     rmSync(scratch, { recursive: true, force: true });
   }
 });
-
-/* ------------------------------------------------------ deepai sign-in relay */
-
-/*
- * The relay is what makes the browser sign-in work on a public host: DeepAI ends
- * the flow by redirecting to a loopback address it picks itself, and only
- * something in the middle can rewrite that. These checks pin the rewrites, and
- * then run the whole flow against a fixture that behaves like DeepAI — including
- * its loopback redirect — so the relay is verified without needing a password.
- */
-
-check('the relayed page stops DeepAI bouncing the browser to its own host', async () => {
-  const { rewriteAuthPage } = await import('../src/deepai/auth-proxy.js');
-
-  // The two constructs the relay depends on, as DeepAI ships them.
-  const page = [
-    '<script>var app_base_url=\'https://api.deepai.org\';</script>',
-    '<script>try{if(!(window.location.hostname==="deepai.org"||window.location.hostname==="127.0.0.1")){',
-    'window.location.href="https://deepai.org"+window.location.pathname+window.location.search;}}catch(e){}</script>',
-  ].join('\n');
-
-  const rewritten = rewriteAuthPage(page);
-  assert.equal(rewritten.ok, true);
-  // The bounce is what made a public host fail, so the comparison that triggered it
-  // must no longer be able to fire...
-  assert.ok(!rewritten.html.includes('window.location.hostname==="deepai.org"'), 'the guard must be disarmed');
-  // `!(true || …)` can never fire, whichever host the page is served from.
-  assert.match(rewritten.html, /if\(!\(true\|\|/);
-  // ...and every API call plus the page's self-reload must now resolve here.
-  assert.match(rewritten.html, /app_base_url=''/);
-  assert.ok(!rewritten.html.includes('api.deepai.org'), 'no absolute API origin may remain');
-  // Nothing else about the page is touched.
-  assert.ok(rewritten.html.includes('window.location.href="https://deepai.org"'), 'the rest is left alone');
-});
-
-check('a page the relay no longer recognises is refused, not half-served', async () => {
-  const { rewriteAuthPage } = await import('../src/deepai/auth-proxy.js');
-
-  // DeepAI changing either construct is the failure mode of any relay, and a page
-  // that is served but broken is worse than an honest refusal.
-  const nothing = rewriteAuthPage('<html><body>a different page</body></html>');
-  assert.equal(nothing.ok, false);
-  assert.deepEqual(nothing.missing, ['hostname guard', 'api base']);
-
-  const half = rewriteAuthPage('<script>window.location.hostname==="deepai.org"</script>');
-  assert.equal(half.ok, false);
-  assert.deepEqual(half.missing, ['api base']);
-});
-
-check('DeepAI\'s loopback redirect is put back on this origin', async () => {
-  const { rewriteLocation } = await import('../src/deepai/auth-proxy.js');
-  const origins = { pageOrigin: 'https://deepai.org', apiOrigin: 'https://api.deepai.org' };
-
-  // The redirect that decides whether the whole flow works. DeepAI picks both the
-  // host and the port, so the rewrite cannot depend on either.
-  for (const location of [
-    'http://127.0.0.1:25912/auth-callback?code=abc&state=def',
-    'http://127.0.0.1:8787/auth-callback?code=abc&state=def',
-    'http://localhost:5000/auth-callback?code=abc&state=def',
-    'http://[::1]:1234/auth-callback?code=abc&state=def',
-  ]) {
-    assert.equal(
-      rewriteLocation(location, origins),
-      '/auth-callback?code=abc&state=def',
-      `${location} must land on the gateway's own callback`,
-    );
-  }
-
-  // In-allowlist upstream locations stay on this origin too, so nothing falls out
-  // of the relay mid-flow.
-  assert.equal(
-    rewriteLocation('https://api.deepai.org/daily-time-sync/user/', origins),
-    '/daily-time-sync/user/',
-  );
-  // Anything else is left as it is: the relay is not a general rewriter.
-  assert.equal(rewriteLocation('https://accounts.google.com/o/oauth2/auth', origins), 'https://accounts.google.com/o/oauth2/auth');
-  assert.equal(rewriteLocation('not a url', origins), 'not a url');
-});
-
-check('relayed cookies are re-scoped to this origin', async () => {
-  const { COOKIE_PREFIX, relaySetCookie, upstreamCookieHeader } = await import('../src/deepai/auth-proxy.js');
-
-  // The browser is the cookie jar, so DeepAI's cookie has to be valid for this host:
-  // its Domain would be rejected, and a Secure cookie on plain HTTP would be
-  // dropped — which looks exactly like a wrong password.
-  const plain = relaySetCookie('sessionid=abc123; Domain=.deepai.org; Path=/; Secure; HttpOnly; SameSite=None', false);
-  assert.ok(plain.startsWith(`${COOKIE_PREFIX}sessionid=abc123`));
-  assert.match(plain, /Path=\//);
-  assert.match(plain, /HttpOnly/);
-  assert.match(plain, /SameSite=Lax/);
-  assert.ok(!/Domain/i.test(plain), 'a foreign Domain would be rejected by the browser');
-  assert.ok(!/Secure/i.test(plain), 'a Secure cookie would be dropped on plain HTTP');
-
-  // On TLS it is kept, because then it does protect something.
-  assert.match(relaySetCookie('a=b; Secure', true), /Secure/);
-  // Expiry survives, so an upstream session lifetime is respected.
-  assert.match(relaySetCookie('a=b; Max-Age=3600', false), /Max-Age=3600/);
-  assert.equal(relaySetCookie('=novalue', false), undefined);
-
-  // Only relayed cookies travel upstream: the gateway's own session must not.
-  assert.equal(upstreamCookieHeader(`deepai_gateway_session=secret; ${COOKIE_PREFIX}sessionid=abc; deepai_gateway_login=x`), 'sessionid=abc');
-  assert.equal(upstreamCookieHeader('deepai_gateway_session=secret'), '');
-  assert.equal(upstreamCookieHeader(undefined), '');
-});
-
-check('the relay forwards an allowlist and refuses to be an open proxy', async () => {
-  const { isProxiedPath } = await import('../src/deepai/auth-proxy.js');
-
-  for (const path of [
-    '/deepai_code/desktop_auth/',
-    '/daily-time-sync/login/',
-    '/daily-time-sync/user/',
-    '/get_user_login_type',
-    '/static/images/HiUser.svg',
-    '/privacy-preferences/get',
-  ]) {
-    assert.equal(isProxiedPath(path), true, `${path} is part of the sign-in flow`);
-  }
-  // Nothing arbitrary: a proxy that fetches whatever it is asked to is an open relay.
-  for (const path of ['/', '/api/account', '/v1/models', '/etc/passwd', '/dashboard/profile', '/chat']) {
-    assert.equal(isProxiedPath(path), false, `${path} must not be relayed`);
-  }
-  // Social sign-in would leave the relay, so it is answered rather than attempted.
-  assert.equal(isProxiedPath('/accounts/google/login/'), true);
-});
-
-await checkAsync('the whole sign-in works through the relay, loopback and all', async () => {
-  /*
-   * A fixture that behaves like DeepAI where it matters: a page carrying the two
-   * constructs the relay rewrites, an API that checks a password and sets a session
-   * cookie, and — the point of everything — a final redirect to a loopback address
-   * the browser could never reach on its own.
-   */
-  const http = await import('node:http');
-  const fixture = http.createServer((req, res) => {
-    const url = new URL(req.url, 'http://fixture');
-    fixture.seen.push({ path: url.pathname, cookie: req.headers.cookie ?? '', origin: req.headers.origin ?? '' });
-
-    const session = /(?:^|;\s*)sessionid=([^;]+)/.exec(req.headers.cookie ?? '')?.[1];
-
-    if (url.pathname === '/deepai_code/desktop_auth/') {
-      if (session === undefined) {
-        res.writeHead(200, { 'content-type': 'text/html' });
-        return res.end(fixture.page);
-      }
-      // Authenticated: this is the redirect no browser on another machine can open.
-      res.writeHead(302, {
-        location: `http://127.0.0.1:${url.searchParams.get('port')}/auth-callback?code=one-shot-code&state=${url.searchParams.get('state')}`,
-      });
-      return res.end();
-    }
-    if (url.pathname === '/static/app.css') {
-      res.writeHead(200, { 'content-type': 'text/css' });
-      return res.end('body{}');
-    }
-    if (url.pathname === '/daily-time-sync/login/') {
-      let body = '';
-      req.on('data', (chunk) => { body += chunk; });
-      return req.on('end', () => {
-        fixture.passwordsSeen.push(body);
-        if (!body.includes('hunter2')) {
-          res.writeHead(400, { 'content-type': 'application/json' });
-          return res.end('{"err":"bad credentials"}');
-        }
-        res.writeHead(200, {
-          'content-type': 'application/json',
-          'set-cookie': 'sessionid=fixture-session; Domain=.deepai.org; Path=/; HttpOnly; SameSite=None',
-        });
-        return res.end('{"ok":true}');
-      });
-    }
-    if (url.pathname === '/daily-time-sync/user/') {
-      // Their own sign-in page reads 200 as "signed in" and anything else as not.
-      return session === undefined
-        ? res.writeHead(201, { 'content-type': 'text/plain' }).end('OK')
-        : res.writeHead(200, { 'content-type': 'application/json' }).end('{"username":"kontomilosz350"}');
-    }
-    res.writeHead(404).end();
-  });
-  fixture.seen = [];
-  fixture.passwordsSeen = [];
-  fixture.page = [
-    '<html><head><title>Sign in to DeepAI Code</title></head><body>',
-    '<link rel="stylesheet" href="/static/app.css">',
-    '<script>var app_base_url=\'https://api.deepai.org\';</script>',
-    '<script>try{if(!(window.location.hostname==="deepai.org"||window.location.hostname==="127.0.0.1")){',
-    'window.location.href="https://deepai.org"+window.location.pathname+window.location.search;}}catch(e){}</script>',
-    '<form id="f"><input id="user-email"><input id="user-password" type="password"></form>',
-    '</body></html>',
-  ].join('\n');
-  await new Promise((resolve) => fixture.listen(0, '127.0.0.1', resolve));
-  const fixturePort = fixture.address().port;
-
-  const fresh = openDatabase(':memory:');
-  const { createApp } = await import('../server.js');
-  const logs = [];
-  const app = createApp(fresh, {
-    log: (message) => logs.push(message),
-    logRequests: false,
-    authProxy: true,
-    authPageOrigin: `http://127.0.0.1:${fixturePort}`,
-    authApiOrigin: `http://127.0.0.1:${fixturePort}`,
-  });
-  const gateway = app.listen(0, '127.0.0.1');
-  await new Promise((resolve) => gateway.once('listening', resolve));
-  const base = `http://127.0.0.1:${gateway.address().port}`;
-
-  const realFetch = globalThis.fetch;
-  const call = (...args) => realFetch(...args);
-  // Only the exchange and the allowance touch DeepAI directly; the relay uses the
-  // real fetch so it reaches the fixture.
-  globalThis.fetch = async (url, init) => {
-    const target = String(url);
-    if (target.includes('/desktop_auth/exchange/')) {
-      return new Response(JSON.stringify({ api_key: 'sk-relayed', username: 'kontomilosz350', is_pro: false }), {
-        status: 200, headers: { 'content-type': 'application/json' },
-      });
-    }
-    if (target.includes('/deepai_code/theos')) {
-      return new Response(JSON.stringify({ enabled: true, balance: '42.0', granted: '50.0', refresh_at: null }), {
-        status: 200, headers: { 'content-type': 'application/json' },
-      });
-    }
-    if (target.includes('/get_usage_summary')) {
-      return new Response('{"is_authenticated":true}', { status: 200, headers: { 'content-type': 'application/json' } });
-    }
-    return realFetch(url, init);
-  };
-
-  try {
-    // 1. Starting the sign-in must point the browser at *this* origin, not DeepAI's.
-    const started = await call(`${base}/api/login`, { method: 'POST' });
-    const login = await started.json();
-    const loginCookie = String(started.headers.get('set-cookie') ?? '').split(';')[0];
-    assert.match(login.url, new RegExp(`^${base}/deepai_code/desktop_auth/`), 'the page must be served here');
-    // The dashboard learns the relay is on from the account view, so it can stop
-    // warning about a page that will now load.
-    const view = await call(`${base}/api/account`, { headers: { cookie: loginCookie } }).then((r) => r.json());
-    assert.equal(view.authProxy, true);
-    const signInPath = new URL(login.url).pathname + new URL(login.url).search;
-
-    // 2. The relayed page must no longer bounce the browser away, or call DeepAI.
-    const page = await call(`${base}${signInPath}`, { headers: { cookie: loginCookie } });
-    const html = await page.text();
-    assert.equal(page.status, 200);
-    assert.ok(!html.includes('window.location.hostname==="deepai.org"'), 'the bounce must be disarmed');
-    assert.match(html, /app_base_url=''/);
-    assert.ok(!html.includes(`127.0.0.1:${fixturePort}`), 'the fixture must not leak into the page');
-
-    // Assets are absolute paths on the page's host, so they have to be relayed too.
-    const asset = await call(`${base}/static/app.css`);
-    assert.equal(asset.status, 200);
-    assert.equal(asset.headers.get('content-type'), 'text/css');
-    assert.equal(await asset.text(), 'body{}');
-
-    // 3. The credential POST is relayed, and DeepAI's session cookie comes back
-    //    re-scoped to this origin under the relay prefix.
-    const posted = await call(`${base}/daily-time-sync/login/`, {
-      method: 'POST',
-      headers: { cookie: loginCookie, 'content-type': 'application/x-www-form-urlencoded' },
-      body: 'username=kontomilosz350&password=hunter2',
-    });
-    assert.equal(posted.status, 200);
-    const relayed = String(posted.headers.get('set-cookie') ?? '');
-    assert.match(relayed, /dai_sessionid=fixture-session/, 'the upstream cookie must be relayed under our prefix');
-    assert.ok(!/Domain=/i.test(relayed), 'and re-scoped to this origin');
-    assert.ok(!/Secure/i.test(relayed), 'and not Secure on plain HTTP');
-    const daiCookie = relayed.split(';')[0];
-
-    // Upstream saw DeepAI's own origin, not the gateway's, and only the relayed
-    // cookie — the gateway's session cookie must never travel to DeepAI.
-    const loginSeen = fixture.seen.find((entry) => entry.path === '/daily-time-sync/login/');
-    assert.equal(loginSeen.origin, `http://127.0.0.1:${fixturePort}`);
-    // The browser held no DeepAI cookie yet, so nothing was forwarded — and in
-    // particular not the gateway's own login cookie.
-    assert.equal(loginSeen.cookie, '', 'no upstream cookie exists this early in the flow');
-
-    // 4. The poll now reports signed-in, through the relay.
-    const poll = await call(`${base}/daily-time-sync/user/`, { headers: { cookie: `${loginCookie}; ${daiCookie}` } });
-    assert.equal(poll.status, 200);
-
-    // 5. The decisive step: DeepAI redirects to a loopback address, and the relay
-    //    puts that same callback back on this origin.
-    const reloaded = await call(`${base}${signInPath}`, {
-      headers: { cookie: `${loginCookie}; ${daiCookie}` },
-      redirect: 'manual',
-    });
-    const reloadedBody = await reloaded.text();
-    assert.equal(reloaded.status, 302, `body=${reloadedBody} logs=${logs.join(' | ')}`);
-    const location = reloaded.headers.get('location');
-    assert.match(location, /^\/auth-callback\?code=one-shot-code&state=/);
-    assert.ok(!location.includes('127.0.0.1'), 'the redirect must not point at loopback any more');
-
-    // 6. Following it finishes the sign-in, exactly as the direct callback would.
-    const finished = await call(`${base}${location}`, { headers: { cookie: loginCookie } });
-    const finishedBody = await finished.text();
-    assert.equal(finished.status, 200, finishedBody);
-    assert.match(finishedBody, /Logged in to DeepAI/);
-    const sessionCookie = String(finished.headers.get('set-cookie') ?? '').split(';')[0];
-    const account = await call(`${base}/api/account`, { headers: { cookie: sessionCookie } }).then((r) => r.json());
-    assert.equal(account.signedIn, true);
-    assert.equal(account.username, 'kontomilosz350');
-
-    // 7. The password went through, and nowhere else: not into the log, and the
-    //    gateway kept no copy of it.
-    assert.ok(fixture.passwordsSeen.some((body) => body.includes('hunter2')), 'the fixture must have received it');
-    assert.ok(!logs.join('\n').includes('hunter2'), 'the password must never be logged');
-    assert.ok(!JSON.stringify(fixture.seen).includes('hunter2'), 'and it must not be echoed back');
-
-    /*
-     * 7b. The allowlist and the fetch must agree on one normalised path. If they did
-     *     not, a dotted path could be relayed even though its normalised form is not
-     *     on the list — which is how a relay turns into an open proxy.
-     */
-    const dotted = await call(`${base}/static/../healthz`, { redirect: 'manual' });
-    assert.equal(dotted.status, 200, 'a dotted path must reach the gateway, not the relay');
-    assert.deepEqual(await dotted.json(), { ok: true });
-
-    // 8. Social sign-in cannot work through a relay, and says so instead of leaving.
-    const social = await call(`${base}/accounts/google/login/`, { redirect: 'manual' });
-    assert.equal(social.status, 501);
-    assert.match(await social.text(), /email and password/);
-  } finally {
-    globalThis.fetch = realFetch;
-    await new Promise((resolve) => gateway.close(resolve));
-    await new Promise((resolve) => fixture.close(resolve));
-  }
-});
-
-/* ------------------------------------------------------------------- brand */
 
 await checkAsync('the project presents one consistent identity', async () => {
   const { readFileSync, readdirSync, statSync } = await import('node:fs');
@@ -2597,74 +2175,6 @@ await checkAsync('the project presents one consistent identity', async () => {
  * the address to show the visitor and accepts it back through
  * `POST /api/login/complete`. These checks pin both halves of that.
  */
-
-check('the sign-in callback address is DeepAI loopback, not ours to choose', async () => {
-  const { loopbackCallbackUrl } = await import('../src/deepai/account.js');
-  assert.equal(loopbackCallbackUrl(8787), 'http://127.0.0.1:8787/auth-callback');
-  // A junk port must not become a junk host in the address shown to a visitor.
-  assert.equal(loopbackCallbackUrl(undefined), 'http://127.0.0.1:0/auth-callback');
-});
-
-check('a pasted callback address yields its code and state', async () => {
-  const { parseCallbackInput } = await import('../src/deepai/account.js');
-
-  // What the browser leaves in its address bar after the redirect fails to open.
-  assert.deepEqual(
-    parseCallbackInput('http://127.0.0.1:25912/auth-callback?code=abc123&state=deadbeef'),
-    { ok: true, code: 'abc123', state: 'deadbeef' },
-  );
-  // DeepAI's own path, and the alias the gateway also serves.
-  assert.deepEqual(
-    parseCallbackInput('http://127.0.0.1:8787/callback?code=c&state=s'),
-    { ok: true, code: 'c', state: 's' },
-  );
-  // A chat client or terminal likes to wrap the link in quotes or brackets.
-  assert.deepEqual(
-    parseCallbackInput('  <"http://127.0.0.1:8787/auth-callback?code=c&state=s">  '),
-    { ok: true, code: 'c', state: 's' },
-  );
-  // Extra parameters must not disturb the two that matter.
-  assert.deepEqual(
-    parseCallbackInput('http://127.0.0.1:8787/auth-callback?code=c&state=s&extra=1#frag'),
-    { ok: true, code: 'c', state: 's' },
-  );
-  // A bare query fragment is accepted too.
-  assert.deepEqual(parseCallbackInput('?code=c&state=s'), { ok: true, code: 'c', state: 's' });
-  // Which host the visitor copied from is irrelevant: only the two parameters
-  // matter, so an address already fixed by hand parses just as well.
-  assert.deepEqual(
-    parseCallbackInput('http://gw.example.test:25912/auth-callback?code=c&state=s'),
-    { ok: true, code: 'c', state: 's' },
-  );
-
-  /*
-   * Each rejection names what to fix, because the visitor is shown it as an
-   * instruction. "The address is cut off" is actionable; "invalid input" is not,
-   * and a single catch-all reason would also hide a genuinely wrong address behind
-   * the same words as a truncated one.
-   */
-  // An address that stops before the second half: the visitor copied too little.
-  assert.deepEqual(
-    parseCallbackInput('http://127.0.0.1:8787/auth-callback?code=c'),
-    { ok: false, reason: 'no-state' },
-  );
-  assert.deepEqual(
-    parseCallbackInput('http://127.0.0.1:8787/auth-callback?state=s'),
-    { ok: false, reason: 'no-code' },
-  );
-  // A bare code is not an address at all.
-  assert.deepEqual(parseCallbackInput('abc123'), { ok: false, reason: 'not-an-address' });
-  assert.deepEqual(parseCallbackInput('http://example.test/'), { ok: false, reason: 'not-an-address' });
-  // Not text at all.
-  assert.deepEqual(parseCallbackInput(undefined), { ok: false, reason: 'not-an-address' });
-  assert.deepEqual(parseCallbackInput(42), { ok: false, reason: 'not-an-address' });
-  assert.deepEqual(parseCallbackInput('   '), { ok: false, reason: 'not-an-address' });
-  // Unbounded input must not be parsed or logged.
-  assert.deepEqual(
-    parseCallbackInput(`http://x/?code=c&state=${'s'.repeat(9000)}`),
-    { ok: false, reason: 'too-long' },
-  );
-});
 
 await checkAsync('the sign-in card gives one instruction, and it is the one that works', async () => {
   /*
@@ -2723,9 +2233,8 @@ await checkAsync('the sign-in card gives one instruction, and it is the one that
   };
 
   const signedOut = {
-    ok: true, signedIn: false, username: '', displayName: '', pendingLogin: false,
-    origin: 'http://gw.example.test:25912', callbackUrl: 'http://127.0.0.1:25912/auth-callback',
-    authProxy: false, allowance: null, balanceLow: false,
+    ok: true, signedIn: false, username: '', displayName: '',
+    allowance: null, balanceLow: false,
     keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false },
   };
   const html = await render(signedOut);
@@ -2827,9 +2336,8 @@ await checkAsync('both signed-out screens offer the one route', async () => {
   };
 
   const signedOut = {
-    ok: true, signedIn: false, username: '', displayName: '', pendingLogin: false,
-    origin: 'http://gw.example.test:25912', callbackUrl: 'http://127.0.0.1:25912/auth-callback',
-    authProxy: false, allowance: null, balanceLow: false,
+    ok: true, signedIn: false, username: '', displayName: '',
+    allowance: null, balanceLow: false,
     keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false },
   };
 
@@ -2954,102 +2462,66 @@ await checkAsync('nothing asks the visitor through a browser dialog', async () =
 });
 
 check('every sign-in failure has something useful to say', async () => {
+  /*
+   * The reasons the paste parser and the key check can report must each have a message,
+   * and no message may name a protocol parameter — the reader is looking at a page, not
+   * at a response.
+   *
+   * Each producer is taken by name rather than by slicing the module by position:
+   * position-based slicing broke twice, once when it picked up the next function's
+   * `@returns` list and once when a third producer was appended to the same file.
+   */
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
   const root = new URL('..', import.meta.url).pathname;
 
-  const flow = readFileSync(join(root, 'src', 'deepai', 'account.js'), 'utf8');
+  const account = readFileSync(join(root, 'src', 'deepai', 'account.js'), 'utf8');
   const admin = readFileSync(join(root, 'src', 'api', 'admin.js'), 'utf8');
 
-  /*
-   * Only reasons a function actually *returns*. Matching every `reason:` in a slice
-   * also picked up the `@returns` list in the next function's doc comment, which
-   * made one function appear to produce another's reasons.
-   */
+  /** Only reasons a function actually *returns*. */
   const reasonsIn = (text) => new Set(
     [...text.matchAll(/return \{ ok: false, reason: '([a-z_-]+)'/g)].map((m) => m[1]),
   );
-  /** The keys of one `const NAME = { ... }` table. */
-  const keysOf = (name) => {
+  const tableBody = (name) => {
     const from = admin.indexOf(`const ${name} = {`);
-    const table = admin.slice(from, admin.indexOf('};', from));
-    return new Set([...table.matchAll(/^\s{2}'?([a-z_-]+)'?:/gm)].map((m) => m[1]));
-  };
-  const messagesIn = (name) => {
-    const from = admin.indexOf(`const ${name} = {`);
+    assert.ok(from !== -1, `expected to find ${name}`);
     return admin.slice(from, admin.indexOf('};', from));
   };
+  const keysOf = (name) => new Set([...tableBody(name).matchAll(/^\s{2}'?([a-z_-]+)'?:/gm)].map((m) => m[1]));
 
-  /*
-   * There are two families of failure and two tables, so each table is checked
-   * against the code that actually produces *its* reasons. A single scan of the
-   * module would demand that every reason everywhere be answered in one table —
-   * which is how this check first failed when the API-key route was added.
-   */
-  const completion = reasonsIn(flow.slice(
-    flow.indexOf('export function parseCallbackInput'),
-    // The callback flow ends where the landing page begins; the key helpers live
-    // after it.
-    flow.indexOf(' * Landing page shown in the browser'),
-  ));
-  assert.ok(completion.size >= 8, `expected the callback reasons to be found, saw ${completion.size}`);
-  const unanswered = [...completion].filter((reason) => !keysOf('COMPLETION_FAILURES').has(reason));
-  assert.deepEqual(unanswered, [], `these completion reasons would fall back to a generic message: ${unanswered}`);
-
-  /*
-   * One producer, one table. Slicing the module by position broke twice as soon as
-   * another producer with its own reasons was appended, so each function is taken by
-   * name and checked against the table that answers for it.
-   */
+  /** One exported function's body, from its declaration to the next one. */
   const functionBody = (name) => {
-    const from = flow.indexOf(`export async function ${name}`);
-    const at = from === -1 ? -1 : from;
+    const at = account.indexOf(`export async function ${name}(`) === -1
+      ? account.indexOf(`export function ${name}(`)
+      : account.indexOf(`export async function ${name}(`);
     assert.ok(at !== -1, `expected to find ${name}`);
-    const next = flow.indexOf('\nexport ', at + 10);
-    const docStart = next === -1 ? -1 : flow.lastIndexOf('/**', next);
-    const end = docStart > at ? docStart : next;
-    return flow.slice(at, end === -1 ? undefined : end);
+    const next = account.indexOf('\nexport ', at + 10);
+    const docStart = next === -1 ? -1 : account.lastIndexOf('/**', next);
+    return account.slice(at, docStart > at ? docStart : (next === -1 ? undefined : next));
   };
 
-  for (const [name, table, minimum] of [
-    ['checkPastedKey', 'KEY_LOGIN_FAILURES', 3],
-    ['signInWithPassword', 'PASSWORD_LOGIN_FAILURES', 4],
-  ]) {
+  for (const [name, minimum] of [['parseAccountPaste', 4], ['checkPastedKey', 3]]) {
     const reasons = reasonsIn(functionBody(name));
     assert.ok(reasons.size >= minimum, `expected ${name}'s reasons to be found, saw ${reasons.size}`);
-    const unanswered = [...reasons].filter((reason) => !keysOf(table).has(reason));
-    assert.deepEqual(unanswered, [], `${name} reasons without a message in ${table}: ${unanswered}`);
+    const unanswered = [...reasons].filter((reason) => !keysOf('KEY_LOGIN_FAILURES').has(reason));
+    assert.deepEqual(unanswered, [], `${name} reasons without a message: ${unanswered}`);
   }
 
-  // The messages are read by someone looking at a page that would not load or a key
-  // that was refused, so they must not name protocol parameters.
-  for (const table of ['COMPLETION_FAILURES', 'KEY_LOGIN_FAILURES', 'PASSWORD_LOGIN_FAILURES']) {
-    for (const message of messagesIn(table).matchAll(/'([^']{20,})'/g)) {
-      assert.ok(!/\bstate\b|`code`/.test(message[1]), `jargon in ${table}: ${message[1]}`);
-    }
-  }
+  // And the table may not carry messages for reasons nothing can produce: those are
+  // leftovers from the routes that were removed, and they read as coverage that is not
+  // there.
+  const produced = new Set([
+    ...reasonsIn(functionBody('parseAccountPaste')),
+    ...reasonsIn(functionBody('checkPastedKey')),
+  ]);
+  const orphaned = [...keysOf('KEY_LOGIN_FAILURES')].filter((reason) => !produced.has(reason));
+  assert.deepEqual(orphaned, [], `messages for reasons nothing produces: ${orphaned}`);
 
-  /*
-   * Nothing may be terminal by accident: a mistyped paste must stay retryable.
-   *
-   * The set is parsed rather than sliced to a delimiter: the declaration ends with
-   * `]);`, so looking for `];` found nothing, yielded -1, and silently widened the
-   * search to the rest of the file — which passed only while no other table happened
-   * to mention those words.
-   */
-  const terminalMatch = /const TERMINAL_COMPLETION_REASONS = new Set\(\[([^\]]*)\]\)/.exec(admin);
-  assert.ok(terminalMatch !== null, 'the terminal set must be found');
-  const terminalReasons = new Set(
-    [...terminalMatch[1].matchAll(/'([a-z_-]+)'/g)].map((match) => match[1]),
-  );
-  assert.equal(terminalReasons.size, 3, 'the terminal set is the three that end an attempt');
-  for (const retryable of ['not-an-address', 'too-long', 'no-code', 'no-state', 'invalid_state', 'busy']) {
-    assert.ok(!terminalReasons.has(retryable), `${retryable} must leave the sign-in retryable`);
-  }
-  for (const terminal of ['expired', 'too_many_attempts', 'exchange_failed']) {
-    assert.ok(terminalReasons.has(terminal), `${terminal} ends the attempt`);
+  for (const message of tableBody('KEY_LOGIN_FAILURES').matchAll(/'([^']{20,})'/g)) {
+    assert.ok(!/\bstate\b|`code`/.test(message[1]), `jargon in a message: ${message[1]}`);
   }
 });
+
 
 check('the pasted console output is read forgivingly', async () => {
   const { parseAccountPaste } = await import('../src/deepai/account.js');
@@ -3182,288 +2654,6 @@ check('a pasted key owns itself, so nobody can claim another account', async () 
   assert.ok(usernameForKey('x'.repeat(4096)).length === 20);
 });
 
-await checkAsync('signing in with a pasted API key skips the browser round trip', async () => {
-  const fresh = openDatabase(':memory:');
-  const { createApp } = await import('../server.js');
-  const { usernameForKey } = await import('../src/deepai/account.js');
-  const logs = [];
-  const app = createApp(fresh, { log: (message) => logs.push(message), logRequests: false });
-  const server = app.listen(0, '127.0.0.1');
-  await new Promise((resolve) => server.once('listening', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-
-  const json = (body, status = 200) => new Response(JSON.stringify(body), {
-    status, headers: { 'content-type': 'application/json' },
-  });
-  const realFetch = globalThis.fetch;
-  const http = (...args) => realFetch(...args);
-  const answer = (url) => {
-    const target = String(url);
-    if (target.endsWith('/deepai_code/theos')) {
-      return json({ enabled: true, balance: '10.50000', granted: '50.00000', refresh_at: '2026-01-01T00:00:00+00:00' });
-    }
-    if (target.endsWith('/get_usage_summary')) return json({ is_authenticated: true, is_pro: true });
-    return json({ err: 'unexpected' }, 404);
-  };
-
-  try {
-    globalThis.fetch = async (url) => answer(url);
-
-    const signIn = (key, cookie, email = 'milo@example.com') => http(`${base}/api/login/key`, {
-      method: 'POST',
-      headers: cookie === undefined ? { 'content-type': 'application/json' } : { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ key, email }),
-    });
-
-    // Whitespace around a pasted key is normal and must not matter.
-    const first = await signIn('  sk-good-key  ');
-    const firstText = await first.text();
-    assert.equal(first.status, 200, firstText);
-    // The key must never come back, in any form.
-    assert.ok(!firstText.includes('sk-good-key'), 'the response must not echo the key');
-    const body = JSON.parse(firstText);
-    assert.equal(body.created, true);
-    assert.equal(body.username, usernameForKey('sk-good-key'));
-
-    const cookie = String(first.headers.get('set-cookie') ?? '').split(';')[0];
-    assert.match(cookie, /deepai_gateway_session=/);
-
-    // The account works immediately, with the balance we already read.
-    const account = await http(`${base}/api/account`, { headers: { cookie } }).then((r) => r.json());
-    assert.equal(account.signedIn, true);
-    assert.equal(account.username, usernameForKey('sk-good-key'));
-    // The owner stays the derived fingerprint — what is *shown* is the email.
-    assert.equal(account.displayName, 'milo@example.com');
-    assert.ok(!account.displayName.includes('sk-'), 'the shown name must not be the key');
-    assert.equal(account.isPro, true);
-    assert.equal(account.allowance?.balance, '10.50000');
-
-    // The same key again re-attaches to the same account rather than duplicating it.
-    const again = await signIn('sk-good-key', cookie);
-    assert.equal(again.status, 200);
-    assert.equal((await again.json()).created, false, 'the same key must not create a second owner');
-    assert.equal(listAccounts(fresh).length, 1);
-
-    // A different key is a different account, and cannot see the first one's keys.
-    const created = await http(`${base}/api/keys`, {
-      method: 'POST', headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'owned-by-first' }),
-    });
-    assert.equal(created.status, 201, await created.text());
-
-    const second = await signIn('sk-other-key', undefined, 'other@example.com');
-    const secondCookie = String(second.headers.get('set-cookie') ?? '').split(';')[0];
-    const secondAccount = await http(`${base}/api/account`, { headers: { cookie: secondCookie } }).then((r) => r.json());
-    assert.equal(secondAccount.username, usernameForKey('sk-other-key'));
-    assert.equal(secondAccount.displayName, 'other@example.com', 'each account shows its own name');
-    assert.notEqual(secondAccount.username, account.username);
-    const stolen = await http(`${base}/api/keys`, { headers: { cookie: secondCookie } }).then((r) => r.json());
-    assert.deepEqual(stolen.keys, [], 'a second key must not inherit the first key\'s gateway keys');
-    assert.equal(listAccounts(fresh).length, 2);
-
-    // A key is a credential: it must not reach the log either.
-    assert.ok(logs.length > 0, 'the sign-in should be logged');
-    assert.ok(!logs.join('\n').includes('sk-good-key'), 'the key must never be logged');
-    // The name is a label the visitor typed, and the log records the derived owner
-    // instead, so one account's chosen name is not exposed to the operator or to
-    // anyone else reading the log.
-    assert.ok(!logs.join('\n').includes('milo@example.com'), 'the chosen name must not be logged');
-    // Nor does it travel to another account's session.
-    assert.ok(!JSON.stringify(secondAccount).includes('milo@example.com'), 'a name must stay with its own account');
-  } finally {
-    globalThis.fetch = realFetch;
-    await new Promise((resolve) => server.close(resolve));
-  }
-});
-
-await checkAsync('the gateway can sign in with a DeepAI password itself', async () => {
-  /*
-   * DeepAI's own three requests, performed here: does the account exist and can it
-   * use a password, the login POST, and the authenticated reload that answers with
-   * the loopback redirect. Doing them server-side is what removes the need to relay
-   * their page and to guess which requests have to be passed through.
-   */
-  const http = await import('node:http');
-  const fixture = http.createServer((req, res) => {
-    const url = new URL(req.url, 'http://fixture');
-    let body = '';
-    req.on('data', (chunk) => { body += chunk; });
-    req.on('end', () => {
-      const json = (payload, status = 200) => {
-        res.writeHead(status, { 'content-type': 'application/json' });
-        res.end(JSON.stringify(payload));
-      };
-      if (url.pathname === '/get_user_login_type') {
-        fixture.seen.push(url.pathname);
-        if (body.includes('social@example.com')) {
-          return json({ user_exists: true, login_with_password: false, login_with_social_accounts: ['Google'] });
-        }
-        if (body.includes('ghost@example.com')) {
-          return json({ user_exists: false, login_with_password: true, login_with_social_accounts: [] });
-        }
-        return json({ user_exists: true, login_with_password: true, login_with_social_accounts: [] });
-      }
-      if (url.pathname === '/daily-time-sync/login/') {
-        fixture.seen.push(url.pathname);
-        if (!body.includes('correct-horse')) {
-          return json({ non_field_errors: ['Unable to log in with provided credentials.'] }, 400);
-        }
-        res.writeHead(200, {
-          'content-type': 'application/json',
-          'set-cookie': 'sessionid=fixture-session; Path=/; HttpOnly',
-        });
-        return res.end('{"ok":true}');
-      }
-      if (url.pathname === '/daily-time-sync/user/') {
-        fixture.seen.push(url.pathname);
-        if (!(req.headers.cookie ?? '').includes('sessionid=fixture-session')) {
-          res.writeHead(201, { 'content-type': 'text/plain' });
-          return res.end('OK');
-        }
-        // The account's own identity, key included, exactly as DeepAI answers it.
-        return json({
-          pk: 1,
-          username: 'kontomilosz350',
-          email: 'verified@example.com',
-          // A placeholder, never a real key: this file is published.
-          userprofile: { api_key: '00000000-0000-4000-8000-000000000000' },
-        });
-      }
-      if (url.pathname === '/deepai_code/desktop_auth/') {
-        fixture.seen.push(url.pathname);
-        // The one response the browser could never have followed on a public host.
-        if (!(req.headers.cookie ?? '').includes('sessionid=fixture-session')) return json({ err: 'no session' }, 401);
-        res.writeHead(302, {
-          location: `http://127.0.0.1:${url.searchParams.get('port')}/auth-callback?code=server-side-code&state=${url.searchParams.get('state')}`,
-        });
-        return res.end();
-      }
-      return json({ err: 'unexpected' }, 404);
-    });
-  });
-  fixture.seen = [];
-  await new Promise((resolve) => fixture.listen(0, '127.0.0.1', resolve));
-  const fixtureOrigin = `http://127.0.0.1:${fixture.address().port}`;
-
-  const fresh = openDatabase(':memory:');
-  const { createApp } = await import('../server.js');
-  const logs = [];
-  const app = createApp(fresh, {
-    log: (message) => logs.push(message),
-    logRequests: false,
-    authApiOrigin: fixtureOrigin,
-  });
-  const gateway = app.listen(0, '127.0.0.1');
-  await new Promise((resolve) => gateway.once('listening', resolve));
-  const base = `http://127.0.0.1:${gateway.address().port}`;
-
-  const realFetch = globalThis.fetch;
-  const call = (...args) => realFetch(...args);
-  globalThis.fetch = async (url, init) => {
-    if (String(url).includes('/desktop_auth/exchange/')) {
-      return new Response(JSON.stringify({ api_key: 'sk-from-password', username: 'kontomilosz350', is_pro: false }), {
-        status: 200, headers: { 'content-type': 'application/json' },
-      });
-    }
-    if (String(url).includes('/deepai_code/theos')) {
-      return new Response('{"enabled":true,"balance":"7.0","granted":"10.0","refresh_at":null}', {
-        status: 200, headers: { 'content-type': 'application/json' },
-      });
-    }
-    if (String(url).includes('/get_usage_summary')) {
-      return new Response('{"is_authenticated":true}', { status: 200, headers: { 'content-type': 'application/json' } });
-    }
-    return realFetch(url, init);
-  };
-
-  /** Start a sign-in and return the cookie that owns it. */
-  const begin = async () => {
-    const started = await call(`${base}/api/login`, { method: 'POST' });
-    return String(started.headers.get('set-cookie') ?? '').split(';')[0];
-  };
-  const post = (cookie, body) => call(`${base}/api/login/password`, {
-    method: 'POST',
-    headers: { cookie, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-
-  try {
-    // Without a waiting sign-in there is no state to bind a code to, so this must
-    // not be usable as a password oracle by anyone.
-    const unbound = await post('', { email: 'a@b.com', password: 'correct-horse' });
-    assert.equal(unbound.status, 410);
-    assert.equal((await unbound.json()).code, 'no_pending_login');
-
-    // Shapes that are not credentials.
-    let cookie = await begin();
-    for (const body of [{}, { email: '', password: '' }, { email: 'not-an-email', password: 'x' }, { email: 'a@b.com', password: '' }]) {
-      const bad = await post(cookie, body);
-      assert.equal(bad.status, 400, JSON.stringify(body));
-      assert.ok(['invalid_email', 'invalid_password'].includes((await bad.json()).code));
-    }
-
-    // An account that does not exist says so, rather than blaming the password.
-    const ghost = await post(cookie, { email: 'ghost@example.com', password: 'correct-horse' });
-    assert.equal(ghost.status, 404);
-    assert.equal((await ghost.json()).code, 'no-account');
-
-    // An account created with Google has no password, and naming the provider is
-    // the difference between a dead end and the next step.
-    const social = await post(cookie, { email: 'social@example.com', password: 'correct-horse' });
-    assert.equal(social.status, 409);
-    const socialBody = await social.json();
-    assert.equal(socialBody.code, 'social-only');
-    assert.match(socialBody.error, /Google/);
-
-    // A wrong password is a verdict from DeepAI, not a failure here.
-    const wrong = await post(cookie, { email: 'kontomilosz350@example.com', password: 'wrong' });
-    assert.equal(wrong.status, 401);
-    assert.equal((await wrong.json()).code, 'bad-credentials');
-
-    // The real thing.
-    const done = await post(cookie, { email: 'kontomilosz350@example.com', password: 'correct-horse' });
-    const doneText = await done.text();
-    assert.equal(done.status, 200, doneText);
-    assert.equal(JSON.parse(doneText).username, 'kontomilosz350');
-
-    const session = String(done.headers.get('set-cookie') ?? '').split(';')[0];
-    const account = await call(`${base}/api/account`, { headers: { cookie: session } }).then((r) => r.json());
-    assert.equal(account.signedIn, true);
-    /*
-     * The displayed name is DeepAI's own answer, not the field that was typed: the
-     * session the gateway just obtained is asked who it belongs to. That is the end of
-     * "the user could type a wrong email" — for this route there is nothing to type.
-     */
-    assert.equal(account.displayName, 'verified@example.com');
-
-    /*
-     * The successful attempt really took DeepAI's own route, in order: the password
-     * check, the login, then the authenticated reload that answers with the loopback
-     * redirect. Asserted on the tail, because the rejected attempts above called the
-     * first endpoint too.
-     */
-    assert.deepEqual(
-      fixture.seen.slice(-4),
-      [
-        '/get_user_login_type',
-        '/daily-time-sync/login/',
-        '/deepai_code/desktop_auth/',
-        // And then, with the session in hand, who this is.
-        '/daily-time-sync/user/',
-      ],
-    );
-
-    // A password is a credential: it must not reach the log.
-    assert.ok(logs.length > 0, 'the sign-in is logged');
-    assert.ok(!logs.join('\n').includes('correct-horse'), 'the password must never be logged');
-    assert.ok(!logs.join('\n').includes('wrong'), 'nor a rejected one');
-  } finally {
-    globalThis.fetch = realFetch;
-    await new Promise((resolve) => gateway.close(resolve));
-    await new Promise((resolve) => fixture.close(resolve));
-  }
-});
-
 await checkAsync('the same DeepAI key never becomes two accounts', async () => {
   /*
    * DeepAI mints a fresh key on every sign-in, so one DeepAI account can hold
@@ -3480,7 +2670,7 @@ await checkAsync('the same DeepAI key never becomes two accounts', async () => {
   await new Promise((resolve) => server.once('listening', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
 
-  // What the browser sign-in would have stored: the real DeepAI username.
+  // What an earlier sign-in stored: the real DeepAI username.
   saveAccount(fresh, { apiKey: 'sk-shared-key', username: 'kontomilosz350', isPro: false });
   assert.equal(accountForApiKey(fresh, 'sk-shared-key').username, 'kontomilosz350');
 
@@ -3499,10 +2689,12 @@ await checkAsync('the same DeepAI key never becomes two accounts', async () => {
   };
 
   try {
-    const res = await http(`${base}/api/login/key`, {
+    const res = await http(`${base}/api/login/profile`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ key: 'sk-shared-key', email: 'milo@example.com' }),
+      body: JSON.stringify({
+        text: JSON.stringify({ email: 'milo@example.com', userprofile: { api_key: 'sk-shared-key' } }),
+      }),
     });
     const body = await res.json();
     assert.equal(res.status, 200, JSON.stringify(body));
@@ -3522,7 +2714,14 @@ await checkAsync('the same DeepAI key never becomes two accounts', async () => {
   }
 });
 
-await checkAsync('a refused API key explains which kind of refusal it was', async () => {
+await checkAsync('a refused sign-in explains which kind of refusal it was', async () => {
+  /*
+   * Every refusal is read by someone who has just pasted something, so each has to say
+   * which part was wrong. The route is `/login/profile` — the only way in — so the input
+   * is the account JSON as pasted, and the failures come in two halves: the paste itself
+   * (`empty`, `not-json`, `no-key`, `too-long`) and DeepAI's answer about the key inside
+   * it (`rejected`, `not-for-code`, `unreachable`).
+   */
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
   const app = createApp(fresh, { log: () => {}, logRequests: false });
@@ -3535,9 +2734,12 @@ await checkAsync('a refused API key explains which kind of refusal it was', asyn
   });
   const realFetch = globalThis.fetch;
   const http = (...args) => realFetch(...args);
-  const post = (body) => http(`${base}/api/login/key`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  // `text` is what the visitor pasted, so the body is always `{ text }`.
+  const post = (text) => http(`${base}/api/login/profile`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }),
   });
+  /** The account JSON as DeepAI serves it, with the key under test. */
+  const paste = (apiKey) => JSON.stringify({ email: 'milo@example.com', userprofile: { api_key: apiKey } });
 
   /** Emulate one response shape per endpoint. */
   const lane = ({ theos, usage }) => async (url) => {
@@ -3554,32 +2756,33 @@ await checkAsync('a refused API key explains which kind of refusal it was', asyn
   };
 
   try {
-    // Shapes that are not a key at all: refused before any network call.
+    // Pastes that carry no key at all: refused before any network call.
     globalThis.fetch = async () => { throw new Error('must not be called'); };
-    for (const body of [
-      {}, { key: '' }, { key: '   ' }, { key: 42 }, { key: null }, { key: 'a\nb' }, { key: 'x'.repeat(600) },
-      // The email is the name that will be shown, so a missing or implausible one
-      // is refused before any key is checked.
-      { key: 'sk-fine' }, { key: 'sk-fine', email: '' }, { key: 'sk-fine', email: '   ' },
-      { key: 'sk-fine', email: 'not-an-email' }, { key: 'sk-fine', email: 'a@b' },
-      { key: 'sk-fine', email: `${'x'.repeat(250)}@example.com` },
+    for (const [pasted, reason] of [
+      ['', 'empty'],
+      ['   ', 'empty'],
+      [42, 'empty'],
+      ['hello', 'not-json'],
+      ['{"pk": 1}', 'no-key'],
+      ['Response {type: "cors", url: "…"}', 'not-json'],
+      [`{"a":"${'x'.repeat(70000)}"}`, 'too-long'],
     ]) {
-      const bad = await post(body);
-      assert.equal(bad.status, 400, `${JSON.stringify(body).slice(0, 40)} must be refused`);
-      assert.ok(['invalid_key', 'invalid_email'].includes((await bad.json()).code));
+      const bad = await post(pasted);
+      assert.equal(bad.status, 400, `${JSON.stringify(pasted).slice(0, 30)} must be refused`);
+      assert.equal((await bad.json()).code, reason);
     }
-    assert.equal(listAccounts(fresh).length, 0, 'nothing may be created from a malformed key');
+    assert.equal(listAccounts(fresh).length, 0, 'nothing may be created from a malformed paste');
 
     // A key DeepAI does not recognise.
     globalThis.fetch = lane({ theos: 401, usage: 401 });
-    const rejected = await post({ key: 'sk-nonsense', email: 'milo@example.com' });
+    const rejected = await post(paste('sk-nonsense'));
     assert.equal(rejected.status, 401);
     assert.equal((await rejected.json()).code, 'rejected');
 
     // A real DeepAI key that is not enabled for the Code lane: the likeliest
     // failure of all, and the one that must not be reported as a typo.
     globalThis.fetch = lane({ theos: 401, usage: 'auth' });
-    const wrongLane = await post({ key: 'sk-model-api-only', email: 'milo@example.com' });
+    const wrongLane = await post(paste('sk-model-api-only'));
     assert.equal(wrongLane.status, 403);
     const wrongLaneBody = await wrongLane.json();
     assert.equal(wrongLaneBody.code, 'not-for-code');
@@ -3587,356 +2790,24 @@ await checkAsync('a refused API key explains which kind of refusal it was', asyn
 
     // DeepAI is down, which is not the visitor's mistake.
     globalThis.fetch = lane({ theos: 500, usage: 401 });
-    const down = await post({ key: 'sk-fine', email: 'milo@example.com' });
+    const down = await post(paste('sk-fine'));
     assert.equal(down.status, 502);
     assert.equal((await down.json()).code, 'unreachable');
 
     // And a network failure is reported as one rather than as a bad key.
     globalThis.fetch = async () => { throw new Error('offline'); };
-    const offline = await post({ key: 'sk-fine', email: 'milo@example.com' });
+    const offline = await post(paste('sk-fine'));
     assert.equal(offline.status, 502);
     assert.equal((await offline.json()).code, 'unreachable');
 
     // No refusal may have created an account or handed out a session.
     assert.equal(listAccounts(fresh).length, 0);
-    // No refusal may hand out a session. (`deepai_gateway_login` is the
-    // browser-grouping cookie, not a credential, so only the session counts.)
     for (const response of [rejected, wrongLane, down, offline]) {
       const cookies = String(response.headers.get('set-cookie') ?? '');
-      assert.ok(!cookies.includes('deepai_gateway_session='), 'a refused key must not create a session');
+      assert.ok(!cookies.includes('deepai_gateway_session='), 'a refused sign-in must not create a session');
     }
   } finally {
     globalThis.fetch = realFetch;
-    await new Promise((resolve) => server.close(resolve));
-  }
-});
-
-check('the origin and port come from the request, not a constant', async () => {
-  const { localPort, publicOrigin } = await import('../src/api/admin.js');
-
-  /** A request stand-in; `trusted` mirrors Express' `trust proxy` setting. */
-  const req = ({ host = 'gw.example.test:25912', proto, forwardedHost, forwardedProto, trusted = false, socketPort } = {}) => ({
-    app: { get: (name) => (name === 'trust proxy' ? trusted : undefined) },
-    secure: false,
-    socket: socketPort === undefined ? {} : { localPort: socketPort },
-    get(name) {
-      if (name === 'host') return host;
-      if (name === 'x-forwarded-host') return forwardedHost;
-      if (name === 'x-forwarded-proto') return forwardedProto;
-      return undefined;
-    },
-    _proto: proto,
-  });
-
-  // The browser's own Host is the best answer when nothing else is known, and it
-  // is what fixes the public port a visitor actually used.
-  assert.equal(publicOrigin(req()), 'http://gw.example.test:25912');
-  assert.equal(localPort(req()), 25912);
-
-  // An explicit PUBLIC_URL wins over the request.
-  assert.equal(publicOrigin(req(), 'https://panel.example.test/'), 'https://panel.example.test');
-  assert.equal(localPort(req(), 'https://panel.example.test/'), 443);
-
-  // A default port needs no explicit port in the origin.
-  assert.equal(localPort(req({ host: 'gw.example.test' })), 80);
-  assert.equal(publicOrigin(req({ host: 'gw.example.test' })), 'http://gw.example.test');
-
-  // Forwarding headers are only believed when the proxy is trusted: otherwise any
-  // client could name the origin the dashboard reports.
-  const spoofed = req({ forwardedHost: 'evil.example.test', forwardedProto: 'https' });
-  assert.equal(publicOrigin(spoofed), 'http://gw.example.test:25912', 'untrusted forwarding headers must be ignored');
-  assert.equal(
-    publicOrigin(req({ forwardedHost: 'panel.example.test', forwardedProto: 'https', trusted: true })),
-    'https://panel.example.test',
-    'a trusted proxy may name the origin',
-  );
-  assert.equal(
-    localPort(req({ forwardedHost: 'panel.example.test:25912', forwardedProto: 'https', trusted: true })),
-    25912,
-  );
-  // Only the first hop counts, and a nonsense scheme is refused.
-  assert.equal(
-    publicOrigin(req({ forwardedHost: 'a.test, b.test', forwardedProto: 'https', trusted: true })),
-    'https://a.test',
-  );
-  assert.equal(publicOrigin(req({ forwardedProto: 'gopher', trusted: true, host: 'gw.test' })), '');
-  assert.equal(publicOrigin(req({ host: '' })), '');
-
-  // With no usable request address at all, the listening socket is the fallback.
-  assert.equal(localPort(req({ host: '', socketPort: 8787 })), 8787);
-  assert.equal(localPort(req({ host: '', socketPort: undefined })), 0);
-});
-
-await checkAsync('a loopback callback the browser cannot open can be pasted back', async () => {
-  const fresh = openDatabase(':memory:');
-  const { createApp } = await import('../server.js');
-  const app = createApp(fresh, { log: () => {}, logRequests: false });
-  const server = app.listen(0, '127.0.0.1');
-  await new Promise((resolve) => server.once('listening', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  const runtime = app.locals.runtime;
-
-  const realFetch = globalThis.fetch;
-  // The server's outbound exchange goes through `globalThis.fetch`, which this
-  // check stubs. The check's own HTTP calls must keep using the real one.
-  const http = (...args) => realFetch(...args);
-  try {
-    // Start a login as a browser would, and keep the cookie that identifies it.
-    const started = await http(`${base}/api/login`, { method: 'POST' });
-    assert.equal(started.status, 200);
-    const login = await started.json();
-    const cookie = String(started.headers.get('set-cookie') ?? '').split(';')[0];
-    assert.match(cookie, /deepai_gateway_login=/);
-
-    // The address DeepAI will use is loopback, and the port is read off the
-    // request, so the visitor knows exactly what to look for.
-    assert.equal(login.callbackUrl, `http://127.0.0.1:${server.address().port}/auth-callback`);
-    assert.equal(login.callbackPort, server.address().port);
-    assert.equal(login.origin, `http://127.0.0.1:${server.address().port}`);
-
-    // The state is the server's secret, binding a code to this attempt.
-    const browser = runtime.pendingLogins.keys().next().value;
-    const { state } = runtime.pendingLogins.get(browser).flow;
-
-    // `/api/account` reports the same address, derived from the request it is
-    // served on. That is what keeps the dashboard's instructions correct after a
-    // reload — which is exactly when the visitor comes back from the dead address.
-    const pendingView = await http(`${base}/api/account`, { headers: { cookie } }).then((r) => r.json());
-    assert.equal(pendingView.pendingLogin, true, 'this browser has an attempt waiting');
-    assert.equal(pendingView.callbackUrl, `http://127.0.0.1:${server.address().port}/auth-callback`);
-    assert.equal(pendingView.origin, `http://127.0.0.1:${server.address().port}`);
-    assert.ok(Number.isInteger(pendingView.callbackPort));
-    // A different browser must not be told about someone else's attempt.
-    const strangerView = await http(`${base}/api/account`).then((r) => r.json());
-    assert.equal(strangerView.pendingLogin, false, 'a pending login belongs to one browser only');
-
-    const pasted = `http://127.0.0.1:${server.address().port}/auth-callback?code=one-shot&state=${state}`;
-
-    // Truncated input must not burn the attempt: a visitor can paste again.
-    const truncated = await http(`${base}/api/login/complete`, {
-      method: 'POST',
-      headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ url: 'http://127.0.0.1:1/auth-callback?code=one-shot' }),
-    });
-    assert.equal(truncated.status, 400);
-    assert.equal((await truncated.json()).code, 'no-state');
-    assert.equal(runtime.pendingLogins.size, 1, 'a rejected paste leaves the attempt alive');
-
-    // A code bound to a different attempt is refused...
-    const foreign = await http(`${base}/api/login/complete`, {
-      method: 'POST',
-      headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ url: `http://127.0.0.1:1/auth-callback?code=x&state=${'0'.repeat(64)}` }),
-    });
-    assert.equal(foreign.status, 400);
-    assert.equal((await foreign.json()).code, 'invalid_state');
-
-    // ...and another browser cannot finish this browser's attempt at all.
-    const stranger = await http(`${base}/api/login/complete`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ url: pasted }),
-    });
-    assert.equal(stranger.status, 410, 'only the browser that started the attempt may finish it');
-    assert.equal((await stranger.json()).code, 'no_pending_login');
-
-    // Now the real exchange, with the network stubbed out.
-    const calls = [];
-    globalThis.fetch = async (url, init) => {
-      calls.push({ url: String(url), body: JSON.parse(init.body) });
-      return new Response(JSON.stringify({ api_key: 'sk-pasted', username: 'pasted-user', is_pro: true }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
-    };
-
-    const done = await http(`${base}/api/login/complete`, {
-      method: 'POST',
-      headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ url: pasted }),
-    });
-    // Read the body once: a failed assertion can then show what the server said.
-    const doneText = await done.text();
-    assert.equal(done.status, 200, doneText);
-    const result = JSON.parse(doneText);
-    assert.equal(result.ok, true);
-    assert.equal(result.username, 'pasted-user');
-
-    // The same one-shot code the callback route would have redeemed.
-    assert.equal(calls.length, 1);
-    assert.ok(calls[0].url.endsWith('/deepai_code/desktop_auth/exchange/'));
-    assert.equal(calls[0].body.code, 'one-shot');
-
-    // The response hands the browser a live session, exactly like the callback.
-    const sessionCookie = String(done.headers.get('set-cookie') ?? '').split(';')[0];
-    assert.match(sessionCookie, /deepai_gateway_session=/);
-    const account = await http(`${base}/api/account`, { headers: { cookie: sessionCookie } }).then((r) => r.json());
-    assert.equal(account.signedIn, true);
-    assert.equal(account.username, 'pasted-user');
-    assert.equal(runtime.pendingLogins.size, 0, 'a completed attempt is forgotten');
-  } finally {
-    globalThis.fetch = realFetch;
-    await new Promise((resolve) => server.close(resolve));
-  }
-});
-
-await checkAsync('fixing the host in the address bar finishes the sign-in', async () => {
-  /*
-   * The other way to "process" DeepAI's dead address: the browser's own rewrite.
-   * Its redirect points at `http://127.0.0.1:<port>/auth-callback`, and the
-   * gateway serves that exact path on its own origin, so replacing `127.0.0.1`
-   * with the public host turns the dead address into a working one — no paste, no
-   * extra endpoint. That only holds while a top-level GET still carries this
-   * browser's login cookie, which is what this check pins.
-   */
-  const fresh = openDatabase(':memory:');
-  const { createApp } = await import('../server.js');
-  const app = createApp(fresh, { log: () => {}, logRequests: false });
-  const server = app.listen(0, '127.0.0.1');
-  await new Promise((resolve) => server.once('listening', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  const runtime = app.locals.runtime;
-
-  const realFetch = globalThis.fetch;
-  const http = (...args) => realFetch(...args);
-  try {
-    const started = await http(`${base}/api/login`, { method: 'POST' });
-    const cookie = String(started.headers.get('set-cookie') ?? '').split(';')[0];
-    const browser = runtime.pendingLogins.keys().next().value;
-    const { state } = runtime.pendingLogins.get(browser).flow;
-
-    globalThis.fetch = async () => new Response(
-      JSON.stringify({ api_key: 'sk-from-bar', username: 'from-bar', is_pro: false }),
-      { status: 200, headers: { 'content-type': 'application/json' } },
-    );
-
-    // Exactly what the browser sends after the visitor edits the host and hits
-    // Enter: a plain navigation to /auth-callback carrying the login cookie.
-    const landed = await http(`${base}/auth-callback?code=one-shot&state=${state}`, { headers: { cookie } });
-    const body = await landed.text();
-    assert.equal(landed.status, 200, body);
-    assert.match(body, /Logged in to DeepAI/);
-
-    // It hands over a session, and the waiting attempt is gone.
-    const sessionCookie = String(landed.headers.get('set-cookie') ?? '').split(';')[0];
-    assert.match(sessionCookie, /deepai_gateway_session=/);
-    assert.equal(runtime.pendingLogins.size, 0);
-    const account = await http(`${base}/api/account`, { headers: { cookie: sessionCookie } }).then((r) => r.json());
-    assert.equal(account.signedIn, true);
-    assert.equal(account.username, 'from-bar');
-
-    // The rewritten address works on the alias too, since both point at the same
-    // handler — a visitor may well land on either spelling.
-    const alias = await http(`${base}/callback?code=c&state=s`);
-    assert.equal(alias.status, 410, 'the alias answers, it just has no attempt left');
-  } finally {
-    globalThis.fetch = realFetch;
-    await new Promise((resolve) => server.close(resolve));
-  }
-});
-
-await checkAsync('the completion endpoint refuses everything it cannot verify', async () => {
-  const fresh = openDatabase(':memory:');
-  const { createApp } = await import('../server.js');
-  const app = createApp(fresh, { log: () => {}, logRequests: false });
-  const server = app.listen(0, '127.0.0.1');
-  await new Promise((resolve) => server.once('listening', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  const runtime = app.locals.runtime;
-
-  const realFetch = globalThis.fetch;
-  try {
-    const post = (cookie, body) => fetch(`${base}/api/login/complete`, {
-      method: 'POST',
-      headers: cookie === '' ? { 'content-type': 'application/json' } : { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-
-    // Nothing pending at all.
-    const nothing = await post('', { url: 'http://127.0.0.1:1/auth-callback?code=c&state=s' });
-    assert.equal(nothing.status, 410);
-    assert.equal((await nothing.json()).code, 'no_pending_login');
-
-    // Pending, but the request carries no address.
-    const started = await fetch(`${base}/api/login`, { method: 'POST' });
-    const cookie = String(started.headers.get('set-cookie') ?? '').split(';')[0];
-    for (const body of [{}, { url: '' }, { code: 'c' }, { url: 42 }, { url: '   ' }]) {
-      const bad = await post(cookie, body);
-      assert.equal(bad.status, 400, `body ${JSON.stringify(body)} must be refused`);
-      assert.equal((await bad.json()).code, 'missing_address');
-    }
-
-    // A bare code with no state is refused rather than exchanged: there would be
-    // nothing to prove which attempt it was minted for.
-    const unbound = await post(cookie, { code: 'abcdef', state: '' });
-    assert.equal(unbound.status, 400);
-
-    // Repeated junk exhausts the attempt instead of becoming a free oracle. The
-    // last rejected pair reports why it ended, rather than a later call merely
-    // finding the flow gone.
-    const browser = runtime.pendingLogins.keys().next().value;
-    const { state } = runtime.pendingLogins.get(browser).flow;
-    const seen = [];
-    for (let attempt = 0; attempt < 12 && runtime.pendingLogins.size > 0; attempt += 1) {
-      const response = await post(cookie, { url: `http://127.0.0.1:1/auth-callback?code=c&state=${'1'.repeat(64)}` });
-      seen.push([response.status, (await response.json()).code]);
-    }
-    assert.deepEqual(
-      seen.at(-1),
-      [429, 'too_many_attempts'],
-      `expected the attempt to end on too many tries, saw ${JSON.stringify(seen)}`,
-    );
-    assert.equal(runtime.pendingLogins.size, 0, 'an exhausted attempt is forgotten');
-    assert.ok(state.length === 64, 'the state is still the 256-bit value');
-  } finally {
-    globalThis.fetch = realFetch;
-    await new Promise((resolve) => server.close(resolve));
-  }
-});
-
-await checkAsync('/callback is the same handler as /auth-callback', async () => {
-  const fresh = openDatabase(':memory:');
-  const { createApp } = await import('../server.js');
-  const app = createApp(fresh, { log: () => {}, logRequests: false });
-  const server = app.listen(0, '127.0.0.1');
-  await new Promise((resolve) => server.once('listening', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-
-  try {
-    // Both paths answer, and both refuse a callback with no attempt behind it.
-    for (const path of ['/auth-callback', '/callback']) {
-      const response = await fetch(`${base}${path}?code=c&state=s`, { redirect: 'manual' });
-      assert.equal(response.status, 410, `${path} should be served`);
-      assert.match(await response.text(), /Nothing to confirm/);
-    }
-
-    // A POST to either is the wrong verb and must not be treated as a callback.
-    const wrongVerb = await fetch(`${base}/callback`, { method: 'POST' });
-    assert.equal(wrongVerb.status, 404, 'only GET is routed');
-  } finally {
-    await new Promise((resolve) => server.close(resolve));
-  }
-});
-
-await checkAsync('PUBLIC_URL is reported to the dashboard without changing the callback', async () => {
-  const fresh = openDatabase(':memory:');
-  const { createApp } = await import('../server.js');
-  const app = createApp(fresh, { log: () => {}, logRequests: false, publicUrl: 'https://panel.example.test' });
-  const server = app.listen(0, '127.0.0.1');
-  await new Promise((resolve) => server.once('listening', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-
-  try {
-    const login = await fetch(`${base}/api/login`, { method: 'POST' }).then((r) => r.json());
-    // The origin the visitor used, taken from configuration.
-    assert.equal(login.origin, 'https://panel.example.test');
-    // But DeepAI still gets a plain integer port for a loopback callback: no
-    // setting can move the redirect to the public host.
-    assert.equal(login.callbackPort, 443);
-    assert.equal(login.callbackUrl, 'http://127.0.0.1:443/auth-callback');
-    assert.equal(login.path, '/auth-callback');
-    await fetch(`${base}/api/cancel-login`, { method: 'POST' });
-  } finally {
     await new Promise((resolve) => server.close(resolve));
   }
 });
