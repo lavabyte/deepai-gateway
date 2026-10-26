@@ -179,6 +179,12 @@ the browser that is signed in, and it carries both the account's `email` and its
 name to show is the account's own rather than something typed. The dashboard shows the
 steps, the command, and a warning about the console's paste prompt (`allow pasting`).
 
+It is a **tab beside the password form**, not a link that reveals it: these instructions
+were the ones behind a click, which is the wrong way round for the route most people
+with a Google or Apple account need. The command is emitted verbatim — `esc()` would
+turn its apostrophes into `&#39;`, leaving a visitor to un-escape the one line they are
+told to paste.
+
 `console.log` of the `Response` itself would print an object that cannot be copied as
 JSON, which is the one detail that turns this from a two-second job into a puzzle; the
 command therefore prints `.text()`.
