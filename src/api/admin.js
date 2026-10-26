@@ -182,6 +182,10 @@ export function adminRouter(db, runtime) {
     if (check.ok !== true) {
       const [status, message] = KEY_LOGIN_FAILURES[check.reason] ?? [400, 'That key could not be used.'];
       runtime.log?.(`key sign-in refused: ${check.reason}`);
+      // A refusal is worth recording: the trail is what an operator reads to see a key
+      // being tried repeatedly. It is filed under the fingerprint the key derives, which is
+      // the only identity an unvalidated key has.
+      recordAuthEvent(db, 'denied', { username: usernameForKey(key), detail: check.reason });
       return res.status(status).json({ ok: false, error: message, code: check.reason });
     }
 
@@ -199,8 +203,15 @@ export function adminRouter(db, runtime) {
 
     // The name to show, kept as a setting so `accounts.username` stays the derived
     // owner it has to be.
-    if (typeof displayName === 'string' && displayName !== '') {
-      setSetting(db, username, 'display_name', displayName);
+    /*
+     * The name is displayed in the dashboard, so it is stored as plain text: a control
+     * character or a markup fragment is not part of an email address, and anything stored
+     * here would be rendered on every visit until the account is forgotten. The dashboard
+     * escapes it as well — this is the half that keeps the value honest in the database.
+     */
+    if (typeof displayName === 'string') {
+      const clean = displayName.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 254);
+      if (clean !== '') setSetting(db, username, 'display_name', clean);
     }
 
     // Persist the allowance just read, so the badge shows a balance immediately

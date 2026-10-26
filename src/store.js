@@ -274,10 +274,17 @@ export function sessionAccount(db, token, now = Date.now()) {
     db.prepare('DELETE FROM sessions WHERE id = ?').run(row.session_id);
     return undefined;
   }
-  // Touch at most once a minute: this runs on every dashboard request, and the
-  // exact value only matters for the idle timeout.
+  /*
+   * Touch at most once a minute: this runs on every dashboard request, and the exact value
+   * only matters for the idle timeout. The expiry slides with it, so a session ends after
+   * `SESSION_TTL_MS` of *idle* time rather than that long after sign-in — which is what the
+   * setting and the README both say, and what a user who opens the dashboard daily expects.
+   */
   if (now - Number(row.last_seen_at ?? 0) > 60_000) {
-    db.prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ?').run(now, row.session_id);
+    const expiresAt = now + SESSION_TTL_MS;
+    db.prepare('UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?')
+      .run(now, expiresAt, row.session_id);
+    row.expires_at = expiresAt;
   }
   const account = accountOf(row);
   if (account !== undefined) {

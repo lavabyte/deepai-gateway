@@ -28,7 +28,7 @@ import {
  *
  * @param {import('node:sqlite').DatabaseSync} db
  */
-export function attachSession(db, options = {}) {
+export function attachSession(db) {
   return (req, res, next) => {
     const cookieHeader = req.get('cookie');
     const token = tokenFromCookie(cookieHeader);

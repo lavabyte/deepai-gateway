@@ -1020,7 +1020,7 @@ function accountCard() {
       <div class="row row--between">
         <div>
           <div class="card__title">${t('account.title')}</div>
-          <div class="card__sub">${t('account.loggedInAs', { name: accountName(account) })}${account.isPro ? t('account.pro') : ''}</div>
+          <div class="card__sub">${t('account.loggedInAs', { name: esc(accountName(account)) })}${account.isPro ? t('account.pro') : ''}</div>
         </div>
         <span class="badge ${account.balanceLow ? 'badge--amber' : 'badge--green'}"><span class="dot"></span>${account.balanceLow ? t('account.lowBalance') : t('account.active')}</span>
       </div>
@@ -1504,7 +1504,7 @@ async function renderKeys() {
 
     <div class="stack">
       <div class="row row--between">
-        <span class="eyebrow">${keys.length} of ${quota.max} keys used</span>
+        <span class="eyebrow">${t('account.keysUsed', { used: exact(keys.length), max: exact(quota.max) })}</span>
         <button class="btn btn--primary" id="new-key" ${quota.atLimit ? `disabled title="${t('keys.revokeFirst')}"` : ''}>${t('keys.create')}</button>
       </div>
 
@@ -1522,8 +1522,8 @@ async function renderKeys() {
             <tbody>${keys.length === 0
               ? `<tr><td colspan="8"><div class="empty"><div class="empty__title">${t('keys.empty')}</div>${
                   state.account?.signedIn === true
-                    ? 'Create one to start sending requests.'
-                    : 'Log in to create one.'
+                    ? t('keys.emptyCta')
+                    : t('keys.emptyLogin')
                 }</div></td></tr>`
               : keys.map(row).join('')}</tbody>
           </table>

@@ -143,6 +143,17 @@ export async function* readEvents(response, signal) {
   const reader = response.body?.getReader?.();
   if (reader === undefined) throw new UpstreamError('DeepAI: response has no stream', 'PROVIDER_ERROR');
 
+  /*
+   * Ceiling on one unparsed event.
+   *
+   * The reader accumulates bytes until it sees a blank line, so a stream that never
+   * terminates an event grows this buffer without limit — measured at roughly twice the
+   * bytes received, because each append re-allocates the string. No real event comes close
+   * to this, so exceeding it means the upstream is broken or hostile, and failing the
+   * request is better than exhausting the process.
+   */
+  const MAX_EVENT_BYTES = 8 * 1024 * 1024;
+
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
   let ended = false;
@@ -173,6 +184,12 @@ export async function* readEvents(response, signal) {
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
+      if (buffer.length > MAX_EVENT_BYTES) {
+        throw new UpstreamError(
+          `DeepAI stream sent ${buffer.length} bytes without ending an event`,
+          'PROVIDER_ERROR',
+        );
+      }
       for (;;) {
         const { index, length } = findEventEnd(buffer);
         if (index === -1) break;

@@ -12,7 +12,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 /** Current schema version. Bump when a migration below is added. */
@@ -26,8 +26,22 @@ export const SCHEMA_VERSION = 6;
  * @returns {DatabaseSync}
  */
 export function openDatabase(file) {
-  if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
+  if (file !== ':memory:') {
+    /*
+     * Owner-only, because this directory and file hold every account's DeepAI key in a
+     * form that can be replayed: the key has to be stored recoverably to be sent upstream,
+     * so the file's permissions are what protects the accounts on a shared machine. The
+     * default umask would leave it readable by every local user.
+     */
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  }
   const db = new DatabaseSync(file);
+  /*
+   * After opening, not before: the file does not exist until SQLite creates it. The WAL
+   * and shared-memory sidecars do not exist yet either, and SQLite gives them the database
+   * file's mode, so restricting the database here covers them too.
+   */
+  if (file !== ':memory:') restrict(file);
 
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
@@ -326,6 +340,25 @@ function migrateToV6(db) {
 /** Short stable digest used to derive a username when DeepAI gives none. */
 function hash8(value) {
   return createHash('sha256').update(String(value), 'utf8').digest('hex').slice(0, 8);
+}
+
+/**
+ * Keep one runtime file owner-only.
+ *
+ * Applied to the database and its WAL sidecars, which are created by SQLite rather than by
+ * this code and so do not inherit the directory's mode.
+ *
+ * @param {string} file
+ * @returns {boolean} whether the mode was applied (a missing file is not a failure).
+ */
+function restrict(file) {
+  try {
+    chmodSync(file, 0o600);
+    return true;
+  } catch {
+    // A filesystem without modes, or a file not created yet: not worth failing a boot.
+    return false;
+  }
 }
 
 /** Add a column only when the table does not already have it. */

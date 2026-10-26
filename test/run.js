@@ -338,6 +338,19 @@ check('sessions resolve to one account and expire', () => {
   const short = createSession(db, 'other', { ttlMs: -1 });
   assert.equal(sessionAccount(db, short.token), undefined);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sessions WHERE id = ?').get(short.id).n, 0);
+
+  /*
+   * A session slides: using it moves the expiry, so it ends after the TTL of *idle* time
+   * rather than that long after sign-in. Both the setting's own comment and the README
+   * describe it that way, and a user who opens the dashboard daily expects to stay in.
+   */
+  const sliding = createSession(db, 'other', { ttlMs: 120_000 });
+  const before = db.prepare('SELECT expires_at FROM sessions WHERE id = ?').get(sliding.id).expires_at;
+  // Past the one-minute write throttle, still inside the session's life.
+  const used = sessionAccount(db, sliding.token, Date.now() + 70_000);
+  assert.equal(used?.username, 'other', 'still valid when used');
+  const after = db.prepare('SELECT expires_at FROM sessions WHERE id = ?').get(sliding.id).expires_at;
+  assert.ok(after > before, 'using a session must push its expiry out');
 });
 
 check('the session cookie parses and clears', () => {
@@ -2831,6 +2844,197 @@ await checkAsync('both signed-out screens offer the one route', async () => {
   // The replaced controls must be gone from the source, not merely unreachable.
   for (const gone of ['id="password-form"', 'id="api-key"', 'id="signin"', 'passwordForm(', 'keyForm(']) {
     assert.ok(!source.includes(gone), `${gone} must not remain in the source`);
+  }
+});
+
+await checkAsync('a name from the database cannot become markup', async () => {
+  /*
+   * The display name comes from the DeepAI JSON a visitor pastes, is stored, and is shown
+   * on the account card. It was interpolated into `innerHTML` unescaped, so a name
+   * containing markup executed on every visit to the overview until the account was
+   * forgotten. Two halves are checked: the dashboard escapes it, and the server stores it
+   * as plain text so the database never holds a fragment.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const vm = await import('node:vm');
+  const root = new URL('..', import.meta.url).pathname;
+  const app = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+
+  const markup = '<img src=x onerror=alert(1)>';
+  const nodes = new Map();
+  const node = () => {
+    const n = {
+      innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
+      dataset: {}, style: {}, value: '', children: [],
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      addEventListener() {}, appendChild(c) { n.children.push(c); },
+      append(...c) { n.children.push(...c); }, remove() {},
+      setAttribute(k, v) { n[k] = v; }, getAttribute: (k) => n[k] ?? null,
+      closest: () => null, focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
+    };
+    n.replaceChildren = (...c) => { n.children = Array.from(c); };
+    n.querySelector = () => n.children[0] ?? null;
+    n.querySelectorAll = () => [];
+    return n;
+  };
+  for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
+    'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button',
+    'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
+
+  const account = {
+    ok: true, signedIn: true, username: 'key-abc', displayName: markup,
+    allowance: null, balanceLow: false,
+    keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false },
+  };
+  const sandbox = {
+    document: {
+      getElementById: (id) => nodes.get(id) ?? null,
+      createElement: () => node(), querySelector: () => null, querySelectorAll: () => [],
+      addEventListener() {}, documentElement: { lang: '', dataset: {} },
+      visibilityState: 'visible', body: node(),
+    },
+    window: { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }), location: { assign() {} } },
+    location: { search: '', pathname: '/', hash: '' },
+    history: { replaceState() {} },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    navigator: { language: 'en-GB', languages: ['en-GB'] },
+    fetch: async (url) => {
+      if (String(url).includes('/locales/')) return localeResponse();
+      return new Response(JSON.stringify(String(url).includes('/account') ? account : { ok: true, models: [] }),
+        { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+    setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
+    console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
+    Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
+  };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  new vm.Script(app, { filename: 'app.js' }).runInContext(sandbox);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  const card = vm.runInContext('accountCard()', sandbox);
+  assert.ok(!card.includes('<img src=x'), 'the name must not survive as a tag');
+  assert.ok(card.includes('&lt;img'), 'it is shown as text, escaped');
+
+  // And the server stores it as text, so the database never holds the fragment either.
+  const { openDatabase } = await import('../src/db.js');
+  const { getSetting } = await import('../src/store.js');
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const application = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = application.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('api.deepai.org')) {
+      return new Response('{"is_authenticated":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ enabled: true, balance: '1.0', granted: '1.0' }),
+      { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    const response = await realFetch(`${base}/api/login/profile`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: JSON.stringify({ email: `a@b.co${'\u0007'}`, userprofile: { api_key: 'sk-xss' } }) }),
+    });
+    assert.equal(response.status, 200);
+    const stored = getSetting(fresh, 'key-' + 'x', 'display_name', undefined);
+    // The derived owner's name must contain no control character.
+    const owners = fresh.prepare('SELECT username FROM accounts').all();
+    assert.equal(owners.length, 1);
+    const name = getSetting(fresh, owners[0].username, 'display_name', '');
+    assert.ok(!/[\u0000-\u001f\u007f]/.test(name), 'a control character must not be stored');
+    void stored;
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('a stream that never ends an event is cut off, not buffered forever', async () => {
+  /*
+   * The reader accumulates until it sees a blank line. A stream that never sends one grew
+   * the buffer without limit — measured at roughly twice the bytes received, because each
+   * append re-allocates. No real event is 8 MB, so hitting the ceiling means the upstream
+   * is broken or hostile, and failing the request beats exhausting the process.
+   */
+  const { readEvents } = await import('../src/deepai/wire.js');
+
+  const chunk = `data: {"pad":"${'y'.repeat(64 * 1024)}"`;   // no event terminator
+  let sent = 0;
+  const stream = new ReadableStream({
+    pull(controller) {
+      if (sent >= 400) { controller.close(); return; }        // ~25 MB
+      sent += 1;
+      controller.enqueue(new TextEncoder().encode(chunk));
+    },
+  });
+
+  await assert.rejects(
+    async () => { for await (const _ of readEvents(new Response(stream))) { /* none expected */ } },
+    (error) => /without ending an event/.test(error.message),
+    'the reader must refuse an event that never ends rather than grow without bound',
+  );
+
+  // A normal stream is unaffected.
+  const normal = new Response(`data: ${JSON.stringify({ ok: 1 })}\n\ndata: [DONE]\n\n`, { status: 200 });
+  const seen = [];
+  for await (const event of readEvents(normal)) seen.push(event);
+  assert.deepEqual(seen, [{ ok: 1 }]);
+});
+
+await checkAsync('a refused sign-in leaves a trail, and the database is owner-only', async () => {
+  const { openDatabase } = await import('../src/db.js');
+  const { recentAuthEvents } = await import('../src/store.js');
+  const { createApp } = await import('../server.js');
+  const fresh = openDatabase(':memory:');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('{"err":"no"}', {
+    status: 401, headers: { 'content-type': 'application/json' },
+  });
+  try {
+    const refused = await realFetch(`${base}/api/login/profile`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: JSON.stringify({ userprofile: { api_key: 'sk-nope' } }) }),
+    });
+    assert.equal(refused.status, 401);
+
+    // The trail is what an operator reads to see a key being tried repeatedly.
+    const events = recentAuthEvents(fresh, 10);
+    assert.equal(events.length, 1, 'a refusal must be recorded');
+    assert.equal(events[0].event, 'denied');
+    assert.equal(events[0].detail, 'rejected');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  // The database holds every account's DeepAI key in a replayable form, so it is owner-only.
+  const { mkdtempSync, rmSync, statSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'deepai-perm-'));
+  try {
+    const file = join(dir, 'nested', 'db.sqlite');
+    const db = openDatabase(file);
+    db.exec('CREATE TABLE IF NOT EXISTS probe (x)');
+    db.prepare('INSERT INTO probe VALUES (1)').run();   // makes SQLite create the WAL
+    assert.equal(statSync(file).mode & 0o777, 0o600, 'the database must be owner-only');
+    assert.equal(statSync(join(dir, 'nested')).mode & 0o777, 0o700, 'and so must its directory');
+    // The WAL holds the same rows, so it must not be more readable than the database.
+    assert.equal(statSync(`${file}-wal`).mode & 0o777, 0o600, 'and the WAL it writes');
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

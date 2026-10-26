@@ -19,7 +19,8 @@
  */
 
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import {
+  chmodSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -86,6 +87,13 @@ try {
   // string literal, so a quote in it must be doubled rather than interpolated
   // blindly.
   db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+  // The copy holds every account's DeepAI key, so it gets the same owner-only mode as the
+  // database it came from.
+  try {
+    chmodSync(target, 0o600);
+  } catch {
+    /* a filesystem without modes */
+  }
 } finally {
   db.close();
 }

@@ -97,7 +97,7 @@ export function createApp(db, options = {}) {
 
   // Resolve the browser's session before any route runs, so `/api` handlers can
   // ask "which account is this" rather than "is anyone logged in".
-  app.use(attachSession(db, { secure: options.trustProxy === true }));
+  app.use(attachSession(db));
 
   app.use('/v1', v1Router(db));
   app.use('/api', adminRouter(db, runtime));
