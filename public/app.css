@@ -384,6 +384,20 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
   border: 1px solid var(--hairline); border-radius: var(--radius);
   font-family: var(--mono); font-size: 12.5px;
 }
+/* The three ways in, as tabs. A segmented control rather than a link, because the
+   Google/Apple route is what many visitors need and it must be visible, not found. */
+.tab {
+  flex: 1 1 auto; padding: 7px 10px; border-radius: var(--radius);
+  font: 500 12.5px/1 var(--sans); color: var(--text-2);
+  background: var(--bg); border: 1px solid var(--hairline);
+  cursor: pointer; transition: background .15s, color .15s, border-color .15s;
+}
+.tab:hover { color: var(--ink); border-color: var(--hairline-strong); }
+.tab--on {
+  background: var(--ink); color: var(--bg); border-color: var(--ink);
+}
+.tabpanel > .mt-3:first-child, .tabpanel > form:first-child { margin-top: 14px; }
+
 /* A key the visitor has to press, so it should not read as prose. */
 kbd {
   font-family: var(--mono); font-size: 11px; line-height: 1;

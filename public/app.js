@@ -103,11 +103,6 @@ function isAuthFailure(error) {
   return error instanceof ApiError && error.status === 401;
 }
 
-/** Whether an origin points at the machine the browser itself is running on. */
-function isLoopbackOrigin(origin) {
-  return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(origin);
-}
-
 /**
  * The "finish signing in" step.
  *
@@ -125,74 +120,33 @@ function isLoopbackOrigin(origin) {
  *   - **on the gateway's own host**: nothing, beyond a quiet fallback, because the
  *     redirect simply works there.
  *
- * @param {{pending: boolean, remote: boolean}} options
- * @returns {string} markup; every state but the last contains the paste field.
+ * @param {string} prefix - distinguishes the ids when both cards are in the DOM.
+ * @returns {string} markup with the paste field and its submit control.
  */
-function finishStep({ pending, remote }) {
+function finishStep(prefix = '') {
   const address = state.callbackUrl;
-  const prefix = address.replace(/\/auth-callback$/, '');
-  const field = `
-    <div class="field mt-3">
-      <label class="field__label" for="callback-url">Address from that page</label>
-      <textarea class="textarea" id="callback-url" rows="3" spellcheck="false" autocomplete="off"
-        placeholder="${esc(address || 'http://127.0.0.1:8787/auth-callback?code=…&state=…')}"></textarea>
-      <div class="field__hint">
-        It starts with <code>${esc(prefix || 'http://127.0.0.1:8787')}</code> and ends with <code>state=…</code>
-      </div>
-    </div>
-    <div class="row mt-3"><button class="btn btn--primary" id="login-complete">Finish signing in</button></div>`;
-
-  if (pending) {
-    return `
-      <section class="note note--warning mt-3 step" id="finish-step" aria-labelledby="finish-title">
-        <div class="step__title" id="finish-title">One more step to finish</div>
-        <p class="step__lead">
-          DeepAI sent your browser to an address that only opens on the server, so that page could
-          not load. Your sign-in is still waiting — nothing is lost.
-        </p>
-        <p class="step__lead">
-          Paste that page's address below.
-          <span class="step__aside">Need it again? Press Forward to return to that page.</span>
-        </p>
-        ${field}
-      </section>`;
-  }
-
-  if (remote) {
-    // The visitor's browser is not on the gateway's host, so this page is the last
-    // chance to explain two things before they leave: that the failure is normal,
-    // and that finishing does not have to mean copy-and-paste. Fixing the host in
-    // the address bar is the same rewrite the browser would have done for us — the
-    // gateway serves that path on its own origin, so it just works.
-    const host = (state.account?.origin ?? '').replace(/^https?:\/\//, '');
-    return `
-      <section class="note mt-3 step" id="finish-step" aria-labelledby="finish-title">
-        <div class="step__title" id="finish-title">The last page may not load</div>
-        <p class="step__lead">
-          After you sign in, DeepAI sends your browser back to an address that only opens on the
-          server running this gateway. If that page does not load, <strong>that is expected</strong>.
-        </p>
-        <p class="step__lead">Two ways to finish — either is fine:</p>
-        <ul class="step__list">
-          <li>Paste that page's address below.</li>
-          <li>
-            Or, in the address bar, replace <code>127.0.0.1</code> with
-            <code>${esc(host)}</code> and press Enter.
-          </li>
-        </ul>
-        ${field}
-      </section>`;
-  }
-
-  // On the gateway's own host the redirect works, so stay out of the way and keep
-  // the fallback one click away rather than explaining a problem this visitor is
-  // unlikely to hit.
+  const prefixUrl = address.replace(/\/auth-callback$/, '');
   return `
-    <p class="card__sub mt-3" id="finish-step">
-      Signed in on DeepAI already?
-      <button class="linklike" id="login-reveal" type="button">Paste the address it sent you</button>
-    </p>
-    <div id="finish-fields" hidden>${field}</div>`;
+    <section class="note note--warning mt-3 step" id="${prefix}finish-step" aria-labelledby="${prefix}finish-title">
+      <div class="step__title" id="${prefix}finish-title">One more step to finish</div>
+      <p class="step__lead">
+        DeepAI sent your browser to an address that only opens on the server, so that page could
+        not load. Your sign-in is still waiting — nothing is lost.
+      </p>
+      <p class="step__lead">
+        Paste that page's address below.
+        <span class="step__aside">Need it again? Press Forward to return to that page.</span>
+      </p>
+      <div class="field mt-3">
+        <label class="field__label" for="${prefix}callback-url">Address from that page</label>
+        <textarea class="textarea" id="${prefix}callback-url" rows="3" spellcheck="false" autocomplete="off"
+          placeholder="${esc(address || 'http://127.0.0.1:8787/auth-callback?code=…&state=…')}"></textarea>
+        <div class="field__hint">
+          It starts with <code>${esc(prefixUrl || 'http://127.0.0.1:8787')}</code> and ends with <code>state=…</code>
+        </div>
+      </div>
+      <div class="row mt-3"><button class="btn btn--primary" id="${prefix}login-complete">Finish signing in</button></div>
+    </section>`;
 }
 
 /**
@@ -206,14 +160,20 @@ function finishStep({ pending, remote }) {
  * object that cannot be copied as JSON, which is the one detail that turns this from
  * a two-second job into a puzzle.
  */
-function profilePasteHelp() {
+function profilePasteHelp(prefix = '') {
   const command = "console.log(await (await fetch('https://api.deepai.org/daily-time-sync/user/')).text())";
+  /*
+   * `esc()` turns an apostrophe into `&#39;`, which is right for prose but wrong inside
+   * a command the visitor is meant to copy: they would have to un-escape it by hand.
+   * Only the characters that could break out of the element are escaped here, and the
+   * command contains no others.
+   */
+  const copyable = command.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   return `
-    <section class="note mt-3 step" id="profile-step">
-      <div class="step__title">Sign in with Google or Apple</div>
+    <section class="step" id="${prefix}profile-step">
       <p class="step__lead">
-        These accounts have no password to give, so this reads your key straight out of
-        DeepAI's own page — where you are already signed in.
+        A Google or Apple account has no DeepAI password, so this reads your key out of
+        DeepAI's own page — where you are already signed in. One command, five steps.
       </p>
       <ol class="step__list mt-3">
         <li>Go to <a href="https://deepai.org" target="_blank" rel="noreferrer noopener">https://deepai.org</a></li>
@@ -221,7 +181,7 @@ function profilePasteHelp() {
         <li>Open DevTools — <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> or <kbd>F12</kbd></li>
         <li>
           Go to <strong>Console</strong> and run this command:
-          <div class="snippet snippet--block mt-2"><code id="profile-command">${esc(command)}</code></div>
+          <div class="snippet snippet--block mt-2"><code id="profile-command">${copyable}</code></div>
         </li>
         <li>Copy what it prints and paste it below</li>
       </ol>
@@ -234,14 +194,14 @@ function profilePasteHelp() {
       </div>
 
       <div class="field mt-3">
-        <label class="field__label" for="profile-paste">What the console printed</label>
-        <textarea class="textarea" id="profile-paste" rows="5" spellcheck="false" autocomplete="off"
+        <label class="field__label" for="${prefix}profile-paste">What the console printed</label>
+        <textarea class="textarea" id="${prefix}profile-paste" rows="5" spellcheck="false" autocomplete="off"
           placeholder='{"pk": …, "username": "…", "email": "…", "userprofile": {"api_key": "…"}}'></textarea>
         <div class="field__hint">
           It contains your DeepAI API key, which is kept on this server to serve your requests.
         </div>
       </div>
-      <div class="row mt-3"><button class="btn btn--primary" id="login-with-profile" type="button">Log In</button></div>
+      <div class="row mt-3"><button class="btn btn--primary" id="${prefix}login-with-profile" type="button">Log In</button></div>
     </section>`;
 }
 
@@ -301,6 +261,32 @@ async function signInWithProfile() {
  * used to claim another account — and it is scoped to the session that typed it.
  */
 /**
+ * The three ways in, as one block.
+ *
+ * Rendered by both signed-out screens rather than written out twice. They were written
+ * out twice, and that is how the overview kept a control the log-in screen had already
+ * replaced — a deploy that had shipped, showing a screen that no longer existed.
+ *
+ * @param {string} prefix - distinguishes the ids when both screens are in the DOM at
+ *   once, which they can be while a view is being replaced.
+ * @returns {string} markup containing all three panels and their tab buttons.
+ */
+function signInRoutes(prefix = '') {
+  const tab = (name, label, on) =>
+    `<button class="tab${on ? ' tab--on' : ''}" id="${prefix}tab-${name}" role="tab"
+      aria-selected="${on ? 'true' : 'false'}" type="button">${label}</button>`;
+  return `
+    <div class="row mt-3" id="${prefix}login-tabs" role="tablist">
+      ${tab('password', 'Email & password', true)}
+      ${tab('profile', 'Google / Apple', false)}
+      ${tab('key', 'API key', false)}
+    </div>
+    <div class="tabpanel" id="${prefix}panel-password">${passwordForm(prefix)}</div>
+    <div class="tabpanel" id="${prefix}panel-profile" hidden>${profilePasteHelp(prefix)}</div>
+    <div class="tabpanel" id="${prefix}panel-key" hidden>${keyForm(prefix)}</div>`;
+}
+
+/**
  * Wire every sign-in control a card may contain.
  *
  * All of them are optional, because a card can show any subset — but the two cards
@@ -308,33 +294,46 @@ async function signInWithProfile() {
  * overview's copy kept the old button while the log-in screen got the new form, so
  * one of them silently served a screen that no longer existed anywhere else.
  */
-function wireSignInForms() {
-  $('login-inline')?.addEventListener('click', () => void startLoginFlow());
+function wireSignInForms(prefix = '') {
+  const id = (name) => $(`${prefix}${name}`);
 
-  // Google and Apple have no password to give, so they are offered the profile route
-  // rather than the browser flow, which cannot complete for them on a public host.
-  const revealProfile = (event) => {
-    const host = event.currentTarget?.parentElement;
-    if (host === null || host === undefined) return;
-    host.insertAdjacentHTML('afterend', profilePasteHelp());
-    host.remove();
-    $('login-with-profile')?.addEventListener('click', () => void signInWithProfile());
-    $('profile-paste')?.focus();
+  /*
+   * The three ways in, side by side rather than hidden behind a link.
+   *
+   * They used to be layered: the password form, then a "Google or Apple?" link that
+   * revealed the instructions, then a collapsed API-key section. The instructions a
+   * visitor needed were therefore the ones they could not see — the wrong way round for
+   * the route most people with a Google or Apple account need.
+   */
+  const tabs = [['password', 'panel-password'], ['profile', 'panel-profile'], ['key', 'panel-key']];
+  const caretFor = { password: 'login-email', profile: 'profile-paste', key: 'api-key' };
+  const show = (name) => {
+    for (const [candidate, panel] of tabs) {
+      const on = candidate === name;
+      const button = id(`tab-${candidate}`);
+      if (button !== null) {
+        button.classList.toggle('tab--on', on);
+        button.setAttribute('aria-selected', on ? 'true' : 'false');
+      }
+      const body = id(panel);
+      if (body !== null) body.hidden = !on;
+    }
+    // Put the caret where the chosen route starts.
+    id(caretFor[name])?.focus();
   };
-  $('login-browser')?.addEventListener('click', revealProfile);
-  $('signin-profile')?.addEventListener('click', revealProfile);
+  for (const [name] of tabs) id(`tab-${name}`)?.addEventListener('click', () => show(name));
 
-  $('password-form')?.addEventListener('submit', (event) => {
+  id('login-with-profile')?.addEventListener('click', () => void signInWithProfile(prefix));
+  id('password-form')?.addEventListener('submit', (event) => {
     event.preventDefault();
-    void signInWithPassword();
+    void signInWithPassword(prefix);
   });
-  $('login-complete')?.addEventListener('click', () => void completeLoginManually());
-  $('login-with-key')?.addEventListener('click', () => void signInWithKey());
-  $('api-key')?.addEventListener('keydown', (event) => {
+  id('login-with-key')?.addEventListener('click', () => void signInWithKey(prefix));
+  id('api-key')?.addEventListener('keydown', (event) => {
     // Enter submits, as it would in any other field.
     if (event.key === 'Enter') {
       event.preventDefault();
-      void signInWithKey();
+      void signInWithKey(prefix);
     }
   });
 }
@@ -346,48 +345,47 @@ function wireSignInForms() {
  * a redirect to loopback and nothing has to be passed through. The password is sent
  * once, used once, and kept nowhere.
  */
-function passwordForm() {
+function passwordForm(prefix = '') {
   return `
-    <form class="mt-3" id="password-form" autocomplete="on">
+    <form class="mt-3" id="${prefix}password-form" autocomplete="on">
       <div class="field">
-        <label class="field__label" for="login-email">DeepAI email</label>
-        <input class="input" id="login-email" type="email" autocomplete="username"
+        <label class="field__label" for="${prefix}login-email">DeepAI email</label>
+        <input class="input" id="${prefix}login-email" type="email" autocomplete="username"
           spellcheck="false" placeholder="you@example.com" required>
       </div>
       <div class="field mt-3">
-        <label class="field__label" for="login-password">Password</label>
-        <input class="input" id="login-password" type="password" autocomplete="current-password"
+        <label class="field__label" for="${prefix}login-password">Password</label>
+        <input class="input" id="${prefix}login-password" type="password" autocomplete="current-password"
           placeholder="Your DeepAI password" required>
       </div>
-      <div class="row mt-3"><button class="btn btn--primary" id="login-submit" type="submit">Log In</button></div>
+      <div class="row mt-3"><button class="btn btn--primary" id="${prefix}login-submit" type="submit">Log In</button></div>
     </form>`;
 }
 
-function keyForm() {
+function keyForm(prefix = '') {
   return `
-    <details class="mt-3" id="key-step">
-      <summary class="card__sub step__summary">Or log in with a DeepAI API key</summary>
-      <ol class="step__list mt-3">
+    <section class="step" id="${prefix}key-step">
+      <ol class="step__list">
         <li>Go to <a href="https://deepai.org/dashboard/profile" target="_blank" rel="noreferrer noopener">deepai.org/dashboard/profile</a></li>
         <li>Copy your API Key</li>
         <li>Paste it below</li>
       </ol>
       <div class="field mt-3">
-        <label class="field__label" for="api-key">API Key</label>
-        <input class="input" id="api-key" type="password" spellcheck="false" autocomplete="off"
+        <label class="field__label" for="${prefix}api-key">API Key</label>
+        <input class="input" id="${prefix}api-key" type="password" spellcheck="false" autocomplete="off"
           placeholder="Paste your API Key">
       </div>
       <div class="field mt-3">
-        <label class="field__label" for="api-key-email">Your DeepAI email</label>
-        <input class="input" id="api-key-email" type="email" spellcheck="false" autocomplete="email"
+        <label class="field__label" for="${prefix}api-key-email">Your DeepAI email</label>
+        <input class="input" id="${prefix}api-key-email" type="email" spellcheck="false" autocomplete="email"
           placeholder="you@example.com">
-        <div class="field__hint" id="api-key-email-hint">
+        <div class="field__hint" id="${prefix}api-key-email-hint">
           Shown as your account name. DeepAI does not say which account a key belongs to, so
           this cannot be checked — it is yours to get right.
         </div>
       </div>
-      <div class="row mt-3"><button class="btn" id="login-with-key">Log In</button></div>
-    </details>`;
+      <div class="row mt-3"><button class="btn btn--primary" id="${prefix}login-with-key">Log In</button></div>
+    </section>`;
 }
 
 /**
@@ -397,12 +395,9 @@ function keyForm() {
  */
 function needsLogin() {
   if (state.account?.signedIn === true) return false;
+  // A sign-in the browser could not finish is the one thing that displaces the usual
+  // routes: there is nothing left to choose, only an address to paste.
   const pending = state.account?.pendingLogin === true;
-  const origin = state.account?.origin ?? '';
-  // With the sign-in relayed, DeepAI's loopback redirect is rewritten back here, so
-  // there is nothing to warn about and nothing to paste — the page just loads.
-  const relayed = state.account?.authProxy === true;
-  const remote = !relayed && origin !== '' && !isLoopbackOrigin(origin);
 
   view.innerHTML = `
     <div class="page__head">
@@ -412,23 +407,12 @@ function needsLogin() {
     <div class="card">
       <div class="card__title">Not logged in</div>
       <div class="card__sub mt-2">Log in with your DeepAI account to see your API keys and usage.</div>
-      ${passwordForm()}
-      <p class="card__sub mt-3">
-        Signed in with Google or Apple?
-        <button class="linklike" id="login-browser" type="button">Use DeepAI's own sign-in page</button>
-      </p>
-      ${finishStep({ pending, remote })}
-      ${keyForm()}
+      ${pending ? finishStep() : signInRoutes()}
     </div>`;
 
   wireSignInForms();
-  $('login-reveal')?.addEventListener('click', () => {
-    const fields = $('finish-fields');
-    if (fields) fields.hidden = false;
-    $('login-reveal')?.parentElement?.remove();
-    $('callback-url')?.focus();
-  });
-  // A waiting sign-in is the moment to type, so put the caret where it is needed.
+  // The finish step replaces the routes, so its own controls are wired separately.
+  $('login-complete')?.addEventListener('click', () => void completeLoginManually());
   if (pending) $('callback-url')?.focus();
   return true;
 }
@@ -528,8 +512,8 @@ async function signInWithKey() {
  * one-shot code in it, exactly as the callback route would have. On success the
  * visitor is simply logged in, so the step disappears with the rest of the card.
  */
-async function completeLoginManually() {
-  const field = $('callback-url');
+async function completeLoginManually(prefix = '') {
+  const field = $(`${prefix}callback-url`);
   const url = field?.value?.trim() ?? '';
   if (url === '') {
     toast('Copy the address from the page that did not load, then paste it here.', 'error');
@@ -537,7 +521,7 @@ async function completeLoginManually() {
     return;
   }
 
-  const button = $('login-complete');
+  const button = $(`${prefix}login-complete`);
   const label = button?.textContent;
   if (button) {
     button.disabled = true;
@@ -961,12 +945,7 @@ function accountCard() {
         </div>
         <div class="mt-3 stack">
           <div class="note">Sign in with your DeepAI account to let the gateway reach the models. The account key is stored in the gateway database and never leaves this machine.</div>
-          ${passwordForm()}
-          <p class="card__sub">
-            Signed in with Google or Apple?
-            <button class="linklike" id="signin-profile" type="button">Use your DeepAI profile</button>
-          </p>
-          ${keyForm()}
+          ${account.pendingLogin === true ? finishStep('account-') : signInRoutes('account-')}
         </div>
       </div>`;
   }
