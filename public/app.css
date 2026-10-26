@@ -225,15 +225,6 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
   border-color: var(--danger-ink);
 }
 
-/* The one auth control in the top bar: a plain "Sign in" when signed out, and
-   an unmissable filled "Sign out" when signed in. */
-.btn--signout {
-  background: var(--error); color: #fff; border-color: var(--error);
-  font-weight: 600;
-}
-.btn--signout:hover:not(:disabled) { background: #c81e1e; border-color: #c81e1e; color: #fff; }
-.btn--signin { background: var(--ink); color: var(--bg); border-color: var(--ink); font-weight: 500; }
-.btn--signin:hover:not(:disabled) { opacity: .85; }
 .btn--sm { height: 28px; padding: 0 9px; font-size: 12px; }
 .btn--icon { width: 34px; padding: 0; }
 .btn--icon.btn--sm { width: 28px; }

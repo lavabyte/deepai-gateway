@@ -208,8 +208,13 @@ this tier "Premier" internally; the panel always says Premium.)
 
 ### Log in / log out
 
-One control in the top bar: **Log in** while logged out, a filled red
-**Log out** while logged in. Both act in the current tab — no popups.
+The top bar carries the account badge and the theme toggle, nothing else. A signed-out
+visitor needs no button: the overview *is* the sign-in form. **Log out** sits in the
+account card beside **Refresh balance** and **Forget this account**, because ending a
+session is an account action like the others.
+
+Logging out ends this browser's session only. The DeepAI account and its keys stay, so
+another signed-in browser keeps working and signing in again restores the same keys.
 
 ### Theme
 
@@ -506,6 +511,16 @@ own copies of the sign-in markup. Rewriting the form therefore changed only one 
 and the overview kept a control that existed nowhere else. They now render the same block
 through one function, and a test renders both and requires the same fields in each, so a
 third screen added later cannot quietly diverge.
+
+### Copying to the clipboard
+
+`navigator.clipboard` is exposed only in a **secure context** — HTTPS, or localhost. A
+gateway reached at `http://some-host:port` therefore has no `navigator.clipboard` at all,
+and the modern call fails silently: that is why copying an API key used to do nothing on a
+plain-HTTP deployment. `copy()` falls back to the pre-Clipboard-API technique, which works
+without a secure context because it drives the browser's own copy command on a selected
+field; if even that is refused, the text is left selected and the toast says to press
+Ctrl/Cmd+C, so a failed copy never leaves a key the visitor cannot take away.
 
 ### Confirmation dialogs
 

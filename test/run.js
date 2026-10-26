@@ -2461,6 +2461,222 @@ await checkAsync('nothing asks the visitor through a browser dialog', async () =
   assert.equal(typeof answer.then, 'function', 'the caller gets an answer it can await');
 });
 
+check('the top bar has no sign-in button, and logging out is still reachable', async () => {
+  /*
+   * A "Log in" button sat beside a sign-in form that already filled the page — a second
+   * door to the same room. It is gone, and logging out moved into the account card, where
+   * the other account actions are. Removing the button without moving its other job would
+   * have left no way to log out at all, so both halves are asserted here.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const root = new URL('..', import.meta.url).pathname;
+  const html = readFileSync(join(root, 'public', 'index.html'), 'utf8');
+  const app = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+
+  // The control and everything that referred to it are gone.
+  assert.ok(!html.includes('auth-button'), 'the top bar must not carry a sign-in button');
+  assert.ok(!app.includes('auth-button'), 'and nothing may still look for it');
+  assert.ok(!app.includes('onAuthButton'), 'nor keep its handler');
+  assert.ok(!app.includes('btn--signin'), 'nor style a control that does not exist');
+
+  // The badge is what remains on the right.
+  assert.match(html, /id="account-badge"/, 'the account badge stays');
+
+  // Logging out lives in the account card, next to the other account actions.
+  assert.match(app, /id="log-out"/, 'the account card must offer a way out');
+  assert.match(app, /\$\('log-out'\)\?\.addEventListener\('click', \(\) => void logOutEverywhere\(\)\)/,
+    'and it must call the logout that ends this session');
+
+  // No page may claim to close itself: browsers refuse it for a tab a script did not open.
+  assert.ok(!app.includes('window.close'), 'nothing may try to close the tab');
+});
+
+await checkAsync('copying a key works on a plain http:// origin', async () => {
+  /*
+   * `navigator.clipboard` exists only in a secure context — HTTPS, or localhost. A gateway
+   * reached at `http://some-host:port` has no `navigator.clipboard` at all, so the modern
+   * call throws and the visitor gets nothing: "copying the API key does not work" is what
+   * that looks like from outside. The fallback drives the browser's own copy command on a
+   * selected field, which needs no secure context.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const vm = await import('node:vm');
+  const root = new URL('..', import.meta.url).pathname;
+  const source = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+
+  /**
+   * Boot the client with a chosen clipboard environment.
+   * @param {{clipboard?: boolean, execOk?: boolean}} options
+   */
+  const boot = async ({ clipboard = false, execOk = true } = {}) => {
+    const created = [];
+    const node = () => ({
+      innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
+      dataset: {}, style: {}, value: '', children: [],
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      addEventListener() {}, appendChild(c) { this.children.push(c); },
+      append(...c) { this.children.push(...c); }, remove() { this.removed = true; },
+      replaceChildren(...c) { this.children = c; },
+      querySelector: () => null, querySelectorAll: () => [],
+      setAttribute() {}, getAttribute: () => null, closest: () => null,
+      focus() {}, select() { this.selected = true; }, insertAdjacentHTML() {}, scrollIntoView() {},
+    });
+    const nodes = new Map();
+    for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
+      'account-badge', 'account-badge-text', 'nav', 'theme-toggle']) nodes.set(id, node());
+
+    const range = { selectNodeContents() {}, };
+    const selection = { removeAllRanges() {}, addRange(r) { this.range = r; } };
+    const sandbox = {
+      document: {
+        getElementById: (id) => nodes.get(id) ?? null,
+        createElement: () => { const n = node(); created.push(n); return n; },
+        querySelector: () => null, querySelectorAll: () => [], addEventListener() {},
+        documentElement: node(), visibilityState: 'visible', body: node(),
+        createRange: () => range,
+        execCommand: (command) => command === 'copy' && execOk,
+      },
+      window: {
+        addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }),
+        location: { assign() {} }, getSelection: () => selection,
+      },
+      location: { search: '', pathname: '/', hash: '' },
+      history: { replaceState() {} },
+      localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      fetch: async () => new Response('{"ok":true,"signedIn":false,"models":[]}', {
+        status: 200, headers: { 'content-type': 'application/json' },
+      }),
+      setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
+      console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
+      Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
+    };
+    /*
+     * `navigator` always exists in a browser — what an insecure origin lacks is
+     * `navigator.clipboard`, which is exposed only in a secure context. Modelling it as
+     * absent entirely would test an environment that does not occur.
+     */
+    sandbox.navigator = clipboard ? { clipboard: { writeText: async () => {} } } : {};
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    new vm.Script(source, { filename: 'app.js' }).runInContext(sandbox);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    return { sandbox, created, selection, nodes };
+  };
+
+  // 1. No Clipboard API: the legacy path must copy and clean up after itself.
+  const insecure = await boot({ clipboard: false, execOk: true });
+  const field = insecure.nodes.get('view');
+  insecure.created.length = 0;          // boot builds its own elements; only count ours
+  await vm.runInContext("copy('sk-secret', undefined, document.getElementById('view'))", insecure.sandbox);
+  const scratch = insecure.created.find((n) => n.value === 'sk-secret');
+  assert.ok(scratch !== undefined, 'the fallback must put the text in a selectable field');
+  assert.equal(scratch.selected, true, 'and select it, which is what the copy command acts on');
+  assert.equal(scratch.removed, true, 'and remove it again, so no stray field is left behind');
+
+  // 2. Even that can be refused: then the text is selected for the visitor to copy.
+  const refused = await boot({ clipboard: false, execOk: false });
+  refused.created.length = 0;
+  await vm.runInContext("copy('sk-secret', undefined, document.getElementById('view'))", refused.sandbox);
+  assert.ok(refused.selection.range !== undefined, 'a refused copy must leave the text selected');
+  const toast = refused.nodes.get('toasts').children.map((c) => c.textContent).join(' ');
+  assert.match(toast, /Ctrl\/Cmd\+C/, 'and say which keys to press');
+
+  // 3. With a secure context the modern API is preferred, and no scratch field appears.
+  const secure = await boot({ clipboard: true });
+  secure.created.length = 0;
+  await vm.runInContext("copy('sk-secret', undefined, document.getElementById('view'))", secure.sandbox);
+  // A toast is created either way; what must not appear is a temporary text field.
+  assert.ok(
+    !secure.created.some((n) => n.value === 'sk-secret'),
+    'the Clipboard API needs no temporary field',
+  );
+  assert.equal(secure.selection.range, undefined, 'and nothing to select by hand');
+});
+
+await checkAsync('the catalog loads once a session exists, without a reload', async () => {
+  /*
+   * The catalog needs an identity, so the load at startup is refused for a visitor who is
+   * not signed in — and `state.models` stays empty. Signing in without reloading the page
+   * then left the key form with no models to choose from. `render()` now fills it in as
+   * soon as there is a session.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const vm = await import('node:vm');
+  const root = new URL('..', import.meta.url).pathname;
+  const source = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+
+  const catalogCalls = [];
+  const nodes = new Map();
+  const node = () => ({
+    innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
+    dataset: {}, style: {}, value: '', children: [],
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    addEventListener() {}, appendChild(c) { this.children.push(c); },
+    append(...c) { this.children.push(...c); }, remove() {},
+    replaceChildren(...c) { this.children = c; },
+    querySelector: () => null, querySelectorAll: () => [],
+    setAttribute() {}, getAttribute: () => null, closest: () => null,
+    focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
+  });
+  for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
+    'account-badge', 'account-badge-text', 'nav', 'theme-toggle']) nodes.set(id, node());
+
+  const emptyTotals = { totalTokens: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, requests: 0, costUsd: 0 };
+  const sandbox = {
+    document: {
+      getElementById: (id) => nodes.get(id) ?? null,
+      createElement: () => node(), querySelector: () => null, querySelectorAll: () => [],
+      addEventListener() {}, documentElement: node(), visibilityState: 'visible', body: node(),
+    },
+    window: { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }), location: { assign() {} } },
+    location: { search: '', pathname: '/', hash: '' },
+    history: { replaceState() {} },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    fetch: async (url) => {
+      const target = String(url);
+      if (target.includes('/models')) {
+        catalogCalls.push(target);
+        return new Response(JSON.stringify({ ok: true, models: [{ id: 'm-one' }, { id: 'm-two' }] }),
+          { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (target.includes('/account')) {
+        return new Response(JSON.stringify({ ok: true, signedIn: true, username: 'u', displayName: 'u@example.com', allowance: null, balanceLow: false, keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false } }),
+          { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (target.includes('/usage/summary')) {
+        return new Response(JSON.stringify({ today: emptyTotals, month: emptyTotals, all: emptyTotals, daily: [], modelsMonth: [] }),
+          { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('{"requests":[],"events":[]}', { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+    setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
+    console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
+    Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
+  };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  new vm.Script(source, { filename: 'app.js' }).runInContext(sandbox);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  // The startup load ran while signed out and was refused, so nothing is in hand.
+  vm.runInContext('state.models = []', sandbox);
+  catalogCalls.length = 0;
+
+  await vm.runInContext('render()', sandbox);
+
+  assert.ok(catalogCalls.length > 0, 'a signed-in render must fetch the catalog');
+  const models = vm.runInContext('state.models.length', sandbox);
+  assert.equal(models, 2, 'and keep it, so the key form has models to offer');
+
+  // A second render must not fetch it again: the guard is what keeps it cheap.
+  catalogCalls.length = 0;
+  await vm.runInContext('render()', sandbox);
+  assert.equal(catalogCalls.length, 0, 'a catalog already in hand is not fetched again');
+});
+
 check('every sign-in failure has something useful to say', async () => {
   /*
    * The reasons the paste parser and the key check can report must each have a message,

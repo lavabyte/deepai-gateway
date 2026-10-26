@@ -392,10 +392,24 @@ function field(label, control, hint) {
   return wrap;
 }
 
-/** Copy text to the clipboard with feedback. */
-async function copy(text, button) {
-  try {
-    await navigator.clipboard.writeText(text);
+/**
+ * Copy text to the clipboard, and say so.
+ *
+ * `navigator.clipboard` exists only in a **secure context** — HTTPS, or localhost. A
+ * gateway reached at `http://some-host:port` has no `navigator.clipboard` at all, so the
+ * modern call throws and nothing is copied; that is a plain `http://` deployment, not an
+ * exotic one. The fallback below is the pre-Clipboard-API technique, which works in an
+ * insecure context because it drives the browser's own copy command on a selected field.
+ *
+ * If even that fails, the text is selected so the visitor can press Ctrl/Cmd+C themselves
+ * — a failed copy must not leave them with a key they cannot take away.
+ *
+ * @param {string} text
+ * @param {HTMLElement} [button] - gets brief "Copied" feedback when given.
+ * @param {HTMLElement} [field] - the element holding the text, selected as a last resort.
+ */
+async function copy(text, button, field) {
+  const feedback = () => {
     if (button) {
       const original = button.textContent;
       button.textContent = 'Copied';
@@ -403,9 +417,49 @@ async function copy(text, button) {
     } else {
       toast('Copied to clipboard');
     }
-  } catch {
-    toast('Could not copy — select the text manually.', 'error');
+  };
+
+  // 1. The Clipboard API, when the context allows it.
+  if (navigator.clipboard?.writeText !== undefined) {
+    try {
+      await navigator.clipboard.writeText(text);
+      feedback();
+      return;
+    } catch {
+      /* fall through: a denied permission is not a reason to give up */
+    }
   }
+
+  // 2. The legacy command, which works without a secure context.
+  try {
+    const scratch = document.createElement('textarea');
+    scratch.value = text;
+    // Off-screen rather than hidden: a `display: none` field cannot be selected.
+    scratch.setAttribute('readonly', '');
+    scratch.style.position = 'fixed';
+    scratch.style.top = '-1000px';
+    scratch.style.opacity = '0';
+    document.body.appendChild(scratch);
+    scratch.select();
+    const ok = document.execCommand('copy');
+    scratch.remove();
+    if (ok) {
+      feedback();
+      return;
+    }
+  } catch {
+    /* fall through to selecting it for the visitor */
+  }
+
+  // 3. Leave it selected and say what to press.
+  if (field) {
+    const range = document.createRange();
+    range.selectNodeContents(field);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+  toast('Press Ctrl/Cmd+C to copy', 'error');
 }
 
 /** A code snippet with a copy affordance. */
@@ -417,7 +471,7 @@ function snippet(text) {
   const button = document.createElement('button');
   button.className = 'snippet__copy';
   button.textContent = 'Copy';
-  button.addEventListener('click', () => copy(text, button));
+  button.addEventListener('click', () => copy(text, button, code));
   wrap.append(code, button);
   return wrap;
 }
@@ -480,7 +534,6 @@ $('theme-toggle').addEventListener('click', () => {
   applyTheme(effectiveTheme() === 'dark' ? 'light' : 'dark');
 });
 
-$('auth-button').addEventListener('click', () => { void onAuthButton(); });
 
 /* ------------------------------------------------------------- shared state */
 
@@ -511,54 +564,29 @@ function accountName(account) {
  * Render the account pill and the single auth button in the top bar.
  *
  * One control, two states: "Log in" while logged out, a filled red
- * "Log out" while logged in.
+
  */
 function renderAccountBadge() {
   const badge = $('account-badge');
   const text = $('account-badge-text');
-  const button = $('auth-button');
   const account = state.account;
 
   if (account === undefined) {
     badge.className = 'badge badge--gray';
     text.textContent = 'Checking…';
-    button.hidden = true;
     return;
   }
 
-  button.hidden = false;
   if (account.signedIn) {
     badge.className = account.balanceLow ? 'badge badge--amber' : 'badge badge--green';
     const balance = account.allowance?.balance;
     text.textContent = balance
       ? `${accountName(account)} · ${balance} Theos`
       : accountName(account);
-    button.textContent = 'Log out';
-    button.className = 'btn btn--sm btn--signout';
   } else {
     badge.className = 'badge badge--red';
     text.textContent = 'Logged out';
-    button.textContent = 'Log in';
-    button.className = 'btn btn--sm btn--signin';
   }
-}
-
-/** The single top-bar auth action. */
-async function onAuthButton() {
-  if (state.account?.signedIn === true) {
-    await logOutEverywhere();
-    return;
-  }
-  // Signed out, the one thing this control can usefully do is take the visitor to the
-  // form. It used to start DeepAI's browser sign-in, which no longer exists and whose
-  // last page cannot open on their machine anyway.
-  if (currentRoute() !== 'home') {
-    location.hash = '#/';
-    return;
-  }
-  const field = $('profile-paste');
-  field?.focus();
-  field?.scrollIntoView({ block: 'center' });
 }
 
 /** Log out and repaint the current view. */
@@ -732,6 +760,7 @@ function accountCard() {
         </div>` : ''}
       <div class="row mt-3 row--wrap">
         <button class="btn btn--secondary btn--sm" id="refresh-allowance">Refresh balance</button>
+        <button class="btn btn--secondary btn--sm" id="log-out">Log out</button>
         <button class="btn btn--ghost btn--sm" id="forget-account">Forget this account</button>
         <span class="spacer"></span>
         <span class="tiny muted">${esc(keyQuotaLabel(account.keyQuota))}</span>
@@ -865,8 +894,13 @@ function wireAccountCard(rerender) {
     rerender();
   });
 
-  // "Log out" only ends this browser's session. Removing the account is a
-  // separate, destructive decision, so it gets its own confirm step.
+  // Logging out ends this browser's session only; it is not destructive, so it needs no
+  // confirmation. It lives here rather than in the top bar, which now holds only the badge
+  // and the theme toggle — a "Log in" button beside a sign-in form was a second door to
+  // the same room.
+  $('log-out')?.addEventListener('click', () => void logOutEverywhere());
+
+  // Removing the account is destructive, so it gets its own confirm step.
   $('forget-account')?.addEventListener('click', async () => {
     const username = accountName(state.account);
     const confirmed = await confirmAction({
@@ -1540,6 +1574,17 @@ function currentRoute() {
  */
 async function render({ refreshAccount = true } = {}) {
   if (refreshAccount) await loadAccount();
+
+  /*
+   * The catalog needs an identity, so the load at startup is refused for a visitor who is
+   * not signed in yet — and `state.models` stays empty. Signing in without reloading the
+   * page then left the key form with no models to choose from, which is what this fixes.
+   * The `length === 0` guard makes it a no-op once the catalog is in hand.
+   */
+  if (state.account?.signedIn === true && state.models.length === 0) {
+    await loadModels().catch(() => []);
+  }
+
   const route = currentRoute();
   for (const link of document.querySelectorAll('.nav__link')) {
     link.classList.toggle('is-active', link.dataset.route === route);
