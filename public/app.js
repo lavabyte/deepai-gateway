@@ -128,22 +128,21 @@ function profilePasteHelp(prefix = '') {
       -->
       <ol class="step__list">
         <li>
-          Go to <a href="https://deepai.org" target="_blank" rel="noreferrer noopener">https://deepai.org</a>
-          and log in or register
+          ${t('signin.step1')} <a href="https://deepai.org" target="_blank" rel="noreferrer noopener">https://deepai.org</a>
+          ${t('signin.step1Tail')}
         </li>
       </ol>
 
       <div class="note note--info mt-3">
-        If you get plain <code>OK</code> in step 2, make sure you are logged in.
+        ${t('signin.okHint')}
       </div>
 
       <ol class="step__list mt-3" start="2">
         <li>
-          Go to
-          <a href="https://api.deepai.org/daily-time-sync/user/" target="_blank" rel="noreferrer noopener">https://api.deepai.org/daily-time-sync/user/</a>,
-          scroll down and choose the <strong>Raw Data</strong> tab
+          ${t('signin.step2')}
+          <a href="https://api.deepai.org/daily-time-sync/user/" target="_blank" rel="noreferrer noopener">https://api.deepai.org/daily-time-sync/user/</a>${t('signin.step2Tail')}
         </li>
-        <li>Copy the <strong>Content</strong> and paste it below</li>
+        <li>${t('signin.step3')} <strong>Content</strong> ${t('signin.step3Tail')}</li>
       </ol>
 
       <div class="field mt-3">
@@ -151,10 +150,10 @@ function profilePasteHelp(prefix = '') {
         <textarea class="textarea" id="${prefix}profile-paste" rows="7" spellcheck="false" autocomplete="off"
           placeholder='{"pk": …, "username": "…", "email": "…", "userprofile": {"api_key": "…"}}'></textarea>
         <div class="field__hint">
-          It contains your DeepAI API key, which is stored on this server to serve your requests.
+          ${t('signin.contentHint')}
         </div>
       </div>
-      <div class="row mt-3"><button class="btn btn--primary" id="${prefix}login-with-profile" type="button">Log In</button></div>
+      <div class="row mt-3"><button class="btn btn--primary" id="${prefix}login-with-profile" type="button">${t('common.logIn')}</button></div>
     </section>`;
 }
 
@@ -167,7 +166,7 @@ async function signInWithProfile() {
   const field = $('profile-paste');
   const text = field?.value?.trim() ?? '';
   if (text === '') {
-    toast('Run the command and paste what it printed.', 'error');
+    toast(t('signin.runCommand'), 'error');
     field?.focus();
     return;
   }
@@ -176,12 +175,12 @@ async function signInWithProfile() {
   const label = button?.textContent;
   if (button) {
     button.disabled = true;
-    button.textContent = 'Signing in…';
+    button.textContent = t('signin.signingIn');
   }
   try {
     await api('/login/profile', { method: 'POST', body: { text } });
     if (field) field.value = '';
-    toast('Logged in');
+    toast(t('signin.loggedIn'));
     await loadAccount();
     await render();
   } catch (error) {
@@ -250,12 +249,12 @@ function needsLogin() {
   if (state.account?.signedIn === true) return false;
   view.innerHTML = `
     <div class="page__head">
-      <h1 class="page__title">Log in required</h1>
-      <p class="page__sub">Keys and usage belong to the DeepAI account that created them.</p>
+      <h1 class="page__title">${t('signin.title')}</h1>
+      <p class="page__sub">${t('signin.subtitle')}</p>
     </div>
     <div class="card">
-      <div class="card__title">Not logged in</div>
-      <div class="card__sub mt-2">Log in with your DeepAI account to see your API keys and usage.</div>
+      <div class="card__title">${t('signin.notLoggedIn')}</div>
+      <div class="card__sub mt-2">${t('signin.lead')}</div>
       ${signInRoutes()}
     </div>`;
 
@@ -324,7 +323,7 @@ function confirmAction({ title, lines, confirmLabel = 'Confirm', danger = false 
     const cancel = document.createElement('button');
     cancel.type = 'button';
     cancel.className = 'btn btn--ghost';
-    cancel.textContent = 'Cancel';
+    cancel.textContent = t('common.cancel');
 
     const confirm = document.createElement('button');
     confirm.type = 'button';
@@ -412,10 +411,10 @@ async function copy(text, button, field) {
   const feedback = () => {
     if (button) {
       const original = button.textContent;
-      button.textContent = 'Copied';
+      button.textContent = t('common.copied');
       setTimeout(() => { button.textContent = original; }, 1400);
     } else {
-      toast('Copied to clipboard');
+      toast(t('common.copiedToClipboard'));
     }
   };
 
@@ -459,7 +458,7 @@ async function copy(text, button, field) {
     selection.removeAllRanges();
     selection.addRange(range);
   }
-  toast('Press Ctrl/Cmd+C to copy', 'error');
+  toast(t('common.pressToCopy'), 'error');
 }
 
 /** A code snippet with a copy affordance. */
@@ -470,7 +469,7 @@ function snippet(text) {
   code.textContent = text;
   const button = document.createElement('button');
   button.className = 'snippet__copy';
-  button.textContent = 'Copy';
+  button.textContent = t('common.copy');
   button.addEventListener('click', () => copy(text, button, code));
   wrap.append(code, button);
   return wrap;
@@ -531,6 +530,18 @@ prefersDark.addEventListener('change', () => {
 });
 
 $('auth-button').addEventListener('click', () => { void onAuthButton(); });
+
+$('locale-button').addEventListener('click', (event) => {
+  // The click must not reach the document handler that closes the menu.
+  event.stopPropagation();
+  toggleLocaleMenu();
+});
+document.addEventListener('click', (event) => {
+  if ($('locale-menu')?.hidden === false && !event.target.closest?.('.lang')) closeLocaleMenu();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && $('locale-menu')?.hidden === false) closeLocaleMenu();
+});
 $('theme-toggle').addEventListener('click', () => {
   applyTheme(effectiveTheme() === 'dark' ? 'light' : 'dark');
 });
@@ -541,7 +552,209 @@ $('theme-toggle').addEventListener('click', () => {
 const state = {
   account: undefined,
   models: [],
+  // The active language and its loaded strings. See the i18n section below.
+  locale: 'en',
+  strings: {},
 };
+
+/* --------------------------------------------------------------------- i18n */
+
+/**
+ * The languages the dashboard speaks.
+ *
+ * The flag is what the switcher shows, so it has to be a single emoji rather than an
+ * image: it renders at any size, needs no asset, and cannot be missing while a request
+ * is in flight. `label` is the language's own name, which is what a speaker looks for.
+ */
+const LOCALES = [
+  { code: 'en', flag: '🇬🇧', label: 'English' },
+  { code: 'pl', flag: '🇵🇱', label: 'Polski' },
+  { code: 'de', flag: '🇩🇪', label: 'Deutsch' },
+  { code: 'es', flag: '🇪🇸', label: 'Español' },
+];
+
+const LOCALE_KEY = 'deepai-gateway-locale';
+
+/** The locale entry for a code, or English when the code is unknown. */
+function localeOf(code) {
+  return LOCALES.find((entry) => entry.code === code) ?? LOCALES[0];
+}
+
+/**
+ * Which language to start in.
+ *
+ * An explicit choice wins; otherwise the browser's own preference decides, so a Polish
+ * visitor gets Polish without touching anything. `navigator.languages` is checked in
+ * order, and only the primary subtag matters (`de-AT` is German).
+ *
+ * @returns {string} a code from {@link LOCALES}.
+ */
+function detectLocale() {
+  const stored = localStorage.getItem(LOCALE_KEY);
+  if (typeof stored === 'string' && LOCALES.some((entry) => entry.code === stored)) return stored;
+
+  const candidates = Array.isArray(navigator.languages) && navigator.languages.length > 0
+    ? navigator.languages
+    : [navigator.language];
+  for (const candidate of candidates) {
+    const primary = String(candidate ?? '').toLowerCase().split('-')[0];
+    if (LOCALES.some((entry) => entry.code === primary)) return primary;
+  }
+  return 'en';
+}
+
+/**
+ * Load one language's strings.
+ *
+ * They live as JSON next to the dashboard rather than inside this file, so a translation
+ * is a data change and never a code change. A language that fails to load leaves the
+ * previous strings in place instead of blanking the interface.
+ *
+ * @param {string} code
+ * @returns {Promise<boolean>} whether the strings were loaded.
+ */
+async function loadLocale(code) {
+  const entry = localeOf(code);
+  try {
+    const response = await fetch(`/locales/${entry.code}.json`, { cache: 'no-cache' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const strings = await response.json();
+    if (strings === null || typeof strings !== 'object') throw new Error('not an object');
+    state.locale = entry.code;
+    state.strings = strings;
+    return true;
+  } catch (error) {
+    // English is the one language that must always work: it is the fallback every other
+    // language falls back to, so a broken file cannot be allowed to empty the dashboard.
+    if (entry.code !== 'en') {
+      toast(`Could not load ${entry.label}: ${error?.message ?? error}`, 'error');
+      if (state.locale !== 'en') await loadLocale('en');
+    }
+    return false;
+  }
+}
+
+/**
+ * One translated string.
+ *
+ * `params` fills `{name}` placeholders, which is how a sentence keeps its own word order
+ * in every language instead of being assembled from fragments.
+ *
+ * @param {string} key
+ * @param {Record<string, string|number>} [params]
+ * @returns {string} the translation, the key itself when it is missing, so a gap is
+ *   visible rather than silently blank.
+ */
+function t(key, params) {
+  const value = state.strings[key];
+  if (typeof value !== 'string') return key;
+  if (params === undefined) return value;
+  return value.replace(/\{(\w+)\}/g, (match, name) => (
+    params[name] === undefined ? match : String(params[name])
+  ));
+}
+
+/** Re-apply translations to the static shell. */
+function applyStaticText() {
+  for (const node of document.querySelectorAll('[data-i18n]')) {
+    node.textContent = t(node.dataset.i18n);
+  }
+  for (const node of document.querySelectorAll('[data-i18n-attr]')) {
+    // `data-i18n-attr="title:key,aria-label:key2"` — attributes a translator must reach.
+    for (const pair of node.dataset.i18nAttr.split(',')) {
+      const [attribute, key] = pair.split(':').map((part) => part.trim());
+      if (attribute !== '' && key !== undefined) node.setAttribute(attribute, t(key));
+    }
+  }
+  document.documentElement.lang = state.locale;
+}
+
+/**
+ * Fill the language menu with every language, as flags.
+ *
+ * Built once and toggled, rather than rebuilt on each open: the entries never change, and
+ * a menu that is re-created on every click loses the focus ring mid-interaction.
+ */
+function renderLocaleMenu() {
+  const menu = $('locale-menu');
+  if (menu === null) return;
+  menu.replaceChildren(...LOCALES.map((entry) => {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'lang__option';
+    option.dataset.locale = entry.code;
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', String(entry.code === state.locale));
+    // Built as nodes rather than as HTML: the label is a language's own name, and text
+    // assembled this way cannot be mistaken for markup.
+    const flag = document.createElement('span');
+    flag.className = 'lang__flag';
+    flag.setAttribute('aria-hidden', 'true');
+    flag.textContent = entry.flag;
+    const label = document.createElement('span');
+    label.className = 'lang__name';
+    label.textContent = entry.label;
+    option.append(flag, label);
+    option.addEventListener('click', () => {
+      closeLocaleMenu();
+      void setLocale(entry.code);
+    });
+    return option;
+  }));
+}
+
+/** Open or close the language menu. */
+function closeLocaleMenu() {
+  const menu = $('locale-menu');
+  if (menu === null) return;
+  menu.hidden = true;
+  $('locale-button')?.setAttribute('aria-expanded', 'false');
+}
+
+function toggleLocaleMenu() {
+  const menu = $('locale-menu');
+  if (menu === null) return;
+  const opening = menu.hidden;
+  if (opening) {
+    renderLocaleMenu();
+    menu.hidden = false;
+    $('locale-button')?.setAttribute('aria-expanded', 'true');
+    menu.querySelector('[data-locale]')?.focus();
+  } else {
+    closeLocaleMenu();
+  }
+}
+
+/** The flag and name the switcher shows for the active language. */
+function renderLocaleButton() {
+  const entry = localeOf(state.locale);
+  const flag = $('locale-flag');
+  if (flag !== null) flag.textContent = entry.flag;
+  const button = $('locale-button');
+  if (button !== null) button.setAttribute('title', entry.label);
+  for (const option of document.querySelectorAll('[data-locale]')) {
+    option.classList.toggle('is-active', option.dataset.locale === state.locale);
+  }
+}
+
+/**
+ * Switch language.
+ *
+ * The whole view is re-rendered rather than patched: every string in it came from `t()`,
+ * so a re-render is the one operation that cannot leave a half-translated screen behind.
+ *
+ * @param {string} code
+ */
+async function setLocale(code) {
+  const entry = localeOf(code);
+  if (entry.code === state.locale && Object.keys(state.strings).length > 0) return;
+  if (!await loadLocale(entry.code)) return;
+  localStorage.setItem(LOCALE_KEY, entry.code);
+  applyStaticText();
+  renderLocaleButton();
+  renderAccountBadge();
+  await render({ refreshAccount: false });
+}
 
 /**
  * What to call the signed-in account.
@@ -575,7 +788,7 @@ function renderAccountBadge() {
 
   if (account === undefined) {
     badge.className = 'badge badge--gray';
-    text.textContent = 'Checking…';
+    text.textContent = t('common.checking');
     button.hidden = true;
     return;
   }
@@ -595,7 +808,7 @@ function renderAccountBadge() {
       : accountName(account);
   } else {
     badge.className = 'badge badge--red';
-    text.textContent = 'Logged out';
+    text.textContent = t('common.loggedOut');
   }
 }
 
@@ -608,7 +821,7 @@ async function onAuthButton() {
 async function logOutEverywhere() {
   try {
     await api('/logout', { method: 'POST' });
-    toast('Logged out');
+    toast(t('common.loggedOut'));
   } catch (error) {
     toast(String(error.message ?? error), 'error');
   }
@@ -658,12 +871,12 @@ function sparkline(daily) {
   const max = Math.max(1, ...daily.map((day) => day.tokens));
   const peak = daily.reduce((best, day) => (day.tokens > best.tokens ? day : best), daily[0]);
   return `
-    <div class="spark" title="Tokens per day, last 14 days">
+    <div class="spark" title="${t('home.sparkTitle')}">
       ${daily.map((day) => {
         const height = Math.max(2, Math.round((day.tokens / max) * 44));
         const isPeak = day === peak && peak.tokens > 0;
         return `<div class="spark__bar" data-peak="${isPeak}" style="height:${height}px"
-          title="${esc(day.label)} · ${exact(day.tokens)} tokens · ${exact(day.requests)} requests"></div>`;
+          title="${esc(day.label)} · ${t('home.sparkPoint', { tokens: exact(day.tokens), requests: exact(day.requests) })}"></div>`;
       }).join('')}
     </div>`;
 }
@@ -672,7 +885,7 @@ function sparkline(daily) {
 function modelUsageRows(models, emptyText) {
   const used = models.filter((model) => model.requests > 0 && model.totalTokens > 0);
   if (used.length === 0) {
-    return `<tr><td colspan="4"><div class="empty"><div class="empty__title">No usage yet</div>${esc(emptyText)}</div></td></tr>`;
+    return `<tr><td colspan="4"><div class="empty"><div class="empty__title">${t('home.noUsage')}</div>${esc(emptyText)}</div></td></tr>`;
   }
   const max = Math.max(...used.map((model) => model.totalTokens));
   return used.map((model) => `
@@ -702,7 +915,7 @@ function isPremiumModel(modelId) {
 /** Requests table. */
 function requestRows(requests, showKey = true) {
   if (requests.length === 0) {
-    return `<tr><td colspan="${showKey ? 7 : 6}"><div class="empty"><div class="empty__title">No requests yet</div>Send a request to <code>/v1/chat/completions</code> to see it here.</div></td></tr>`;
+    return `<tr><td colspan="${showKey ? 7 : 6}"><div class="empty"><div class="empty__title">${t('home.noRequests')}</div>${t('home.sendRequest')} <code>/v1/chat/completions</code> ${t('home.sendRequestTail')}</div></td></tr>`;
   }
   return requests.map((item) => {
     const premium = isPremiumModel(item.model);
@@ -713,15 +926,15 @@ function requestRows(requests, showKey = true) {
         <span class="row" style="gap:6px">
           <span class="truncate">${esc(item.model)}</span>
           ${premium === true
-            ? '<span class="badge badge--violet" title="Billed in Credits">Premium</span>'
+            ? `<span class="badge badge--violet" title="${t('common.billedInCredits')}">${t('common.premium')}</span>`
             : premium === false
-              ? '<span class="badge badge--gray" title="Unmetered">Free</span>'
+              ? `<span class="badge badge--gray" title="${t('common.unmetered')}">${t('common.free')}</span>`
               : ''}
         </span>
       </td>
       ${showKey ? `<td class="truncate tiny" style="max-width:130px">${esc(item.keyName || '—')}</td>` : ''}
       <td class="num">${item.totalTokens > 0 ? exact(item.totalTokens) : '—'}</td>
-      <td class="num tiny muted">${item.inputTokens}/${item.outputTokens}${item.reasoningTokens > 0 ? `<span title="reasoning tokens"> · r${tokens(item.reasoningTokens)}</span>` : ''}</td>
+      <td class="num tiny muted">${item.inputTokens}/${item.outputTokens}${item.reasoningTokens > 0 ? `<span title="${t('home.reasoningTokens')}"> · r${tokens(item.reasoningTokens)}</span>` : ''}</td>
       <td class="num tiny muted">${esc(duration(item.durationMs))}</td>
       <td>${item.ok
         ? `<span class="badge badge--green"><span class="dot"></span>${item.status}</span>`
@@ -738,13 +951,13 @@ function accountCard() {
       <div class="card">
         <div class="row row--between">
           <div>
-            <div class="card__title">DeepAI account</div>
-            <div class="card__sub">The gateway needs your DeepAI account to reach the models.</div>
+            <div class="card__title">${t('account.title')}</div>
+            <div class="card__sub">${t('account.subtitle')}</div>
           </div>
-          <span class="badge badge--red"><span class="dot"></span>Not signed in</span>
+          <span class="badge badge--red"><span class="dot"></span>${t('account.notSignedIn')}</span>
         </div>
         <div class="mt-3 stack">
-          <div class="note">Sign in with your DeepAI account to let the gateway reach the models. The account key is stored in the gateway database and never leaves this machine.</div>
+          <div class="note">${t('account.lead')}</div>
           ${signInRoutes('account-')}
         </div>
       </div>`;
@@ -759,7 +972,7 @@ function accountCard() {
     <div class="card">
       <div class="row row--between">
         <div>
-          <div class="card__title">DeepAI account</div>
+          <div class="card__title">${t('account.title')}</div>
           <div class="card__sub">Logged in as ${esc(accountName(account))}${account.isPro ? ' · Pro' : ''}</div>
         </div>
         <span class="badge ${account.balanceLow ? 'badge--amber' : 'badge--green'}"><span class="dot"></span>${account.balanceLow ? 'Low balance' : 'Active'}</span>
@@ -767,15 +980,15 @@ function accountCard() {
       ${allowance && allowance.balance !== null ? `
         <div class="mt-3">
           <div class="row row--between tiny muted">
-            <span>Credits balance</span>
+            <span>${t('account.credits')}</span>
             <span class="mono">${esc(allowance.balance)} / ${esc(allowance.granted ?? '—')}</span>
           </div>
           ${pct !== undefined ? `<div class="bar mt-2"><div class="bar__fill ${account.balanceLow ? 'bar__fill--warn' : ''}" style="width:${pct}%"></div></div>` : ''}
           <div class="tiny muted mt-2">Resets ${esc(allowance.refreshAt ? when(Date.parse(allowance.refreshAt)) : '—')}</div>
         </div>` : ''}
       <div class="row mt-3 row--wrap">
-        <button class="btn btn--secondary btn--sm" id="refresh-allowance">Refresh balance</button>
-        <button class="btn btn--ghost btn--sm" id="forget-account">Forget this account</button>
+        <button class="btn btn--secondary btn--sm" id="refresh-allowance">${t('account.refresh')}</button>
+        <button class="btn btn--ghost btn--sm" id="forget-account">${t('account.forget')}</button>
         <span class="spacer"></span>
         <span class="tiny muted">${esc(keyQuotaLabel(account.keyQuota))}</span>
       </div>
@@ -832,7 +1045,7 @@ function savingsCard(savings) {
       <tr>
         <td class="truncate" style="max-width:200px">${esc(entry.model)}</td>
         <td class="num">${tokens(entry.tokens)}</td>
-        <td class="num">${entry.priced ? esc(usd(entry.usd)) : '<span class="muted" title="No public equivalent">n/a</span>'}</td>
+        <td class="num">${entry.priced ? esc(usd(entry.usd)) : `<span class="muted" title="${t('pricing.noEquivalent')}">n/a</span>`}</td>
       </tr>`)
     .join('');
 
@@ -840,12 +1053,12 @@ function savingsCard(savings) {
     <div class="card">
       <div class="row row--between">
         <div>
-          <div class="card__title">Money saved</div>
-          <div class="card__sub">What this traffic would cost on the public APIs these models mirror.</div>
+          <div class="card__title">${t('home.moneySaved')}</div>
+          <div class="card__sub">${t('home.moneySavedSub')}</div>
         </div>
         <div class="row" style="gap:8px">
           <span class="badge ${live ? 'badge--green' : 'badge--amber'}"
-                title="${esc(live ? 'Live rates from OpenRouter' : `Using ${pricing.source ?? 'bundled'} rates`)}">
+                title="${esc(live ? t('pricing.live') : t('pricing.bundled', { source: pricing.source ?? 'bundled' }))}">
             <span class="dot"></span>${live ? 'Live rates' : 'Cached rates'}
           </span>
           <span class="badge badge--gray">${esc(usd(month.usd))} this month</span>
@@ -854,15 +1067,15 @@ function savingsCard(savings) {
 
       <div class="grid grid--3 mt-3">
         <div>
-          <div class="eyebrow">Today</div>
+          <div class="eyebrow">${t('metric.today')}</div>
           <div class="metric__value" style="font-size:22px">${esc(usd(today.usd))}</div>
         </div>
         <div>
-          <div class="eyebrow">This month</div>
+          <div class="eyebrow">${t('metric.thisMonth')}</div>
           <div class="metric__value" style="font-size:22px">${esc(usd(month.usd))}</div>
         </div>
         <div>
-          <div class="eyebrow">All time</div>
+          <div class="eyebrow">${t('metric.allTime')}</div>
           <div class="metric__value" style="font-size:22px">${esc(usd(all.usd))}</div>
         </div>
       </div>
@@ -870,7 +1083,7 @@ function savingsCard(savings) {
       ${rows === '' ? '' : `
         <div class="table-wrap mt-3">
           <table class="table">
-            <thead><tr><th>Model</th><th class="num">Tokens</th><th class="num">Equivalent</th></tr></thead>
+            <thead><tr><th>${t('metric.model')}</th><th class="num">${t('metric.tokens')}</th><th class="num">${t('metric.equivalent')}</th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>`}
@@ -883,7 +1096,7 @@ function savingsCard(savings) {
             : ''}
           Cache reads and writes use each model's own cache rate where one is published.
         </p>
-        <button class="btn btn--secondary btn--sm" id="refresh-pricing">Refresh rates</button>
+        <button class="btn btn--secondary btn--sm" id="refresh-pricing">${t('pricing.refresh')}</button>
       </div>
     </div>`;
 }
@@ -896,7 +1109,7 @@ function wireAccountCard(rerender) {
   $('refresh-allowance')?.addEventListener('click', async (event) => {
     const button = event.currentTarget;
     button.disabled = true;
-    button.textContent = 'Refreshing…';
+    button.textContent = t('pricing.refreshing');
     try {
       const result = await api('/account/refresh', { method: 'POST' });
       if (result.ok) toast(`Balance: ${result.allowance.balance} Credits`);
@@ -924,7 +1137,7 @@ function wireAccountCard(rerender) {
     if (!confirmed) return;
     try {
       await api('/account/forget', { method: 'POST' });
-      toast('Account removed');
+      toast(t('account.removed'));
       await loadAccount();
       await render();
     } catch (error) {
@@ -937,7 +1150,7 @@ function wireAccountCard(rerender) {
 
 async function renderHome() {
   if (needsLogin()) return;
-  view.innerHTML = '<div class="loading"><span class="spinner"></span>Loading usage…</div>';
+  view.innerHTML = `<div class="loading"><span class="spinner"></span>${t('home.loading')}</div>`;
 
   let data;
   try {
@@ -957,8 +1170,8 @@ async function renderHome() {
 
   view.innerHTML = `
     <div class="page__head">
-      <h1 class="page__title">Overview</h1>
-      <p class="page__sub">Gateway traffic, token accounting and the DeepAI account behind it. Totals are read from the same table that serves every other view.</p>
+      <h1 class="page__title">${t('home.title')}</h1>
+      <p class="page__sub">${t('home.subtitle')}</p>
     </div>
 
     <div class="stack">
@@ -976,7 +1189,7 @@ async function renderHome() {
           foot: `${exact(today.requests)} requests · ${exact(today.failedRequests)} failed`,
         })}
         ${metricCard({
-          eyebrow: 'All time',
+          eyebrow: t('metric.allTime'),
           value: tokens(all.totalTokens),
           label: 'Every request recorded',
           foot: `${exact(all.requests)} requests · avg ${esc(duration(all.avgDurationMs))}`,
@@ -996,15 +1209,15 @@ async function renderHome() {
           <div class="card card--flush">
             <div class="card__head">
               <div>
-                <div class="card__title">Token usage by model</div>
-                <div class="card__sub">This month. Models without usage are hidden.</div>
+                <div class="card__title">${t('home.byModel')}</div>
+                <div class="card__sub">${t('home.byModelSub')}</div>
               </div>
               <span class="badge badge--gray">${modelsUsedMonth.length} active</span>
             </div>
             <div class="table-wrap">
               <table class="table">
                 <thead><tr>
-                  <th>Model</th><th class="num">Requests</th><th class="num">Tokens</th><th></th>
+                  <th>${t('metric.model')}</th><th class="num">${t('metric.requests')}</th><th class="num">${t('metric.tokens')}</th><th></th>
                 </tr></thead>
                 <tbody>${modelUsageRows(data.modelsMonth, 'Models appear here once a request uses them.')}</tbody>
               </table>
@@ -1014,19 +1227,19 @@ async function renderHome() {
           <div class="card card--flush">
             <div class="card__head">
               <div>
-                <div class="card__title">Recent requests</div>
-                <div class="card__sub">Newest first, including failures.</div>
+                <div class="card__title">${t('home.recent')}</div>
+                <div class="card__sub">${t('home.recentSub')}</div>
               </div>
               <div class="row" style="gap:6px">
-                <a class="btn btn--ghost btn--sm" href="/api/usage/export?format=csv" download>Export CSV</a>
-                <a class="btn btn--ghost btn--sm" href="#/keys">Manage keys</a>
+                <a class="btn btn--ghost btn--sm" href="/api/usage/export?format=csv" download>${t('home.export')}</a>
+                <a class="btn btn--ghost btn--sm" href="#/keys">${t('home.manageKeys')}</a>
               </div>
             </div>
             <div class="table-wrap">
               <table class="table">
                 <thead><tr>
-                  <th>When</th><th>Model</th><th>Key</th><th class="num">Tokens</th>
-                  <th class="num hide-sm">In/Out</th><th class="num hide-sm">Time</th><th>Status</th>
+                  <th>${t('metric.when')}</th><th>${t('metric.model')}</th><th>${t('metric.key')}</th><th class="num">${t('metric.tokens')}</th>
+                  <th class="num hide-sm">${t('metric.inOut')}</th><th class="num hide-sm">${t('metric.time')}</th><th>${t('metric.status')}</th>
                 </tr></thead>
                 <tbody>${requestRows(recent.requests, true)}</tbody>
               </table>
@@ -1038,7 +1251,7 @@ async function renderHome() {
           ${accountCard()}
 
           <div class="card">
-            <div class="eyebrow">Last 14 days</div>
+            <div class="eyebrow">${t('home.last14')}</div>
             <div class="mt-3">${sparkline(data.daily)}</div>
             <div class="row row--between tiny muted mt-2">
               <span>${esc(data.daily[0]?.label ?? '')}</span>
@@ -1047,8 +1260,8 @@ async function renderHome() {
           </div>
 
           <div class="card">
-            <div class="eyebrow">Use it</div>
-            <div class="tiny muted mt-2">Point any OpenAI client at this gateway.</div>
+            <div class="eyebrow">${t('home.useIt')}</div>
+            <div class="tiny muted mt-2">${t('home.useItSub')}</div>
             <div class="stack mt-3" id="home-snippets"></div>
           </div>
         </div>
@@ -1067,7 +1280,7 @@ async function renderHome() {
   $('refresh-pricing')?.addEventListener('click', async (event) => {
     const button = event.currentTarget;
     button.disabled = true;
-    button.textContent = 'Refreshing…';
+    button.textContent = t('pricing.refreshing');
     try {
       const result = await api('/pricing/refresh', { method: 'POST' });
       toast(result.ok ? `Rates refreshed (${result.matched.length} models)` : `Refresh failed: ${result.error}`, result.ok ? 'ok' : 'error');
@@ -1081,7 +1294,7 @@ async function renderHome() {
 /* ------------------------------------------------------------------ models */
 
 async function renderModels() {
-  view.innerHTML = '<div class="loading"><span class="spinner"></span>Loading models…</div>';
+  view.innerHTML = `<div class="loading"><span class="spinner"></span>${t('models.loading')}</div>`;
   let payload;
   try {
     payload = await api('/models');
@@ -1105,41 +1318,41 @@ async function renderModels() {
           </div>
         </div>
       </td>
-      <td><span class="badge ${model.premier ? 'badge--violet' : 'badge--green'}">${model.premier ? 'Premium' : 'Free'}</span></td>
+      <td><span class="badge ${model.premier ? 'badge--violet' : 'badge--green'}">${model.premier ? t('common.premium') : t('common.free')}</span></td>
       <td class="num tiny muted">${esc(tokens(model.contextWindow))}</td>
       <td class="num tiny muted">${esc(tokens(model.maxTokens))}</td>
       <td class="tiny muted">${model.reasoning ? 'none · low · medium · high' : '—'}</td>
       <td class="tiny muted">${model.input.includes('image') ? 'text, image' : 'text'}</td>
-      <td class="num tiny muted">${model.premier ? esc(model.rateLabel) : 'Unmetered'}</td>
+      <td class="num tiny muted">${model.premier ? esc(model.rateLabel) : t('common.unmetered')}</td>
       <td class="num tiny">${model.usageMonth ? exact(model.usageMonth.totalTokens) : '<span class="muted">—</span>'}</td>
     </tr>`;
 
   view.innerHTML = `
     <div class="page__head">
-      <h1 class="page__title">Models</h1>
-      <p class="page__sub">The DeepAI Code catalog. Free models are unmetered; Premium models draw on your Credits balance per second of generation. Rates shown are for the default thinking level.</p>
+      <h1 class="page__title">${t('models.title')}</h1>
+      <p class="page__sub">${t('models.subtitle')}</p>
     </div>
 
     <div class="stack">
       <div class="grid grid--3">
         ${metricCard({ eyebrow: 'Catalog', value: String(models.length), label: 'Models available' })}
         ${metricCard({ eyebrow: 'Free tier', value: String(free.length), label: 'Unmetered models' })}
-        ${metricCard({ eyebrow: 'Premium', value: String(premier.length), label: 'Billed in Credits' })}
+        ${metricCard({ eyebrow: t('common.premium'), value: String(premier.length), label: t('common.billedInCredits') })}
       </div>
 
       <div class="card card--flush">
         <div class="card__head">
           <div>
-            <div class="card__title">All models</div>
-            <div class="card__sub">Tokens used shows this month's traffic through the gateway.</div>
+            <div class="card__title">${t('common.allModels')}</div>
+            <div class="card__sub">${t('models.usedNote')}</div>
           </div>
-          <button class="btn btn--secondary btn--sm" id="reload-models">Reload catalog</button>
+          <button class="btn btn--secondary btn--sm" id="reload-models">${t('models.reload')}</button>
         </div>
         <div class="table-wrap">
           <table class="table">
             <thead><tr>
-              <th>Model</th><th>Tier</th><th class="num">Context</th><th class="num">Max out</th>
-              <th class="hide-sm">Reasoning</th><th class="hide-sm">Input</th><th class="num">Rate</th><th class="num">Used</th>
+              <th>${t('metric.model')}</th><th>${t('metric.tier')}</th><th class="num">${t('metric.context')}</th><th class="num">${t('metric.maxOut')}</th>
+              <th class="hide-sm">${t('metric.reasoning')}</th><th class="hide-sm">${t('metric.input')}</th><th class="num">${t('metric.rate')}</th><th class="num">${t('metric.used')}</th>
             </tr></thead>
             <tbody>${models.map(row).join('')}</tbody>
           </table>
@@ -1147,9 +1360,9 @@ async function renderModels() {
       </div>
 
       <div class="card">
-        <div class="eyebrow">How billing works</div>
+        <div class="eyebrow">${t('models.howBilling')}</div>
         <p class="muted mt-2" style="font-size:13px;max-width:78ch">
-          Free models cost nothing and are marked <strong>Free</strong> in the picker. Premium models are charged in
+          Free models cost nothing and are marked <strong>${t('common.free')}</strong> in the picker. Premium models are charged in
           Credits per second of generation, at a rate that depends on the thinking level — <code>high</code> is the
           cheapest per second because the model works longer but at a lower rate. The balance shown on the overview
           page is the account allowance reported by DeepAI.
@@ -1159,7 +1372,7 @@ async function renderModels() {
 
   $('reload-models').addEventListener('click', async () => {
     await loadModels(true);
-    toast('Catalog reloaded');
+    toast(t('models.reloaded'));
     renderModels();
   });
 }
@@ -1168,7 +1381,7 @@ async function renderModels() {
 
 async function renderKeys() {
   if (needsLogin()) return;
-  view.innerHTML = '<div class="loading"><span class="spinner"></span>Loading keys…</div>';
+  view.innerHTML = `<div class="loading"><span class="spinner"></span>${t('keys.loading')}</div>`;
   let payload;
   try {
     payload = await api('/keys');
@@ -1197,7 +1410,7 @@ async function renderKeys() {
         <div class="tiny mono mt-2">${exact(key.usage.requests)} / ${exact(key.limitRequests)} requests</div>
         <div class="bar mt-2"><div class="bar__fill ${pct >= 100 ? 'bar__fill--over' : pct >= 80 ? 'bar__fill--warn' : ''}" style="width:${pct}%"></div></div>`);
     }
-    if (parts.length === 0) return '<span class="tiny muted">Unlimited</span>';
+    if (parts.length === 0) return `<span class="tiny muted">${t('common.unlimited')}</span>`;
     const windowLabel = key.limitWindow === 'total' ? 'in total' : `per ${esc(key.limitWindow)}`;
     return `${parts.join('')}<div class="tiny muted mt-2">${windowLabel}</div>`;
   };
@@ -1210,8 +1423,8 @@ async function renderKeys() {
   };
 
   const modelCell = (key) => {
-    if (key.modelsRestricted !== true) return '<span class="tiny muted">All models</span>';
-    if (key.allowedModels.length === 0) return '<span class="badge badge--red">None</span>';
+    if (key.modelsRestricted !== true) return `<span class="tiny muted">${t('common.allModels')}</span>`;
+    if (key.allowedModels.length === 0) return `<span class="badge badge--red">${t('common.none')}</span>`;
     return `<span class="tiny muted">${key.allowedModels.length} allowed</span>`;
   };
 
@@ -1223,28 +1436,28 @@ async function renderKeys() {
       </td>
       <td class="tiny muted">${esc(key.owner || '—')}</td>
       <td>${statusBadge(key.status)}</td>
-      <td class="tiny muted">${key.expiresAt === null ? 'Never' : esc(when(key.expiresAt))}</td>
+      <td class="tiny muted">${key.expiresAt === null ? t('form.expiryNever') : esc(when(key.expiresAt))}</td>
       <td>${modelCell(key)}</td>
       <td style="min-width:170px">${limitCell(key)}</td>
       <td class="tiny muted hide-sm">${esc(ago(key.lastUsedAt))}</td>
       <td>
         <div class="row" style="gap:6px">
-          <button class="btn btn--secondary btn--sm" data-action="edit" data-id="${esc(key.id)}">Edit</button>
-          <button class="btn btn--danger-ghost btn--sm" data-action="revoke" data-id="${esc(key.id)}">Revoke</button>
+          <button class="btn btn--secondary btn--sm" data-action="edit" data-id="${esc(key.id)}">${t('common.edit')}</button>
+          <button class="btn btn--danger-ghost btn--sm" data-action="revoke" data-id="${esc(key.id)}">${t('common.revoke')}</button>
         </div>
       </td>
     </tr>`;
 
   view.innerHTML = `
     <div class="page__head">
-      <h1 class="page__title">API Keys</h1>
-      <p class="page__sub">Keys are shown once at creation; only a SHA-256 hash is stored. Limits are enforced per key inside its own window.</p>
+      <h1 class="page__title">${t('keys.title')}</h1>
+      <p class="page__sub">${t('keys.subtitle')}</p>
     </div>
 
     <div class="stack">
       <div class="row row--between">
         <span class="eyebrow">${keys.length} of ${quota.max} keys used</span>
-        <button class="btn btn--primary" id="new-key" ${quota.atLimit ? 'disabled title="Revoke a key first"' : ''}>Create key</button>
+        <button class="btn btn--primary" id="new-key" ${quota.atLimit ? `disabled title="${t('keys.revokeFirst')}"` : ''}>${t('keys.create')}</button>
       </div>
 
       ${quota.atLimit
@@ -1255,11 +1468,11 @@ async function renderKeys() {
         <div class="table-wrap">
           <table class="table">
             <thead><tr>
-              <th>Key</th><th>Owner</th><th>Status</th><th>Expires</th><th>Models</th><th>Limits</th>
-              <th class="hide-sm">Last used</th><th></th>
+              <th>${t('metric.key')}</th><th>${t('metric.owner')}</th><th>${t('metric.status')}</th><th>${t('metric.expires')}</th><th>${t('models.title')}</th><th>${t('metric.limits')}</th>
+              <th class="hide-sm">${t('metric.lastUsed')}</th><th></th>
             </tr></thead>
             <tbody>${keys.length === 0
-              ? `<tr><td colspan="8"><div class="empty"><div class="empty__title">No API keys yet</div>${
+              ? `<tr><td colspan="8"><div class="empty"><div class="empty__title">${t('keys.empty')}</div>${
                   state.account?.signedIn === true
                     ? 'Create one to start sending requests.'
                     : 'Log in to create one.'
@@ -1270,8 +1483,8 @@ async function renderKeys() {
       </div>
 
       <div class="card">
-        <div class="eyebrow">Authenticate</div>
-        <div class="tiny muted mt-2">Every <code>/v1</code> request needs a key. <code>/v1/models</code> lists only the models that key may use.</div>
+        <div class="eyebrow">${t('keys.authTitle')}</div>
+        <div class="tiny muted mt-2">${t('keys.authEvery')} <code>/v1</code> ${t('keys.authRequestNeedsKey')} <code>/v1/models</code> ${t('keys.authListsOnly')}</div>
         <div class="mt-3 stack" id="auth-snippets"></div>
       </div>
     </div>`;
@@ -1306,7 +1519,7 @@ async function renderKeys() {
         });
         if (!confirmed) return;
         await api(`/keys/${id}/revoke`, { method: 'POST' });
-        toast('Key revoked');
+        toast(t('keys.revoked'));
         return renderKeys();
       }
     });
@@ -1320,7 +1533,7 @@ function openKeyModal(existing, onDone) {
 
   const name = document.createElement('input');
   name.className = 'input';
-  name.placeholder = 'Production app';
+  name.placeholder = t('form.namePlaceholder');
   name.value = existing?.name ?? '';
 
   // --- Limits -------------------------------------------------------------
@@ -1328,11 +1541,11 @@ function openKeyModal(existing, onDone) {
   const window_ = document.createElement('select');
   window_.className = 'select';
   for (const [value, label] of [
-    ['unlimited', 'Unlimited'],
-    ['hour', 'Per hour'],
-    ['day', 'Per day'],
-    ['month', 'Per month'],
-    ['total', 'Total (never resets)'],
+    ['unlimited', t('common.unlimited')],
+    ['hour', t('form.perHour')],
+    ['day', t('form.perDay')],
+    ['month', t('form.perMonth')],
+    ['total', t('form.perTotal')],
   ]) {
     const option = document.createElement('option');
     option.value = value;
@@ -1345,23 +1558,23 @@ function openKeyModal(existing, onDone) {
   limitTokens.className = 'input';
   limitTokens.type = 'number';
   limitTokens.min = '0';
-  limitTokens.placeholder = 'No limit';
+  limitTokens.placeholder = t('form.noLimit');
   limitTokens.value = existing?.limitTokens ?? '';
 
   const limitRequests = document.createElement('input');
   limitRequests.className = 'input';
   limitRequests.type = 'number';
   limitRequests.min = '0';
-  limitRequests.placeholder = 'No limit';
+  limitRequests.placeholder = t('form.noLimit');
   limitRequests.value = existing?.limitRequests ?? '';
 
-  const tokensField = field('Token limit', limitTokens, 'Leave empty for no token cap.');
-  const requestsField = field('Request limit', limitRequests, 'Leave empty for no request cap.');
+  const tokensField = field(t('form.tokenLimit'), limitTokens, t('form.tokenLimitHint'));
+  const requestsField = field(t('form.requestLimit'), limitRequests, t('form.requestLimitHint'));
 
   // --- Expiry -------------------------------------------------------------
   const expiryMode = document.createElement('select');
   expiryMode.className = 'select';
-  for (const [value, label] of [['never', 'Never'], ['date', 'On a date']]) {
+  for (const [value, label] of [['never', t('form.expiryNever')], ['date', t('form.expiryOnDate')]]) {
     const option = document.createElement('option');
     option.value = value;
     option.textContent = label;
@@ -1373,7 +1586,7 @@ function openKeyModal(existing, onDone) {
   expiryDate.className = 'input';
   expiryDate.type = 'date';
   if (existing?.expiresAt) expiryDate.value = new Date(existing.expiresAt).toISOString().slice(0, 10);
-  const expiryField = field('Expiry date', expiryDate, 'The key stops working after this day.');
+  const expiryField = field(t('form.expiryDate'), expiryDate, t('form.expiryHint'));
 
   // --- Models -------------------------------------------------------------
   // Free models are preselected: a new key is useful immediately, and the
@@ -1412,14 +1625,14 @@ function openKeyModal(existing, onDone) {
   if (catalog.length === 0) {
     const hint = document.createElement('span');
     hint.className = 'tiny muted';
-    hint.textContent = 'Model list unavailable.';
+    hint.textContent = t('models.unavailable');
     modelList.appendChild(hint);
   }
 
   const modelsField = field(
-    'Allowed models',
+    t('form.allowedModels'),
     modelList,
-    'Free models are preselected. Use All models for an unrestricted key; an empty selection allows nothing.',
+    t('form.allowedModelsHint'),
   );
 
   const quickPicks = document.createElement('div');
@@ -1428,16 +1641,16 @@ function openKeyModal(existing, onDone) {
   const freeButton = document.createElement('button');
   freeButton.type = 'button';
   freeButton.className = 'btn btn--secondary btn--sm';
-  freeButton.textContent = 'Select free';
+  freeButton.textContent = t('form.selectFree');
   const allButton = document.createElement('button');
   allButton.type = 'button';
   allButton.className = 'btn btn--secondary btn--sm';
-  allButton.textContent = 'All models';
-  allButton.title = 'Unrestricted: allows every model, including future ones';
+  allButton.textContent = t('common.allModels');
+  allButton.title = t('form.unrestricted');
   const noneButton = document.createElement('button');
   noneButton.type = 'button';
   noneButton.className = 'btn btn--secondary btn--sm';
-  noneButton.textContent = 'Clear';
+  noneButton.textContent = t('common.clear');
   quickPicks.append(freeButton, allButton, noneButton);
 
   const setSelection = (ids) => {
@@ -1473,10 +1686,10 @@ function openKeyModal(existing, onDone) {
 
   const submit = document.createElement('button');
   submit.className = 'btn btn--primary';
-  submit.textContent = existing ? 'Save changes' : 'Create key';
+  submit.textContent = existing ? 'Save changes' : t('keys.create');
   const cancel = document.createElement('button');
   cancel.className = 'btn btn--secondary';
-  cancel.textContent = 'Cancel';
+  cancel.textContent = t('common.cancel');
   cancel.addEventListener('click', closeModal);
 
   const actions = document.createElement('div');
@@ -1485,11 +1698,11 @@ function openKeyModal(existing, onDone) {
   actions.append(cancel, submit);
 
   form.append(
-    field('Name', name, 'Shown in the dashboard and in usage rows.'),
-    field('Limit window', window_, 'Unlimited applies no token or request cap.'),
+    field(t('form.name'), name, t('form.nameHint')),
+    field(t('form.limitWindow'), window_, t('form.limitWindowHint')),
     tokensField,
     requestsField,
-    field('Expires', expiryMode),
+    field(t('form.expires'), expiryMode),
     expiryField,
     quickPicks,
     modelsField,
@@ -1516,7 +1729,7 @@ function openKeyModal(existing, onDone) {
       allowedModels: unrestricted ? [] : [...selected],
     };
     if (body.name === '') {
-      error.textContent = 'A name is required.';
+      error.textContent = t('keys.nameRequired');
       error.hidden = false;
       return;
     }
@@ -1525,7 +1738,7 @@ function openKeyModal(existing, onDone) {
       if (existing) {
         await api(`/keys/${existing.id}`, { method: 'PATCH', body });
         closeModal();
-        toast('Key updated');
+        toast(t('keys.updated'));
         onDone();
       } else {
         const created = await api('/keys', { method: 'POST', body });
@@ -1546,11 +1759,11 @@ function showCreatedKey(plaintext, name, onDone) {
 
   const note = document.createElement('div');
   note.className = 'note note--warning';
-  note.textContent = 'Copy this key now. It is stored only as a hash and cannot be shown again.';
+  note.textContent = t('keys.copyNow');
 
   const done = document.createElement('button');
   done.className = 'btn btn--primary';
-  done.textContent = 'Done';
+  done.textContent = t('common.done');
   done.addEventListener('click', () => {
     closeModal();
     toast(`Key "${name}" created`);
@@ -1617,12 +1830,17 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') void loadAccount();
 });
 
-/* Kick off: account + catalog in parallel, then the first view. */
+/* Kick off: language, account and catalog in parallel, then the first view. */
 (async () => {
+  // The language comes first: everything rendered below is a translated string, and a
+  // view painted in the wrong language and then repainted is worse than a short wait.
+  await loadLocale(detectLocale());
+  applyStaticText();
+  renderLocaleButton();
   await Promise.all([loadAccount(), loadModels().catch(() => [])]);
   // DeepAI's callback redirects here with ?logged-in=1; confirm it once.
   if (new URLSearchParams(location.search).has('logged-in')) {
-    if (state.account?.signedIn === true) toast('Logged in to DeepAI');
+    if (state.account?.signedIn === true) toast(t('signin.loggedInToast'));
     history.replaceState(null, '', `${location.pathname}${location.hash}`);
   }
   await render({ refreshAccount: false });

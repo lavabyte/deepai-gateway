@@ -6,6 +6,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { openDatabase } from '../src/db.js';
 import {
   generateKey,
@@ -59,6 +60,36 @@ import {
   refreshPrices,
   resetPricing,
 } from '../src/pricing.js';
+
+/*
+ * The client loads its strings from `public/locales/<code>.json`. A stub that answered
+ * every unknown URL with `{ok:true}` would hand `t()` an object with no keys, so every
+ * translated string would render as its key and the text assertions below would fail for
+ * the wrong reason. The real files are served instead.
+ */
+const LOCALE_CODES = ['en', 'pl', 'de', 'es'];
+const LOCALE_PATH = (code) => new URL(`../public/locales/${code}.json`, import.meta.url);
+
+/*
+ * Loaded tolerantly: a missing file is skipped here rather than thrown, so one absent
+ * translation cannot take the whole suite down with it. That it is missing is reported by
+ * the locale check below, which is where a reader would look for it.
+ */
+const LOCALES = {};
+for (const code of LOCALE_CODES) {
+  try {
+    LOCALES[code] = JSON.parse(readFileSync(LOCALE_PATH(code), 'utf8'));
+  } catch {
+    /* reported by the locale check */
+  }
+}
+
+/** A `Response` carrying one language's strings, as the client would receive them. */
+function localeResponse(code = 'en') {
+  return new Response(JSON.stringify(LOCALES[code]), {
+    status: 200, headers: { 'content-type': 'application/json' },
+  });
+}
 
 const results = [];
 function check(name, fn) {
@@ -1897,6 +1928,154 @@ await checkAsync('inactive accounts are forgotten only when a deployment asks fo
   assert.equal(touchAccount(db, 'nobody', now), false);
 });
 
+await checkAsync('every language is complete and agrees on its placeholders', async () => {
+  /*
+   * The translations are data, so the failure mode is silent: a missing key renders as the
+   * key itself, and a translation that drops `{source}` renders a sentence with a hole in
+   * it. Neither shows up as an error at runtime, so both are checked here.
+   */
+  const english = LOCALES.en;
+  assert.ok(english !== undefined, 'the English strings must exist: they are the fallback');
+  assert.ok(Object.keys(english).length > 100, `expected a full set of strings, saw ${Object.keys(english)?.length}`);
+
+  const placeholdersIn = (value) => [...value.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join(',');
+  const tagsIn = (value) => [...value.matchAll(/<\/?([a-z]+)>/g)].map((m) => m[1]).sort().join(',');
+
+  for (const code of LOCALE_CODES) {
+    const strings = LOCALES[code];
+    assert.ok(strings !== undefined, `${code}.json must exist`);
+
+    const missing = Object.keys(english).filter((key) => !(key in strings));
+    const extra = Object.keys(strings).filter((key) => !(key in english));
+    assert.deepEqual(missing, [], `${code}.json is missing keys`);
+    assert.deepEqual(extra, [], `${code}.json has keys English does not`);
+
+    for (const [key, value] of Object.entries(strings)) {
+      assert.equal(typeof value, 'string', `${code}.${key} must be a string`);
+      assert.notEqual(value.trim(), '', `${code}.${key} must not be empty`);
+      // A dropped placeholder is a sentence that renders with a gap; a dropped tag is
+      // markup shown as text.
+      assert.equal(placeholdersIn(value), placeholdersIn(english[key]),
+        `${code}.${key} must keep the same placeholders as English`);
+      assert.equal(tagsIn(value), tagsIn(english[key]),
+        `${code}.${key} must keep the same HTML tags as English`);
+    }
+  }
+
+  // English must not have been translated into itself for any key a translator touched.
+  assert.notEqual(LOCALES.pl['common.cancel'], english['common.cancel'],
+    'a translation must actually differ from English');
+});
+
+await checkAsync('the language switcher offers every language and remembers the choice', async () => {
+  /*
+   * The switcher sits to the right of the theme toggle, shows the active language as a
+   * flag, and opens a menu of all of them. It has to work from the JSON files on disk
+   * rather than from anything baked into the page.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const vm = await import('node:vm');
+  const root = new URL('..', import.meta.url).pathname;
+  const app = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+  const html = readFileSync(join(root, 'public', 'index.html'), 'utf8');
+
+  // The markup: a flag button and its menu, after the theme toggle.
+  assert.match(html, /id="theme-toggle"[\s\S]*id="locale-button"[\s\S]*id="locale-menu"/,
+    'the switcher must come after the theme toggle');
+  assert.match(html, /id="locale-flag"/, 'it shows the active language as a flag');
+  assert.match(html, /id="locale-menu" role="listbox" hidden/, 'the menu starts closed');
+
+  const stored = new Map();
+  const nodes = new Map();
+  const node = () => ({
+    innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
+    dataset: {}, style: {}, value: '', children: [],
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    addEventListener() {}, appendChild(c) { this.children.push(c); },
+    append(...c) { this.children.push(...c); }, remove() {},
+    replaceChildren(...c) { this.children = Array.from(c); },
+    querySelector: (sel) => (sel === '[data-locale]' ? (this.children ?? [])[0] ?? null : null),
+    querySelectorAll: () => [], setAttribute(k, v) { this[k] = v; },
+    getAttribute: (k) => this[k] ?? null, closest: () => null,
+    focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
+  });
+  for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
+    'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button',
+    'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
+
+  const sandbox = {
+    document: {
+      getElementById: (id) => nodes.get(id) ?? null,
+      createElement: () => node(), querySelector: () => null, querySelectorAll: () => [],
+      addEventListener() {}, documentElement: { lang: '', dataset: {} },
+      visibilityState: 'visible', body: node(),
+    },
+    window: {
+      addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }),
+      location: { assign() {} },
+    },
+    location: { search: '', pathname: '/', hash: '' },
+    history: { replaceState() {} },
+    localStorage: {
+      getItem: (k) => stored.get(k) ?? null,
+      setItem: (k, v) => stored.set(k, v),
+      removeItem: (k) => stored.delete(k),
+    },
+    // A Polish browser: the first visit should follow it without being asked.
+    navigator: { language: 'pl-PL', languages: ['pl-PL', 'en'] },
+    fetch: async (url) => {
+      const code = /\/locales\/([a-z]{2})\.json/.exec(String(url))?.[1] ?? 'en';
+      assert.ok(LOCALES[code] !== undefined, `the client asked for ${code}.json`);
+      return localeResponse(code);
+    },
+    setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
+    console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
+    Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
+  };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  new vm.Script(app, { filename: 'app.js' }).runInContext(sandbox);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+
+  // It followed the browser's language, and showed that language's flag.
+  assert.equal(vm.runInContext('state.locale', sandbox), 'pl', 'a Polish browser gets Polish');
+  assert.equal(nodes.get('locale-flag').textContent, '🇵🇱', 'and the Polish flag is shown');
+
+  // Every language is offered, each with its own flag.
+  // Copied into host arrays: `LOCALES` lives in the sandbox's realm, and `deepStrictEqual`
+  // compares realms as well as contents.
+  const options = Array.from(vm.runInContext('LOCALES', sandbox), (entry) => ({ ...entry }));
+  assert.equal(options.length, 4, 'four languages are offered');
+  assert.deepEqual(options.map((o) => o.code), ['en', 'pl', 'de', 'es']);
+
+  // The menu lists all of them: flag and the language's own name, one entry each.
+  vm.runInContext('renderLocaleMenu()', sandbox);
+  const entries = nodes.get('locale-menu').children;
+  assert.equal(entries.length, 4, 'one entry per language');
+  assert.deepEqual(entries.map((e) => e.dataset.locale), ['en', 'pl', 'de', 'es']);
+  const flat = (entry) => {
+    const out = [];
+    const walk = (list) => { for (const child of list) { if (child.textContent) out.push(child.textContent); walk(child.children ?? []); } };
+    walk([entry]);
+    return out;
+  };
+  assert.deepEqual(flat(entries[1]), ['🇵🇱', 'Polski'], 'each entry is a flag and its own name');
+
+  // Switching stores the choice and swaps the strings.
+  await vm.runInContext("setLocale('de')", sandbox);
+  assert.equal(stored.get('deepai-gateway-locale'), 'de', 'the choice is remembered');
+  assert.equal(nodes.get('locale-flag').textContent, '🇩🇪', 'and the flag follows');
+  const german = vm.runInContext("t('common.cancel')", sandbox);
+  assert.equal(german, LOCALES.de['common.cancel'], 'the strings come from the German file');
+  assert.notEqual(german, 'common.cancel', 'and are not left as the key');
+
+  // An unknown language falls back to English rather than to a blank page.
+  assert.equal(vm.runInContext("localeOf('xx').code", sandbox), 'en', 'an unknown code is English');
+  // A missing key is visible as the key, never as an empty string.
+  assert.equal(vm.runInContext("t('nope.missing')", sandbox), 'nope.missing', 'a missing key is visible');
+});
+
 await checkAsync('a malformed cookie cannot take the whole server down', async () => {
   // Regression: `decodeURIComponent` threw inside the session middleware, which
   // runs before every route, so one bad cookie made *every* response a 500 —
@@ -2409,13 +2588,13 @@ await checkAsync('the sign-in card gives one instruction, and it is the one that
       dataset: {}, style: {}, value: '',
       classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
       addEventListener() {}, appendChild() {}, remove() {},
-      replaceChildren(...children) { this.children = children; },
+      replaceChildren(...children) { this.children = Array.from(children); },
       querySelector: () => null, querySelectorAll: () => [], setAttribute() {},
       getAttribute: () => null, closest: () => null, focus() {}, select() {},
       insertAdjacentHTML() {}, scrollIntoView() {},
     });
     for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-      'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle', 'auth-button']) nodes.set(id, node());
+      'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
     const sandbox = {
       document: {
         getElementById: (id) => nodes.get(id) ?? null,
@@ -2426,10 +2605,14 @@ await checkAsync('the sign-in card gives one instruction, and it is the one that
       location: { search: '', pathname: '/', hash: '' },
       history: { replaceState() {} },
       localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
-      fetch: async (url) => new Response(
-        JSON.stringify(String(url).includes('/account') ? account : { ok: true, models: [] }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      ),
+      navigator: { language: 'en-GB', languages: ['en-GB'] },
+      fetch: async (url) => {
+        if (String(url).includes('/locales/')) return localeResponse();
+        return new Response(
+          JSON.stringify(String(url).includes('/account') ? account : { ok: true, models: [] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
       setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
       console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
       Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
@@ -2512,13 +2695,13 @@ await checkAsync('both signed-out screens offer the one route', async () => {
       dataset: {}, style: {}, value: '',
       classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
       addEventListener() {}, appendChild() {}, remove() {},
-      replaceChildren(...children) { this.children = children; },
+      replaceChildren(...children) { this.children = Array.from(children); },
       querySelector: () => null, querySelectorAll: () => [], setAttribute() {},
       getAttribute: () => null, closest: () => null, focus() {}, select() {},
       insertAdjacentHTML() {}, scrollIntoView() {},
     });
     for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-      'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle', 'auth-button']) nodes.set(id, node());
+      'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
     const sandbox = {
       document: {
         getElementById: (id) => nodes.get(id) ?? null,
@@ -2529,10 +2712,14 @@ await checkAsync('both signed-out screens offer the one route', async () => {
       location: { search: '', pathname: '/', hash: '' },
       history: { replaceState() {} },
       localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
-      fetch: async (url) => new Response(
-        JSON.stringify(String(url).includes('/account') ? account : { ok: true, models: [] }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      ),
+      navigator: { language: 'en-GB', languages: ['en-GB'] },
+      fetch: async (url) => {
+        if (String(url).includes('/locales/')) return localeResponse();
+        return new Response(
+          JSON.stringify(String(url).includes('/account') ? account : { ok: true, models: [] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
       setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
       console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
       Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
@@ -2608,13 +2795,13 @@ await checkAsync('nothing asks the visitor through a browser dialog', async () =
     // than the behaviour being checked.
     append(...children) { this.children.push(...children); },
     remove() {}, // `openModal` swaps the body in, so the stub must keep what it is given.
-    replaceChildren(...children) { this.children = children; },
+    replaceChildren(...children) { this.children = Array.from(children); },
     querySelector: () => null, querySelectorAll: () => [],
     setAttribute() {}, getAttribute: () => null, closest: () => null,
     focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
   });
   for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-    'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle', 'auth-button']) nodes.set(id, node());
+    'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
   const sandbox = {
     document: {
       getElementById: (id) => nodes.get(id) ?? null,
@@ -2625,9 +2812,13 @@ await checkAsync('nothing asks the visitor through a browser dialog', async () =
     location: { search: '', pathname: '/', hash: '' },
     history: { replaceState() {} },
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
-    fetch: async () => new Response('{"ok":true,"signedIn":false,"models":[]}', {
-      status: 200, headers: { 'content-type': 'application/json' },
-    }),
+    navigator: { language: 'en-GB', languages: ['en-GB'] },
+    fetch: async (url) => {
+      if (String(url).includes('/locales/')) return localeResponse();
+      return new Response('{"ok":true,"signedIn":false,"models":[]}', {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    },
     setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
     console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
     Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
@@ -2635,6 +2826,8 @@ await checkAsync('nothing asks the visitor through a browser dialog', async () =
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   new vm.Script(source, { filename: 'app.js' }).runInContext(sandbox);
+  // The strings arrive asynchronously; without this the dialog would render its keys.
+  await new Promise((resolve) => setTimeout(resolve, 60));
 
   // Ask, without awaiting: the promise settles when a button is chosen.
   const answer = vm.runInContext(
@@ -2700,13 +2893,13 @@ await checkAsync('the top bar offers log out and never a second way in', async (
       classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
       addEventListener() {}, appendChild(c) { this.children.push(c); },
       append(...c) { this.children.push(...c); }, remove() {},
-      replaceChildren(...c) { this.children = c; },
+      replaceChildren(...c) { this.children = Array.from(c); },
       querySelector: () => null, querySelectorAll: () => [],
       setAttribute() {}, getAttribute: () => null, closest: () => null,
       focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
     });
     for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-      'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button']) nodes.set(id, node());
+      'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
     const sandbox = {
       document: {
         getElementById: (id) => nodes.get(id) ?? null,
@@ -2717,11 +2910,15 @@ await checkAsync('the top bar offers log out and never a second way in', async (
       location: { search: '', pathname: '/', hash: '' },
       history: { replaceState() {} },
       localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      navigator: { language: 'en-GB', languages: ['en-GB'] },
       navigator: {},
-      fetch: async (url) => new Response(
-        JSON.stringify(String(url).includes('/account') ? account : { ok: true, models: [] }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      ),
+      fetch: async (url) => {
+        if (String(url).includes('/locales/')) return localeResponse();
+        return new Response(
+          JSON.stringify(String(url).includes('/account') ? account : { ok: true, models: [] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
       setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
       console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
       Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
@@ -2779,14 +2976,14 @@ await checkAsync('copying a key works on a plain http:// origin', async () => {
       classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
       addEventListener() {}, appendChild(c) { this.children.push(c); },
       append(...c) { this.children.push(...c); }, remove() { this.removed = true; },
-      replaceChildren(...c) { this.children = c; },
+      replaceChildren(...c) { this.children = Array.from(c); },
       querySelector: () => null, querySelectorAll: () => [],
       setAttribute() {}, getAttribute: () => null, closest: () => null,
       focus() {}, select() { this.selected = true; }, insertAdjacentHTML() {}, scrollIntoView() {},
     });
     const nodes = new Map();
     for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-      'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button']) nodes.set(id, node());
+      'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
 
     const range = { selectNodeContents() {}, };
     const selection = { removeAllRanges() {}, addRange(r) { this.range = r; } };
@@ -2806,9 +3003,13 @@ await checkAsync('copying a key works on a plain http:// origin', async () => {
       location: { search: '', pathname: '/', hash: '' },
       history: { replaceState() {} },
       localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
-      fetch: async () => new Response('{"ok":true,"signedIn":false,"models":[]}', {
-        status: 200, headers: { 'content-type': 'application/json' },
-      }),
+      navigator: { language: 'en-GB', languages: ['en-GB'] },
+      fetch: async (url) => {
+        if (String(url).includes('/locales/')) return localeResponse();
+        return new Response('{"ok":true,"signedIn":false,"models":[]}', {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      },
       setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
       console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
       Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
@@ -2877,13 +3078,13 @@ await checkAsync('the catalog loads once a session exists, without a reload', as
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
     addEventListener() {}, appendChild(c) { this.children.push(c); },
     append(...c) { this.children.push(...c); }, remove() {},
-    replaceChildren(...c) { this.children = c; },
+    replaceChildren(...c) { this.children = Array.from(c); },
     querySelector: () => null, querySelectorAll: () => [],
     setAttribute() {}, getAttribute: () => null, closest: () => null,
     focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
   });
   for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-    'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button']) nodes.set(id, node());
+    'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
 
   const emptyTotals = { totalTokens: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, requests: 0, costUsd: 0 };
   const sandbox = {
@@ -2896,8 +3097,10 @@ await checkAsync('the catalog loads once a session exists, without a reload', as
     location: { search: '', pathname: '/', hash: '' },
     history: { replaceState() {} },
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    navigator: { language: 'en-GB', languages: ['en-GB'] },
     fetch: async (url) => {
       const target = String(url);
+      if (target.includes('/locales/')) return localeResponse();
       if (target.includes('/models')) {
         catalogCalls.push(target);
         return new Response(JSON.stringify({ ok: true, models: [{ id: 'm-one' }, { id: 'm-two' }] }),

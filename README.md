@@ -217,6 +217,30 @@ session is an account action like the others.
 Logging out ends this browser's session only. The DeepAI account and its keys stay, so
 another signed-in browser keeps working and signing in again restores the same keys.
 
+### Languages
+
+The dashboard speaks **English, Polish, German and Spanish**. The switcher sits at the
+right of the top bar, next to the theme toggle, and shows the active language as a flag;
+opening it lists every language by flag and by its own name.
+
+The strings live as JSON in `public/locales/<code>.json`, so a translation is a data
+change and never a code change. `en.json` is the complete set and the fallback: a key
+missing from another language renders as English rather than as an empty space, and a key
+missing everywhere renders as the key itself, which makes the gap visible instead of
+silent.
+
+There is no language in the URL and nothing is stored on the server: the choice is kept in
+`localStorage`, and with nothing stored the browser's own preference decides, so a Polish
+visitor gets Polish without touching anything.
+
+The translations are guarded by a test that checks every language against `en.json` for
+the same key set, no empty values, and the same `{placeholders}` and `<tags>` per key — a
+translation that drops `{source}` renders a sentence with a hole in it, which no runtime
+error would ever report.
+
+To add a language: add its entry to `LOCALES` in `public/app.js`, drop its JSON in
+`public/locales/`, and the test will hold it to the same standard as the others.
+
 ### Theme
 
 Light and dark, following the OS by default. An explicit choice from the top-bar
@@ -601,6 +625,7 @@ src/deepai/account.js   key check, owner derivation, account-JSON parsing
 src/deepai/client.js    the two upstream transports
 src/deepai/wire.js      shared headers, SSE parsing, usage normalization
 public/                 dashboard (no framework, no build step)
+public/locales/         UI strings, one JSON per language (en is the fallback)
 ```
 
 Storage is SQLite through Node's built-in `node:sqlite` — no native build step
