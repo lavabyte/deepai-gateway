@@ -1938,8 +1938,16 @@ await checkAsync('every language is complete and agrees on its placeholders', as
   assert.ok(english !== undefined, 'the English strings must exist: they are the fallback');
   assert.ok(Object.keys(english).length > 100, `expected a full set of strings, saw ${Object.keys(english)?.length}`);
 
-  const placeholdersIn = (value) => [...value.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join(',');
-  const tagsIn = (value) => [...value.matchAll(/<\/?([a-z]+)>/g)].map((m) => m[1]).sort().join(',');
+  /*
+   * A value is a string, or — for a phrase whose wording depends on the number — an object
+   * of plural forms. Both are compared as a *set* of placeholders and tags across every
+   * form, because Polish legitimately has more forms than English does.
+   */
+  const formsOf = (value) => (typeof value === 'string' ? [value] : Object.values(value ?? {}));
+  const placeholdersIn = (value) => [...new Set(formsOf(value)
+    .flatMap((form) => [...String(form).matchAll(/\{(\w+)\}/g)].map((m) => m[1])))].sort().join(',');
+  const tagsIn = (value) => [...new Set(formsOf(value)
+    .flatMap((form) => [...String(form).matchAll(/<\/?([a-z]+)>/g)].map((m) => m[1])))].sort().join(',');
 
   for (const code of LOCALE_CODES) {
     const strings = LOCALES[code];
@@ -1951,8 +1959,16 @@ await checkAsync('every language is complete and agrees on its placeholders', as
     assert.deepEqual(extra, [], `${code}.json has keys English does not`);
 
     for (const [key, value] of Object.entries(strings)) {
-      assert.equal(typeof value, 'string', `${code}.${key} must be a string`);
-      assert.notEqual(value.trim(), '', `${code}.${key} must not be empty`);
+      const forms = formsOf(value);
+      assert.ok(forms.length > 0, `${code}.${key} must have at least one form`);
+      assert.ok(
+        forms.every((form) => typeof form === 'string' && form.trim() !== ''),
+        `${code}.${key} must not be empty`,
+      );
+      if (typeof value === 'object') {
+        // A plural entry must carry the fallback every language falls back to.
+        assert.ok(typeof value.other === 'string', `${code}.${key} must have an \`other\` form`);
+      }
       // A dropped placeholder is a sentence that renders with a gap; a dropped tag is
       // markup shown as text.
       assert.equal(placeholdersIn(value), placeholdersIn(english[key]),
@@ -2069,6 +2085,37 @@ await checkAsync('the language switcher offers every language and remembers the 
   const german = vm.runInContext("t('common.cancel')", sandbox);
   assert.equal(german, LOCALES.de['common.cancel'], 'the strings come from the German file');
   assert.notEqual(german, 'common.cancel', 'and are not left as the key');
+
+  /*
+   * Plural selection. English has two forms and Polish has four, chosen by rules rather
+   * than by a count comparison — Polish needs "few" for 2-4 and "many" for 5+, which is
+   * exactly what `Intl.PluralRules` implements. Getting this wrong is invisible in English
+   * and glaring in Polish ("1 żądań" instead of "1 żądanie").
+   */
+  const plural = (code, key, count) => {
+    vm.runInContext(`state.locale = '${code}'; state.strings = ${JSON.stringify(LOCALES[code])};`, sandbox);
+    return vm.runInContext(`counted('${key}', ${count})`, sandbox);
+  };
+
+  assert.equal(plural('en', 'home.sparkTokens', 1), '1 token', 'English singular');
+  assert.equal(plural('en', 'home.sparkTokens', 2), '2 tokens', 'English plural');
+
+  assert.equal(plural('pl', 'home.sparkTokens', 1), '1 token', 'Polish singular');
+  assert.equal(plural('pl', 'home.sparkTokens', 2), '2 tokeny', 'Polish few');
+  assert.equal(plural('pl', 'home.sparkTokens', 5), '5 tokenów', 'Polish many');
+  assert.equal(plural('pl', 'home.sparkRequests', 1), '1 żądanie', 'Polish singular for requests');
+  assert.equal(plural('pl', 'home.sparkRequests', 3), '3 żądania', 'Polish few for requests');
+  assert.equal(plural('pl', 'home.sparkRequests', 12), '12 żądań', 'Polish many for requests');
+
+  // Numbers are formatted the way the language writes them, not the way English does.
+  vm.runInContext(`state.locale = 'de'; state.strings = ${JSON.stringify(LOCALES.de)};`, sandbox);
+  assert.equal(vm.runInContext("counted('home.sparkTokens', 1234)", sandbox), '1.234 Tokens',
+    'German groups thousands with a dot');
+
+  // Without a count there is no form to choose, so the key is returned rather than a guess.
+  vm.runInContext(`state.locale = 'pl'; state.strings = ${JSON.stringify(LOCALES.pl)};`, sandbox);
+  assert.equal(vm.runInContext("t('home.sparkTokens')", sandbox), 'home.sparkTokens',
+    'a plural entry with no count cannot be resolved');
 
   // An unknown language falls back to English rather than to a blank page.
   assert.equal(vm.runInContext("localeOf('xx').code", sandbox), 'en', 'an unknown code is English');

@@ -8,7 +8,11 @@ const view = $('view');
 
 /* ------------------------------------------------------------------- utils */
 
-const numberFormat = new Intl.NumberFormat('en-US');
+/*
+ * Formatted in the active language rather than in `en-US`: a German reader expects
+ * 1.234,5 and a Polish one 1 234,5, and both are decided by the locale.
+ */
+const numberFormat = () => new Intl.NumberFormat(state.locale);
 
 /** Compact token counts: 1234567 → 1.23M */
 function tokens(value) {
@@ -20,21 +24,27 @@ function tokens(value) {
 
 /** Exact count with separators. */
 function exact(value) {
-  return numberFormat.format(Number(value) || 0);
+  return numberFormat().format(Number(value) || 0);
 }
 
-/** Relative time: "just now", "4m ago", "3d ago". */
+/**
+ * Relative time: "just now", "4m ago", "3d ago".
+ *
+ * The unit letters are translated and the number is formatted in the active language, so
+ * the whole phrase reads naturally rather than as an English skeleton with a number in it.
+ */
 function ago(ms) {
   if (!ms) return '—';
   const delta = Date.now() - Number(ms);
-  if (delta < 45_000) return 'just now';
+  const n = (value) => numberFormat().format(value);
+  if (delta < 45_000) return t('time.justNow');
   const minutes = Math.floor(delta / 60_000);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return t('time.minutesAgo', { count: n(minutes) });
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return t('time.hoursAgo', { count: n(hours) });
   const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(Number(ms)).toLocaleDateString();
+  if (days < 30) return t('time.daysAgo', { count: n(days) });
+  return new Date(Number(ms)).toLocaleDateString(state.locale);
 }
 
 /** Absolute local date-time. */
@@ -90,10 +100,10 @@ async function api(path, options = {}) {
   try {
     json = text === '' ? {} : JSON.parse(text);
   } catch {
-    throw new ApiError(`Unexpected non-JSON answer (HTTP ${response.status})`, response.status);
+    throw new ApiError(t('error.unexpectedAnswer', { status: response.status }), response.status);
   }
   if (!response.ok || json.ok === false) {
-    throw new ApiError(json.error ?? `HTTP ${response.status}`, response.status);
+    throw new ApiError(json.error ?? t('error.http', { status: response.status }), response.status);
   }
   return json;
 }
@@ -187,7 +197,7 @@ async function signInWithProfile() {
     toast(String(error.message ?? error), 'error');
     if (button) {
       button.disabled = false;
-      button.textContent = label ?? 'Log In';
+      button.textContent = label ?? t('common.logIn');
     }
     field?.focus();
     field?.select();
@@ -305,7 +315,7 @@ function openModal(title, bodyNode, onClose) {
  * @param {boolean} [options.danger] - style the button as destructive.
  * @returns {Promise<boolean>} whether the visitor confirmed.
  */
-function confirmAction({ title, lines, confirmLabel = 'Confirm', danger = false }) {
+function confirmAction({ title, lines, confirmLabel = t('common.confirm'), danger = false }) {
   return new Promise((resolve) => {
     const body = document.createElement('div');
     body.className = 'stack';
@@ -627,7 +637,7 @@ async function loadLocale(code) {
     // English is the one language that must always work: it is the fallback every other
     // language falls back to, so a broken file cannot be allowed to empty the dashboard.
     if (entry.code !== 'en') {
-      toast(`Could not load ${entry.label}: ${error?.message ?? error}`, 'error');
+      toast(t('error.locale', { name: entry.label, message: error?.message ?? error }), 'error');
       if (state.locale !== 'en') await loadLocale('en');
     }
     return false;
@@ -645,13 +655,50 @@ async function loadLocale(code) {
  * @returns {string} the translation, the key itself when it is missing, so a gap is
  *   visible rather than silently blank.
  */
-function t(key, params) {
-  const value = state.strings[key];
-  if (typeof value !== 'string') return key;
+/**
+ * One counted phrase.
+ *
+ * A phrase whose wording depends on the number needs both the number — so the language's
+ * plural rule can pick a form — and the formatted text, so the digits read the way that
+ * language writes them. Passing them together keeps every call site to one line.
+ *
+ * @param {string} key
+ * @param {number} value
+ * @returns {string}
+ */
+function counted(key, value) {
+  return t(key, { count: value, formatted: exact(value) });
+}
+
+/** Fill `{name}` placeholders from `params`. */
+function fill(value, params) {
   if (params === undefined) return value;
   return value.replace(/\{(\w+)\}/g, (match, name) => (
     params[name] === undefined ? match : String(params[name])
   ));
+}
+
+function t(key, params) {
+  const value = state.strings[key];
+  if (typeof value === 'string') return fill(value, params);
+
+  /*
+   * A plural entry is an object of forms — `{ one, few, many, other }` — chosen by the
+   * language's own rules rather than by a count comparison, because the rules differ:
+   * Polish has a "few" for 2–4 that English does not, and it also needs "many" for 5+.
+   * `Intl.PluralRules` is the browser's own implementation of exactly that.
+   *
+   * A language may supply only the forms it needs; `other` is the fallback, and English
+   * is guaranteed to have it.
+   */
+  if (value !== null && typeof value === 'object') {
+    const count = Number(params?.count);
+    if (!Number.isFinite(count)) return key;
+    const form = new Intl.PluralRules(state.locale).select(count);
+    const chosen = value[form] ?? value.other;
+    return typeof chosen === 'string' ? fill(chosen, params) : key;
+  }
+  return key;
 }
 
 /** Re-apply translations to the static shell. */
@@ -876,7 +923,7 @@ function sparkline(daily) {
         const height = Math.max(2, Math.round((day.tokens / max) * 44));
         const isPeak = day === peak && peak.tokens > 0;
         return `<div class="spark__bar" data-peak="${isPeak}" style="height:${height}px"
-          title="${esc(day.label)} · ${t('home.sparkPoint', { tokens: exact(day.tokens), requests: exact(day.requests) })}"></div>`;
+          title="${esc(day.label)} · ${counted('home.sparkTokens', day.tokens)} · ${counted('home.sparkRequests', day.requests)}"></div>`;
       }).join('')}
     </div>`;
 }
@@ -892,7 +939,7 @@ function modelUsageRows(models, emptyText) {
     <tr>
       <td>
         <div class="model-row__name truncate">${esc(model.model)}</div>
-        <div class="tiny muted">last used ${esc(ago(model.lastUsedAt))}</div>
+        <div class="tiny muted">${esc(t('models.lastUsed', { when: ago(model.lastUsedAt) }))}</div>
       </td>
       <td class="num">${exact(model.requests)}</td>
       <td class="num">${exact(model.totalTokens)}</td>
@@ -973,9 +1020,9 @@ function accountCard() {
       <div class="row row--between">
         <div>
           <div class="card__title">${t('account.title')}</div>
-          <div class="card__sub">Logged in as ${esc(accountName(account))}${account.isPro ? ' · Pro' : ''}</div>
+          <div class="card__sub">${t('account.loggedInAs', { name: accountName(account) })}${account.isPro ? t('account.pro') : ''}</div>
         </div>
-        <span class="badge ${account.balanceLow ? 'badge--amber' : 'badge--green'}"><span class="dot"></span>${account.balanceLow ? 'Low balance' : 'Active'}</span>
+        <span class="badge ${account.balanceLow ? 'badge--amber' : 'badge--green'}"><span class="dot"></span>${account.balanceLow ? t('account.lowBalance') : t('account.active')}</span>
       </div>
       ${allowance && allowance.balance !== null ? `
         <div class="mt-3">
@@ -984,7 +1031,7 @@ function accountCard() {
             <span class="mono">${esc(allowance.balance)} / ${esc(allowance.granted ?? '—')}</span>
           </div>
           ${pct !== undefined ? `<div class="bar mt-2"><div class="bar__fill ${account.balanceLow ? 'bar__fill--warn' : ''}" style="width:${pct}%"></div></div>` : ''}
-          <div class="tiny muted mt-2">Resets ${esc(allowance.refreshAt ? when(Date.parse(allowance.refreshAt)) : '—')}</div>
+          <div class="tiny muted mt-2">${t('account.resets', { when: allowance.refreshAt ? when(Date.parse(allowance.refreshAt)) : '—' })}</div>
         </div>` : ''}
       <div class="row mt-3 row--wrap">
         <button class="btn btn--secondary btn--sm" id="refresh-allowance">${t('account.refresh')}</button>
@@ -993,8 +1040,7 @@ function accountCard() {
         <span class="tiny muted">${esc(keyQuotaLabel(account.keyQuota))}</span>
       </div>
       <div class="tiny muted mt-2">
-        This browser's session ends ${esc(account.sessionExpiresAt ? when(account.sessionExpiresAt) : 'never')}.
-        Logging out ends only this session; the DeepAI account and its keys stay, so other browsers keep working.
+        ${t('account.sessionNote', { when: account.sessionExpiresAt ? when(account.sessionExpiresAt) : t('common.never') })}
       </div>
       <div class="tiny muted mt-2" id="auth-events"></div>
     </div>`;
@@ -1003,7 +1049,7 @@ function accountCard() {
 /** One-line summary of the key quota. */
 function keyQuotaLabel(quota) {
   if (quota === undefined || quota === null) return '';
-  return `${quota.used} of ${quota.max} API keys used`;
+  return t('account.keysUsed', { used: exact(quota.used), max: exact(quota.max) });
 }
 
 /** Fill the small auth-event list inside the account card. */
@@ -1016,9 +1062,11 @@ async function loadAuthEvents() {
       target.textContent = '';
       return;
     }
-    target.innerHTML = `Last activity: ${events
-      .map((event) => `${esc(event.event)} ${esc(ago(event.createdAt))}`)
-      .join(' · ')}`;
+    target.innerHTML = esc(t('account.lastActivity', {
+      // The server names its own events; each is labelled here so the trail reads in the
+      // visitor's language rather than in the vocabulary of the database.
+      events: events.map((event) => `${t(`authEvent.${event.event}`)} ${ago(event.createdAt)}`).join(' · '),
+    }));
   } catch {
     target.textContent = '';
   }
@@ -1059,9 +1107,9 @@ function savingsCard(savings) {
         <div class="row" style="gap:8px">
           <span class="badge ${live ? 'badge--green' : 'badge--amber'}"
                 title="${esc(live ? t('pricing.live') : t('pricing.bundled', { source: pricing.source ?? 'bundled' }))}">
-            <span class="dot"></span>${live ? 'Live rates' : 'Cached rates'}
+            <span class="dot"></span>${live ? t('pricing.liveRates') : t('pricing.cachedRates')}
           </span>
-          <span class="badge badge--gray">${esc(usd(month.usd))} this month</span>
+          <span class="badge badge--gray">${esc(t('home.monthThisMonth', { amount: usd(month.usd) }))}</span>
         </div>
       </div>
 
@@ -1090,11 +1138,9 @@ function savingsCard(savings) {
 
       <div class="row row--between mt-3">
         <p class="tiny muted" style="margin:0;max-width:70ch">
-          Priced against published OpenRouter rates, fetched ${esc(asOf)}.
-          ${unpriced.length > 0
-            ? `Not priced: ${unpriced.map((model) => esc(model)).join(', ')} (no public equivalent).`
-            : ''}
-          Cache reads and writes use each model's own cache rate where one is published.
+          ${esc(t('pricing.pricedAgainst', { when: asOf }))}
+          ${unpriced.length > 0 ? esc(t('pricing.notPriced', { models: unpriced.join(', ') })) : ''}
+          ${esc(t('pricing.cacheNote'))}
         </p>
         <button class="btn btn--secondary btn--sm" id="refresh-pricing">${t('pricing.refresh')}</button>
       </div>
@@ -1112,8 +1158,8 @@ function wireAccountCard(rerender) {
     button.textContent = t('pricing.refreshing');
     try {
       const result = await api('/account/refresh', { method: 'POST' });
-      if (result.ok) toast(`Balance: ${result.allowance.balance} Credits`);
-      else toast(result.error ?? 'Could not refresh', 'error');
+      if (result.ok) toast(t('account.balanceToast', { amount: result.allowance.balance }));
+      else toast(result.error ?? t('error.refresh'), 'error');
     } catch (error) {
       toast(String(error.message ?? error), 'error');
     }
@@ -1125,13 +1171,13 @@ function wireAccountCard(rerender) {
   $('forget-account')?.addEventListener('click', async () => {
     const username = accountName(state.account);
     const confirmed = await confirmAction({
-      title: 'Remove this account?',
+      title: t('account.removeTitle'),
       lines: [
-        `“${username}” will be removed from this gateway.`,
-        'Its API keys are deleted and its DeepAI credential is forgotten, so anything using those keys stops working.',
-        'Usage history is kept. This cannot be undone.',
+        t('account.removeLine1', { name: username }),
+        t('account.removeLine2'),
+        t('account.removeLine3'),
       ],
-      confirmLabel: 'Remove account',
+      confirmLabel: t('account.removeConfirm'),
       danger: true,
     });
     if (!confirmed) return;
@@ -1160,7 +1206,7 @@ async function renderHome() {
       await loadAccount();
       if (needsLogin()) return;
     }
-    view.innerHTML = `<div class="note note--error">Could not load usage: ${esc(error.message)}</div>`;
+    view.innerHTML = `<div class="note note--error">${esc(t('error.usage', { message: error.message }))}</div>`;
     return;
   }
   const recent = await api('/usage/recent?limit=20').catch(() => ({ requests: [] }));
@@ -1177,28 +1223,28 @@ async function renderHome() {
     <div class="stack">
       <div class="grid grid--4">
         ${metricCard({
-          eyebrow: 'Tokens this month',
+          eyebrow: t('metric.tokensThisMonth'),
           value: tokens(month.totalTokens),
-          label: 'Total tokens across all keys',
-          foot: `${exact(month.requests)} requests · ${exact(month.failedRequests)} failed`,
+          label: t('metric.tokensThisMonthFoot'),
+          foot: `${counted('metric.requestsCount', month.requests)} · ${counted('metric.failedCount', month.failedRequests)}`,
         })}
         ${metricCard({
-          eyebrow: 'Tokens today',
+          eyebrow: t('metric.tokensToday'),
           value: tokens(today.totalTokens),
-          label: 'Since local midnight',
-          foot: `${exact(today.requests)} requests · ${exact(today.failedRequests)} failed`,
+          label: t('metric.tokensTodayFoot'),
+          foot: `${counted('metric.requestsCount', today.requests)} · ${counted('metric.failedCount', today.failedRequests)}`,
         })}
         ${metricCard({
           eyebrow: t('metric.allTime'),
           value: tokens(all.totalTokens),
-          label: 'Every request recorded',
-          foot: `${exact(all.requests)} requests · avg ${esc(duration(all.avgDurationMs))}`,
+          label: t('metric.allTimeFoot'),
+          foot: `${counted('metric.requestsCount', all.requests)} · ${t('metric.averageDuration', { duration: duration(all.avgDurationMs) })}`,
         })}
         ${metricCard({
-          eyebrow: 'Cache reads',
+          eyebrow: t('metric.cacheReads'),
           value: tokens(month.cacheReadTokens),
-          label: 'Input tokens served from cache this month',
-          foot: `reasoning ${exact(month.reasoningTokens)} · cache writes ${exact(month.cacheWriteTokens)}`,
+          label: t('metric.cacheReadsFoot'),
+          foot: t('metric.cacheDetail', { reasoning: exact(month.reasoningTokens), writes: exact(month.cacheWriteTokens) }),
         })}
       </div>
 
@@ -1212,14 +1258,14 @@ async function renderHome() {
                 <div class="card__title">${t('home.byModel')}</div>
                 <div class="card__sub">${t('home.byModelSub')}</div>
               </div>
-              <span class="badge badge--gray">${modelsUsedMonth.length} active</span>
+              <span class="badge badge--gray">${counted('home.modelsActive', modelsUsedMonth.length)}</span>
             </div>
             <div class="table-wrap">
               <table class="table">
                 <thead><tr>
                   <th>${t('metric.model')}</th><th class="num">${t('metric.requests')}</th><th class="num">${t('metric.tokens')}</th><th></th>
                 </tr></thead>
-                <tbody>${modelUsageRows(data.modelsMonth, 'Models appear here once a request uses them.')}</tbody>
+                <tbody>${modelUsageRows(data.modelsMonth, t('home.modelsEmpty'))}</tbody>
               </table>
             </div>
           </div>
@@ -1283,7 +1329,9 @@ async function renderHome() {
     button.textContent = t('pricing.refreshing');
     try {
       const result = await api('/pricing/refresh', { method: 'POST' });
-      toast(result.ok ? `Rates refreshed (${result.matched.length} models)` : `Refresh failed: ${result.error}`, result.ok ? 'ok' : 'error');
+      toast(result.ok
+        ? t('error.ratesRefreshed', { count: result.matched.length })
+        : t('error.ratesFailed', { message: result.error }), result.ok ? 'ok' : 'error');
     } catch (error) {
       toast(String(error.message ?? error), 'error');
     }
@@ -1299,7 +1347,7 @@ async function renderModels() {
   try {
     payload = await api('/models');
   } catch (error) {
-    view.innerHTML = `<div class="note note--error">Could not load models: ${esc(error.message)}</div>`;
+    view.innerHTML = `<div class="note note--error">${esc(t('error.models', { message: error.message }))}</div>`;
     return;
   }
   const models = payload.models ?? [];
@@ -1335,8 +1383,8 @@ async function renderModels() {
 
     <div class="stack">
       <div class="grid grid--3">
-        ${metricCard({ eyebrow: 'Catalog', value: String(models.length), label: 'Models available' })}
-        ${metricCard({ eyebrow: 'Free tier', value: String(free.length), label: 'Unmetered models' })}
+        ${metricCard({ eyebrow: t('metric.catalog'), value: String(models.length), label: t('metric.modelsAvailable') })}
+        ${metricCard({ eyebrow: t('metric.freeTier'), value: String(free.length), label: t('metric.unmeteredModels') })}
         ${metricCard({ eyebrow: t('common.premium'), value: String(premier.length), label: t('common.billedInCredits') })}
       </div>
 
@@ -1362,10 +1410,7 @@ async function renderModels() {
       <div class="card">
         <div class="eyebrow">${t('models.howBilling')}</div>
         <p class="muted mt-2" style="font-size:13px;max-width:78ch">
-          Free models cost nothing and are marked <strong>${t('common.free')}</strong> in the picker. Premium models are charged in
-          Credits per second of generation, at a rate that depends on the thinking level — <code>high</code> is the
-          cheapest per second because the model works longer but at a lower rate. The balance shown on the overview
-          page is the account allowance reported by DeepAI.
+          ${t('models.billing')}
         </p>
       </div>
     </div>`;
@@ -1390,7 +1435,7 @@ async function renderKeys() {
       await loadAccount();
       if (needsLogin()) return;
     }
-    view.innerHTML = `<div class="note note--error">Could not load keys: ${esc(error.message)}</div>`;
+    view.innerHTML = `<div class="note note--error">${esc(t('error.keys', { message: error.message }))}</div>`;
     return;
   }
   const keys = payload.keys ?? [];
@@ -1411,7 +1456,9 @@ async function renderKeys() {
         <div class="bar mt-2"><div class="bar__fill ${pct >= 100 ? 'bar__fill--over' : pct >= 80 ? 'bar__fill--warn' : ''}" style="width:${pct}%"></div></div>`);
     }
     if (parts.length === 0) return `<span class="tiny muted">${t('common.unlimited')}</span>`;
-    const windowLabel = key.limitWindow === 'total' ? 'in total' : `per ${esc(key.limitWindow)}`;
+    const windowLabel = key.limitWindow === 'total'
+      ? t('metric.inTotal')
+      : t('metric.perWindow', { window: t(`window.${key.limitWindow}`) });
     return `${parts.join('')}<div class="tiny muted mt-2">${windowLabel}</div>`;
   };
 
@@ -1419,13 +1466,14 @@ async function renderKeys() {
     const map = {
       active: 'badge--green', limited: 'badge--amber', expired: 'badge--amber', revoked: 'badge--red',
     };
-    return `<span class="badge ${map[status] ?? 'badge--gray'}"><span class="dot"></span>${esc(status)}</span>`;
+    // The status comes from the server as a stable code; the label is translated here.
+    return `<span class="badge ${map[status] ?? 'badge--gray'}"><span class="dot"></span>${esc(t(`status.${status}`))}</span>`;
   };
 
   const modelCell = (key) => {
     if (key.modelsRestricted !== true) return `<span class="tiny muted">${t('common.allModels')}</span>`;
     if (key.allowedModels.length === 0) return `<span class="badge badge--red">${t('common.none')}</span>`;
-    return `<span class="tiny muted">${key.allowedModels.length} allowed</span>`;
+    return `<span class="tiny muted">${counted('metric.allowed', key.allowedModels.length)}</span>`;
   };
 
   const row = (key) => `
@@ -1461,7 +1509,7 @@ async function renderKeys() {
       </div>
 
       ${quota.atLimit
-        ? `<div class="note note--warning">This account holds the maximum of ${quota.max} keys. Revoke one to create another.</div>`
+        ? `<div class="note note--warning">${t('keys.maxReached', { max: exact(quota.max) })}</div>`
         : ''}
 
       <div class="card card--flush">
@@ -1710,7 +1758,7 @@ function openKeyModal(existing, onDone) {
     actions,
   );
 
-  openModal(existing ? 'Edit API key' : 'Create API key', form);
+  openModal(existing ? t('keys.editTitle') : t('keys.createTitle'), form);
 
   submit.addEventListener('click', async () => {
     error.hidden = true;
@@ -1766,7 +1814,7 @@ function showCreatedKey(plaintext, name, onDone) {
   done.textContent = t('common.done');
   done.addEventListener('click', () => {
     closeModal();
-    toast(`Key "${name}" created`);
+    toast(t('keys.createdTitle', { name }));
     onDone();
   });
 
@@ -1776,7 +1824,7 @@ function showCreatedKey(plaintext, name, onDone) {
   actions.appendChild(done);
 
   wrap.append(note, snippet(plaintext), actions);
-  openModal(`Key "${name}" created`, wrap);
+  openModal(t('keys.createdTitle', { name }), wrap);
 }
 
 /* ------------------------------------------------------------------ router */

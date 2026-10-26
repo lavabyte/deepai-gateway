@@ -233,10 +233,17 @@ There is no language in the URL and nothing is stored on the server: the choice 
 `localStorage`, and with nothing stored the browser's own preference decides, so a Polish
 visitor gets Polish without touching anything.
 
+A phrase whose wording depends on a number is stored as an object of plural forms rather
+than as one string, and the form is chosen by `Intl.PluralRules` for the active language —
+not by comparing the count. That matters because the rules differ: English has two forms
+and Polish has four, so the same key is `{one, other}` in `en.json` and
+`{one, few, many, other}` in `pl.json`. Without it, Polish shows "1 żądań" instead of
+"1 żądanie". Numbers are formatted per language too, so a German reader sees `1.234`.
+
 The translations are guarded by a test that checks every language against `en.json` for
-the same key set, no empty values, and the same `{placeholders}` and `<tags>` per key — a
-translation that drops `{source}` renders a sentence with a hole in it, which no runtime
-error would ever report.
+the same key set, no empty values, the same `{placeholders}` and `<tags>` per key, and an
+`other` form on every plural entry — a translation that drops `{source}` renders a
+sentence with a hole in it, which no runtime error would ever report.
 
 To add a language: add its entry to `LOCALES` in `public/app.js`, drop its JSON in
 `public/locales/`, and the test will hold it to the same standard as the others.
