@@ -56,7 +56,7 @@ function entry(id, name, options = {}) {
     maxTokens: options.maxTokens ?? 32768,
     premier: options.premier === true,
     api: options.api ?? 'openai-completions',
-    theosPerSecond: Object.freeze(rates),
+    creditsPerSecond: Object.freeze(rates),
   });
 }
 
@@ -68,13 +68,13 @@ export function displayName(model) {
   return model.premier === false ? `${model.name} Free` : model.name;
 }
 
-/** Theos per minute at one thinking level, or `Unmetered` when free. */
+/** Credits per minute at one thinking level, or `Unmetered` when free. */
 export function rateLabel(model, level = 'none') {
-  const raw = model.theosPerSecond?.[level] ?? model.theosPerSecond?.none;
+  const raw = model.creditsPerSecond?.[level] ?? model.creditsPerSecond?.none;
   const value = Number(raw);
   if (!Number.isFinite(value)) return 'Unknown';
   if (value === 0) return 'Unmetered';
-  return `${Math.round(value * 600) / 10} Theos/min`;
+  return `${Math.round(value * 600) / 10} Credits/min`;
 }
 
 /** Last successfully loaded catalog, if any. */
@@ -100,8 +100,8 @@ function normalize(raw, fallback) {
     : [];
   const rates = {};
   for (const level of LEVELS) {
-    const value = raw.theosPerSecond?.[level];
-    rates[level] = typeof value === 'string' ? value : (fallback?.theosPerSecond?.[level] ?? '0');
+    const value = raw.creditsPerSecond?.[level];
+    rates[level] = typeof value === 'string' ? value : (fallback?.creditsPerSecond?.[level] ?? '0');
   }
   return {
     id: raw.id,
@@ -116,7 +116,7 @@ function normalize(raw, fallback) {
       : (fallback?.maxTokens ?? 32768),
     premier: raw.premier === true,
     api: typeof raw.api === 'string' && raw.api !== '' ? raw.api : 'openai-completions',
-    theosPerSecond: rates,
+    creditsPerSecond: rates,
   };
 }
 
@@ -167,7 +167,7 @@ export function prefetchCatalog() {
 
 /** Shape one model for the JSON API. */
 export function publicModel(model) {
-  const rates = { ...model.theosPerSecond };
+  const rates = { ...model.creditsPerSecond };
   return {
     id: model.id,
     name: model.name,
@@ -186,11 +186,11 @@ export function publicModel(model) {
     reasoningLevels: model.reasoning
       ? REASONING_LEVELS.map((level) => ({
           ...level,
-          theosPerSecond: rates[level.id] ?? '0',
+          creditsPerSecond: rates[level.id] ?? '0',
           rateLabel: rateLabel(model, level.id),
         }))
       : [],
-    theosPerSecond: rates,
+    creditsPerSecond: rates,
     rateLabel: rateLabel(model, 'none'),
     // A ready-made one-liner for pickers and listings.
     description: `${model.premier ? 'Premier' : 'Free'} tier · ${model.contextWindow.toLocaleString('en-US')}-token context · up to ${model.maxTokens.toLocaleString('en-US')} output tokens`,

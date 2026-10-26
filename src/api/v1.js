@@ -69,7 +69,7 @@ export function v1Router(db) {
           max_output_tokens: model.maxTokens,
           api: model.api,
           // Pricing, per thinking level
-          theos_per_second: { ...model.theosPerSecond },
+          credits_per_second: { ...model.creditsPerSecond },
           rate_label: rateLabel(model, 'none'),
         })),
       });

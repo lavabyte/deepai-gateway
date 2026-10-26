@@ -530,6 +530,7 @@ prefersDark.addEventListener('change', () => {
   if (localStorage.getItem(THEME_KEY) === null) applyTheme('system');
 });
 
+$('auth-button').addEventListener('click', () => { void onAuthButton(); });
 $('theme-toggle').addEventListener('click', () => {
   applyTheme(effectiveTheme() === 'dark' ? 'light' : 'dark');
 });
@@ -569,24 +570,38 @@ function accountName(account) {
 function renderAccountBadge() {
   const badge = $('account-badge');
   const text = $('account-badge-text');
+  const button = $('auth-button');
   const account = state.account;
 
   if (account === undefined) {
     badge.className = 'badge badge--gray';
     text.textContent = 'Checking…';
+    button.hidden = true;
     return;
   }
 
+  /*
+   * The control appears only when it has something to do. Signed out there is nothing:
+   * the overview *is* the sign-in form, so a "Log in" button beside it was a second door
+   * to the same room. Signed in it is the way out, and it stays in the top bar where the
+   * visitor last saw it.
+   */
+  button.hidden = !account.signedIn;
   if (account.signedIn) {
     badge.className = account.balanceLow ? 'badge badge--amber' : 'badge badge--green';
     const balance = account.allowance?.balance;
     text.textContent = balance
-      ? `${accountName(account)} · ${balance} Theos`
+      ? `${accountName(account)} · ${balance} Credits`
       : accountName(account);
   } else {
     badge.className = 'badge badge--red';
     text.textContent = 'Logged out';
   }
+}
+
+/** The top-bar action: log out. */
+async function onAuthButton() {
+  if (state.account?.signedIn === true) await logOutEverywhere();
 }
 
 /** Log out and repaint the current view. */
@@ -698,7 +713,7 @@ function requestRows(requests, showKey = true) {
         <span class="row" style="gap:6px">
           <span class="truncate">${esc(item.model)}</span>
           ${premium === true
-            ? '<span class="badge badge--violet" title="Billed in Theos">Premium</span>'
+            ? '<span class="badge badge--violet" title="Billed in Credits">Premium</span>'
             : premium === false
               ? '<span class="badge badge--gray" title="Unmetered">Free</span>'
               : ''}
@@ -752,7 +767,7 @@ function accountCard() {
       ${allowance && allowance.balance !== null ? `
         <div class="mt-3">
           <div class="row row--between tiny muted">
-            <span>Theos balance</span>
+            <span>Credits balance</span>
             <span class="mono">${esc(allowance.balance)} / ${esc(allowance.granted ?? '—')}</span>
           </div>
           ${pct !== undefined ? `<div class="bar mt-2"><div class="bar__fill ${account.balanceLow ? 'bar__fill--warn' : ''}" style="width:${pct}%"></div></div>` : ''}
@@ -760,7 +775,6 @@ function accountCard() {
         </div>` : ''}
       <div class="row mt-3 row--wrap">
         <button class="btn btn--secondary btn--sm" id="refresh-allowance">Refresh balance</button>
-        <button class="btn btn--secondary btn--sm" id="log-out">Log out</button>
         <button class="btn btn--ghost btn--sm" id="forget-account">Forget this account</button>
         <span class="spacer"></span>
         <span class="tiny muted">${esc(keyQuotaLabel(account.keyQuota))}</span>
@@ -885,7 +899,7 @@ function wireAccountCard(rerender) {
     button.textContent = 'Refreshing…';
     try {
       const result = await api('/account/refresh', { method: 'POST' });
-      if (result.ok) toast(`Balance: ${result.allowance.balance} Theos`);
+      if (result.ok) toast(`Balance: ${result.allowance.balance} Credits`);
       else toast(result.error ?? 'Could not refresh', 'error');
     } catch (error) {
       toast(String(error.message ?? error), 'error');
@@ -893,12 +907,6 @@ function wireAccountCard(rerender) {
     await loadAccount();
     rerender();
   });
-
-  // Logging out ends this browser's session only; it is not destructive, so it needs no
-  // confirmation. It lives here rather than in the top bar, which now holds only the badge
-  // and the theme toggle — a "Log in" button beside a sign-in form was a second door to
-  // the same room.
-  $('log-out')?.addEventListener('click', () => void logOutEverywhere());
 
   // Removing the account is destructive, so it gets its own confirm step.
   $('forget-account')?.addEventListener('click', async () => {
@@ -1109,14 +1117,14 @@ async function renderModels() {
   view.innerHTML = `
     <div class="page__head">
       <h1 class="page__title">Models</h1>
-      <p class="page__sub">The DeepAI Code catalog. Free models are unmetered; Premium models draw on your Theos balance per second of generation. Rates shown are for the default thinking level.</p>
+      <p class="page__sub">The DeepAI Code catalog. Free models are unmetered; Premium models draw on your Credits balance per second of generation. Rates shown are for the default thinking level.</p>
     </div>
 
     <div class="stack">
       <div class="grid grid--3">
         ${metricCard({ eyebrow: 'Catalog', value: String(models.length), label: 'Models available' })}
         ${metricCard({ eyebrow: 'Free tier', value: String(free.length), label: 'Unmetered models' })}
-        ${metricCard({ eyebrow: 'Premium', value: String(premier.length), label: 'Billed in Theos' })}
+        ${metricCard({ eyebrow: 'Premium', value: String(premier.length), label: 'Billed in Credits' })}
       </div>
 
       <div class="card card--flush">
@@ -1142,7 +1150,7 @@ async function renderModels() {
         <div class="eyebrow">How billing works</div>
         <p class="muted mt-2" style="font-size:13px;max-width:78ch">
           Free models cost nothing and are marked <strong>Free</strong> in the picker. Premium models are charged in
-          Theos per second of generation, at a rate that depends on the thinking level — <code>high</code> is the
+          Credits per second of generation, at a rate that depends on the thinking level — <code>high</code> is the
           cheapest per second because the model works longer but at a lower rate. The balance shown on the overview
           page is the account allowance reported by DeepAI.
         </p>
@@ -1389,7 +1397,7 @@ function openKeyModal(existing, onDone) {
     pill.type = 'button';
     pill.className = 'pill';
     pill.textContent = model.displayName ?? model.id;
-    pill.title = model.premier ? 'Premium — billed in Theos' : 'Free — unmetered';
+    pill.title = model.premier ? 'Premium — billed in Credits' : 'Free — unmetered';
     pill.dataset.on = String(selected.has(model.id));
     pill.addEventListener('click', () => {
       // Touching any pill means an explicit list, not "every model".

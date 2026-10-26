@@ -16,6 +16,7 @@ import {
   clearSessionCookie,
   sessionAccount,
   tokenFromCookie,
+  touchAccount,
 } from '../store.js';
 
 /**
@@ -33,6 +34,9 @@ export function attachSession(db, options = {}) {
     const token = tokenFromCookie(cookieHeader);
     req.sessionToken = token;
     req.account = token === undefined ? undefined : sessionAccount(db, token);
+    // Opening the dashboard is the account being used. Throttled inside `touchAccount`,
+    // so this is not a write per request.
+    if (req.account !== undefined) touchAccount(db, req.account.username);
     // An expired or revoked cookie is cleared so the browser stops sending it.
     if (token !== undefined && req.account === undefined) {
       res.append('set-cookie', clearSessionCookie());

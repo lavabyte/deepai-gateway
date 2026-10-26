@@ -11,7 +11,7 @@
 
 import { allowsModel, hashKey, isUsable, overLimit } from '../keys.js';
 import { keyUsage } from '../usage.js';
-import { readAccount } from '../store.js';
+import { readAccount, touchAccount } from '../store.js';
 
 /** Pull a gateway key out of the request headers. */
 export function keyFromRequest(req) {
@@ -81,6 +81,12 @@ export function authenticate(db) {
     req.gatewayKey = row;
     req.gatewayKeyUsage = usage;
     touchKey.run(Date.now(), row.id);
+    /*
+     * Traffic through a key is the account being used, so it counts as activity for the
+     * inactivity sweep. Without this an account whose owner never opens the dashboard but
+     * whose key serves requests every day would look abandoned. Throttled inside.
+     */
+    touchAccount(db, row.owner_username);
     next();
   };
 }

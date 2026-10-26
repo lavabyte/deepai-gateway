@@ -21,7 +21,7 @@ import { initPricing, pricingStatus, startPricingRefresh } from './src/pricing.j
 import { v1Router } from './src/api/v1.js';
 import { prefetchCatalog } from './src/deepai/catalog.js';
 import { attachSession } from './src/middleware/session.js';
-import { listAccounts, clearSessionCookie, destroySession, recordAuthEvent } from './src/store.js';
+import { listAccounts, clearSessionCookie, destroySession, forgetInactiveAccounts, recordAuthEvent } from './src/store.js';
 import { totalKeyCount } from './src/keys.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -36,7 +36,30 @@ export function config(env = process.env) {
     logRequests: env.LOG_REQUESTS !== '0',
     // Trust `X-Forwarded-*` and mark cookies `Secure` when behind TLS.
     trustProxy: env.TRUST_PROXY === '1' || env.TRUST_PROXY === 'true',
+    /*
+     * Forget accounts nobody has used for this many days. Off unless asked for: the
+     * default of 0 removes nothing, so a deployment has to opt in deliberately. A
+     * negative or unparsable value is treated as off rather than as "everything".
+     */
+    forgetAccountAfterDays: forgetAfterDays(env.FORGET_ACCOUNT_AFTER_DAYS),
   };
+}
+
+/**
+ * Parse the retention setting.
+ *
+ * Only a positive, whole number of days turns the sweep on. Everything else — unset,
+ * empty, `0`, negative, fractional or nonsense — means "never forget", which is the safe
+ * reading for a setting that deletes accounts.
+ *
+ * @param {string|undefined} value
+ * @returns {number} days, or 0 for off.
+ */
+function forgetAfterDays(value) {
+  if (typeof value !== 'string' || value.trim() === '') return 0;
+  const days = Number(value.trim());
+  if (!Number.isFinite(days) || days <= 0) return 0;
+  return Math.floor(days);
 }
 
 /** Build the Express app. Exported so tests can mount it without listening. */
@@ -202,6 +225,33 @@ export function start(overrides = {}) {
       : `[deepai-gateway] ${accounts.length} DeepAI account${accounts.length === 1 ? '' : 's'}: ${accounts.map((a) => a.username).join(', ')}`,
   );
 
+  /*
+   * Inactivity retention, when a deployment asks for it.
+   *
+   * Runs once at boot and then daily, because a gateway that stays up for months should
+   * still forget: a boot-only sweep would never fire on a long-running process. The timer
+   * is unref'd so it cannot hold the process open.
+   */
+  const sweep = (why) => {
+    const days = settings.forgetAccountAfterDays;
+    if (!Number.isFinite(days) || days <= 0) return;
+    try {
+      const removed = forgetInactiveAccounts(db, { days });
+      for (const account of removed) {
+        console.log(`[deepai-gateway] forgot ${account.username}: unused for ${account.idleDays} days (limit ${days}), ${account.keys} key(s) deleted`);
+      }
+      if (removed.length > 0) {
+        console.log(`[deepai-gateway] retention sweep (${why}): ${removed.length} account(s) forgotten, usage history kept`);
+      }
+    } catch (error) {
+      // A failed sweep must not stop the gateway: the accounts are still there, and the
+      // next run tries again.
+      console.error(`[deepai-gateway] retention sweep failed: ${error?.message ?? error}`);
+    }
+  };
+  sweep('startup');
+  setInterval(() => sweep('daily'), 24 * 60 * 60_000).unref();
+
   const server = app.listen(settings.port, settings.host, () => {
     const address = server.address();
     const port = typeof address === 'object' && address !== null ? address.port : settings.port;
@@ -212,6 +262,10 @@ export function start(overrides = {}) {
       // The dashboard is protected by a cookie, but an operator should still
       // know the panel is reachable from the network.
       console.log('[deepai-gateway] note: HOST is not loopback — the dashboard is reachable from the network');
+    }
+    // A setting that deletes accounts is worth stating out loud at every boot.
+    if (settings.forgetAccountAfterDays > 0) {
+      console.log(`[deepai-gateway] retention: accounts unused for ${settings.forgetAccountAfterDays} day(s) are forgotten (FORGET_ACCOUNT_AFTER_DAYS); usage history is kept`);
     }
 
   });

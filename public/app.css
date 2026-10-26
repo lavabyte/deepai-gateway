@@ -225,6 +225,10 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
   border-color: var(--danger-ink);
 }
 
+/* The one auth control in the top bar. It appears only when signed in, where it ends the
+   session; there is no matching sign-in button, because the overview is the form. */
+.btn--signout { background: var(--surface); border-color: var(--hairline); }
+.btn--signout:hover:not(:disabled) { background: #c81e1e; border-color: #c81e1e; color: #fff; }
 .btn--sm { height: 28px; padding: 0 9px; font-size: 12px; }
 .btn--icon { width: 34px; padding: 0; }
 .btn--icon.btn--sm { width: 28px; }

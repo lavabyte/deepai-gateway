@@ -27,7 +27,7 @@ import { API_ORIGIN, laneHeaders } from './wire.js';
 
 
 /**
- * Read the account allowance (`GET /deepai_code/theos`). This is the Theos
+ * Read the account allowance (`GET /deepai_code/theos`). This is the Credits
  * balance Premier models are billed against.
  *
  * @param {string} apiKey

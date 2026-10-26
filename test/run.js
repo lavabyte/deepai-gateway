@@ -62,6 +62,17 @@ import {
 
 const results = [];
 function check(name, fn) {
+  /*
+   * A synchronous check cannot await an async test. The assertions inside still run, but
+   * a failure becomes an unhandled rejection that kills the whole run — so instead of a
+   * reported FAIL the author gets a crash and no results at all. That happened, which is
+   * why this is loud rather than silent.
+   */
+  if (fn.constructor.name === 'AsyncFunction') {
+    results.push(`  FAIL ${name}\n       an async test needs checkAsync(), not check()`);
+    process.exitCode = 1;
+    return;
+  }
   try {
     fn();
     results.push(`  ok   ${name}`);
@@ -523,7 +534,7 @@ check('fallback catalog is complete and well formed', () => {
     assert.ok(model.contextWindow > 0);
     assert.ok(model.maxTokens > 0);
     for (const level of ['none', 'low', 'medium', 'high']) {
-      assert.equal(typeof model.theosPerSecond[level], 'string');
+      assert.equal(typeof model.creditsPerSecond[level], 'string');
     }
   }
 });
@@ -540,8 +551,8 @@ check('free models are labelled and Premier are not', () => {
 
 check('rate labels distinguish unmetered from billed', () => {
   assert.equal(rateLabel(findModel('glm-5.3-flash')), 'Unmetered');
-  assert.equal(rateLabel(findModel('glm-5.3'), 'high'), '1.2 Theos/min');
-  assert.equal(rateLabel(findModel('gpt-6-astra'), 'none'), '18 Theos/min');
+  assert.equal(rateLabel(findModel('glm-5.3'), 'high'), '1.2 Credits/min');
+  assert.equal(rateLabel(findModel('gpt-6-astra'), 'none'), '18 Credits/min');
 });
 
 /* ------------------------------------------------------------------- server */
@@ -915,7 +926,7 @@ await checkAsync('/v1/models carries modalities, reasoning levels and names', as
     assert.deepEqual(free.reasoning_levels, ['none', 'low', 'medium', 'high']);
     assert.ok(free.context_window > 0);
     assert.ok(free.max_output_tokens > 0);
-    assert.equal(typeof free.theos_per_second.high, 'string');
+    assert.equal(typeof free.credits_per_second.high, 'string');
     assert.equal(free.rate_label, 'Unmetered');
     assert.ok(free.description.includes('Free tier'));
 
@@ -924,7 +935,7 @@ await checkAsync('/v1/models carries modalities, reasoning levels and names', as
 
     const premier = payload.data.find((model) => model.id === 'glm-5.3');
     assert.equal(premier.tier, 'premier');
-    assert.equal(premier.rate_label, '6 Theos/min');
+    assert.equal(premier.rate_label, '6 Credits/min');
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -934,7 +945,7 @@ check('publicModel exposes per-level reasoning rates', () => {
   const model = publicModel(findModel('glm-5.3'));
   assert.equal(model.reasoningLevels.length, REASONING_LEVELS.length);
   const high = model.reasoningLevels.find((level) => level.id === 'high');
-  assert.equal(high.rateLabel, '1.2 Theos/min');
+  assert.equal(high.rateLabel, '1.2 Credits/min');
   assert.equal(high.name, 'High');
   assert.deepEqual(publicModel(findModel('solar-mini-4')).reasoningLevels.length > 0, true);
 });
@@ -1133,7 +1144,7 @@ await checkAsync('refreshPrices rejects an empty or unusable catalogue', async (
   assert.equal(priceOf('glm-5.3-flash').input, 0.15);
 });
 
-check('initPricing loads a disk cache and readCache tolerates junk', async () => {
+await checkAsync('initPricing loads a disk cache and readCache tolerates junk', async () => {
   const { mkdtempSync, writeFileSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
@@ -1250,7 +1261,7 @@ await checkAsync('usage export produces CSV and JSON with every row', async () =
   }
 });
 
-check('usage rows survive reopening the same database file', async () => {
+await checkAsync('usage rows survive reopening the same database file', async () => {
   // Durability of usage, not just keys: write, close, reopen, read back.
   const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
@@ -1337,7 +1348,7 @@ await checkAsync('the dashboard shell names versioned assets and is never cached
   }
 });
 
-check('the stylesheet carries no dead classes or variables', async () => {
+await checkAsync('the stylesheet carries no dead classes or variables', async () => {
   /*
    * This replaces a check that pinned the order of a rule which no longer exists, and it
    * guards the thing that actually accumulates: after a rewrite, selectors and custom
@@ -1374,7 +1385,7 @@ check('the stylesheet carries no dead classes or variables', async () => {
   assert.deepEqual(deadIds, [], `ids in the shell that nothing uses: ${deadIds.join(', ')}`);
 });
 
-check('the stylesheet makes the hidden attribute win', async () => {
+await checkAsync('the stylesheet makes the hidden attribute win', async () => {
   // Regression: `.field { display: flex }` used to override `[hidden]`, so
   // "hidden" form fields still rendered and still took clicks.
   const { readFileSync } = await import('node:fs');
@@ -1386,7 +1397,7 @@ check('the stylesheet makes the hidden attribute win', async () => {
 
 /* --------------------------------------------------------------- migration */
 
-check('a pre-multi-user database migrates without losing anything', async () => {
+await checkAsync('a pre-multi-user database migrates without losing anything', async () => {
   // Build a v3 database exactly as the previous release left it.
   const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
@@ -1483,7 +1494,7 @@ check('revoking deletes the key and usage keeps its history', () => {
   assert.equal(totals(fresh, 0, 'u').totalTokens, 7);
 });
 
-check('a database with revoked tombstones is cleaned up on upgrade', async () => {
+await checkAsync('a database with revoked tombstones is cleaned up on upgrade', async () => {
   const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
@@ -1540,7 +1551,7 @@ check('a database with revoked tombstones is cleaned up on upgrade', async () =>
   upgraded.close();
 });
 
-check('the backup script writes a complete copy, not a WAL-stale one', async () => {
+await checkAsync('the backup script writes a complete copy, not a WAL-stale one', async () => {
   // Regression: `cp deepai.db` misses committed rows still in the WAL, so a
   // backup could silently capture older state than the live database.
   const { mkdtempSync, readdirSync, statSync } = await import('node:fs');
@@ -1638,6 +1649,121 @@ await checkAsync('/api/account never reports another account\'s key count', asyn
   }
 });
 
+await checkAsync('a cache hit reaches the client in both streaming and not', async () => {
+  /*
+   * The gateway's own accounting has always split cache reads out, but that is not the
+   * question a caller asks: they ask whether *their* client is told. OpenAI reports it as
+   * `prompt_tokens_details.cached_tokens`, so a caller can see how much of their prompt
+   * was served from cache — and it has to survive both response shapes, because a client
+   * that streams gets its usage from the final chunk and nothing else.
+   *
+   * The upstream is stubbed with a real DeepAI usage payload, so this checks the whole
+   * path: normalize upstream → attach to the response → serialize for the caller.
+   */
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const { hashKey } = await import('../src/keys.js');
+  saveAccount(fresh, { apiKey: 'k', username: 'cache-user', isPro: false });
+  const plaintext = 'sk-' + 'b'.repeat(40);
+  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+                 VALUES ('kcache', 'cache', 'sk-bbbb', ?, 1, 'unlimited', '[]', 'cache-user')`)
+    .run(hashKey(plaintext));
+
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const realFetch = globalThis.fetch;
+  const http = (...args) => realFetch(...args);
+
+  /** The usage DeepAI sends when part of the prompt was a cache hit. */
+  const upstreamUsage = {
+    prompt_tokens: 1000,
+    completion_tokens: 20,
+    prompt_tokens_details: { cached_tokens: 900, cache_write_tokens: 0 },
+  };
+
+  const sse = (chunks) => new Response(
+    chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join('') + 'data: [DONE]\n\n',
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  );
+
+  const call = (stream) => http(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${plaintext}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'deepseek-v4.1-flash', messages: [{ role: 'user', content: 'hi' }], stream }),
+  });
+
+  try {
+    /*
+     * The upstream is always called in streaming mode — `stream_options.include_usage` is
+     * what makes DeepAI report usage at all — so both cases below stub an SSE stream. The
+     * difference under test is only what the *caller* asked for.
+     */
+    globalThis.fetch = async () => sse([
+      { choices: [{ index: 0, delta: { content: 'ok' } }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+      { choices: [], usage: upstreamUsage },
+    ]);
+
+    const plain = await (await call(false)).json();
+    assert.equal(plain.usage.prompt_tokens_details.cached_tokens, 900,
+      'a non-streaming caller must see the cache hit');
+    // The gateway re-inflates prompt_tokens to include the cached part, as OpenAI does.
+    assert.equal(plain.usage.prompt_tokens, 1000, 'prompt_tokens must stay the full prompt');
+    assert.equal(plain.usage.completion_tokens, 20);
+
+    // --- Streaming: the only place usage can appear is the final chunk.
+    globalThis.fetch = async () => sse([
+      { choices: [{ index: 0, delta: { content: 'ok' } }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+      { choices: [], usage: upstreamUsage },
+    ]);
+
+    const body = await (await call(true)).text();
+    const chunks = body.split('\n\n')
+      .filter((line) => line.startsWith('data: ') && !line.includes('[DONE]'))
+      .map((line) => JSON.parse(line.slice(6)));
+    const withUsage = chunks.filter((c) => c.usage !== undefined);
+    assert.equal(withUsage.length, 1, 'exactly one chunk may carry usage');
+    assert.equal(withUsage[0].usage.prompt_tokens_details.cached_tokens, 900,
+      'a streaming caller must see the cache hit in the final chunk');
+    assert.equal(withUsage[0].usage.prompt_tokens, 1000);
+    // And the gateway asked upstream for it: without this the chunk never arrives.
+    assert.ok(body.includes('"content":"ok"'), 'the text still streams');
+
+    // --- A prompt with no cache hit must not invent the field.
+    globalThis.fetch = async () => sse([
+      { choices: [{ index: 0, delta: { content: 'ok' } }] },
+      { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+      { choices: [], usage: { prompt_tokens: 100, completion_tokens: 5 } },
+    ]);
+    const miss = await (await call(false)).json();
+    assert.equal(miss.usage.prompt_tokens_details, undefined,
+      'no cache hit means no cached_tokens field, not a zero that looks like one');
+
+    // --- The Responses transport reports it under input_tokens_details.
+    globalThis.fetch = async () => sse([
+      { type: 'response.output_text.delta', delta: 'ok' },
+      { type: 'response.completed', response: {
+        status: 'completed',
+        usage: { input_tokens: 1000, output_tokens: 20, input_tokens_details: { cached_tokens: 900 } },
+      } },
+    ]);
+    const responsesBody = await (await http(`${base}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${plaintext}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-6-astra', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+    })).text();
+    assert.match(responsesBody, /"cached_tokens":900/,
+      'the Responses transport must report its cache hit too');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 await checkAsync('a streaming failure is still framed as an event stream', async () => {
   // Regression: the error path wrote `data: {...}` bytes without ever setting
   // the SSE content type, so a client parsing the response as an event stream
@@ -1688,6 +1814,89 @@ await checkAsync('a streaming failure is still framed as an event stream', async
 
 /* --------------------------------------------------- bugs found in review */
 
+await checkAsync('inactive accounts are forgotten only when a deployment asks for it', async () => {
+  /*
+   * This is the one setting that deletes data on its own, so the tests are about what it
+   * must *not* do as much as what it does: off by default, off for anything unparsable,
+   * and never a way to lose an account that is still being used.
+   */
+  const { openDatabase } = await import('../src/db.js');
+  const { forgetInactiveAccounts, saveAccount, touchAccount, readAccount, listAccounts } = await import('../src/store.js');
+  const { record } = await import('../src/usage.js');
+  const { config } = await import('../server.js');
+
+  const DAY = 24 * 60 * 60_000;
+  const now = Date.now();
+
+  // --- The setting is off unless a positive whole number of days is given.
+  for (const [value, expected] of [
+    [undefined, 0], ['', 0], ['   ', 0], ['0', 0], ['-1', 0], ['-30', 0],
+    ['abc', 0], ['1.5', 1], ['30', 30], [' 90 ', 90],
+  ]) {
+    assert.equal(config({ FORGET_ACCOUNT_AFTER_DAYS: value }).forgetAccountAfterDays, expected,
+      `FORGET_ACCOUNT_AFTER_DAYS=${JSON.stringify(value)} must read as ${expected}`);
+  }
+
+  // --- A schema from before v6 gains the column, backfilled rather than left NULL.
+  const older = openDatabase(':memory:');
+  assert.equal(older.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version').value, '6');
+  const columns = older.prepare('PRAGMA table_info(accounts)').all().map((row) => row.name);
+  assert.ok(columns.includes('last_seen_at'), 'the accounts table must carry last_seen_at');
+  saveAccount(older, { apiKey: 'k-old', username: 'backfilled', isPro: false });
+  assert.equal(
+    typeof older.prepare('SELECT last_seen_at FROM accounts WHERE username = ?').get('backfilled').last_seen_at,
+    'number',
+    'a new account is stamped with activity, never left NULL',
+  );
+
+  // --- The sweep itself.
+  const db = openDatabase(':memory:');
+  saveAccount(db, { apiKey: 'k1', username: 'idle-40d', isPro: false });
+  saveAccount(db, { apiKey: 'k2', username: 'idle-2d', isPro: false });
+  saveAccount(db, { apiKey: 'k3', username: 'fresh', isPro: false });
+
+  // A key owned by the idle account, to prove keys go with it.
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+              VALUES ('kold', 'old key', 'sk-old', 'hash', 1, 'unlimited', '[]', 'idle-40d')`).run();
+  // Usage history for that key: it must survive the account being forgotten.
+  record(db, { keyId: 'kold', keyName: 'old key', owner: 'idle-40d', model: 'glm-5.3-flash', totalTokens: 42, ok: true });
+
+  const setSeen = (username, ms) => db.prepare('UPDATE accounts SET last_seen_at = ? WHERE username = ?').run(ms, username);
+  setSeen('idle-40d', now - 40 * DAY);
+  setSeen('idle-2d', now - 2 * DAY);
+  setSeen('fresh', now - 60_000);
+
+  // Off: nothing is removed, however idle.
+  assert.deepEqual(forgetInactiveAccounts(db, { days: 0, now }), [], 'zero days must remove nothing');
+  assert.equal(listAccounts(db).length, 3, 'and must not touch the table');
+
+  // Thirty days: only the account idle for longer than that.
+  const removed = forgetInactiveAccounts(db, { days: 30, now });
+  assert.deepEqual(removed.map((r) => r.username), ['idle-40d']);
+  assert.equal(removed[0].keys, 1, 'the report says how many keys went with it');
+  assert.equal(removed[0].idleDays, 40, 'and how long it had been idle');
+
+  const survivors = listAccounts(db).map((a) => a.username).sort();
+  assert.deepEqual(survivors, ['fresh', 'idle-2d'], 'an account used inside the window stays');
+  assert.equal(readAccount(db, 'idle-40d'), undefined, 'the forgotten account is gone');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM api_keys WHERE owner_username = ?').get('idle-40d').n, 0,
+    'its gateway keys are gone too');
+  // History is what a bill is read from, so it outlives the account.
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM usage WHERE owner_username = ?').get('idle-40d').n, 1,
+    'usage history survives the account being forgotten');
+
+  // --- Activity keeps an account alive: a touch moves it out of the window.
+  saveAccount(db, { apiKey: 'k4', username: 'revived', isPro: false });
+  setSeen('revived', now - 40 * DAY);
+  assert.equal(touchAccount(db, 'revived', now), true, 'an old timestamp is written');
+  assert.equal(touchAccount(db, 'revived', now + 1000), false, 'and a recent one is not written again');
+  assert.deepEqual(forgetInactiveAccounts(db, { days: 30, now }).map((r) => r.username), [],
+    'an account touched just now must not be swept');
+
+  // A touch for an account that does not exist is not an error, just nothing to do.
+  assert.equal(touchAccount(db, 'nobody', now), false);
+});
+
 await checkAsync('a malformed cookie cannot take the whole server down', async () => {
   // Regression: `decodeURIComponent` threw inside the session middleware, which
   // runs before every route, so one bad cookie made *every* response a 500 —
@@ -1717,7 +1926,7 @@ await checkAsync('a malformed cookie cannot take the whole server down', async (
   }
 });
 
-check('a newer database is refused rather than stamped downwards', async () => {
+await checkAsync('a newer database is refused rather than stamped downwards', async () => {
   // Regression: `if (current !== SCHEMA_VERSION)` wrote this build's version
   // into a database written by a newer one. The migrations are one-way and v5 is
   // destructive, so a later run of the newer build would re-apply them.
@@ -1740,7 +1949,7 @@ check('a newer database is refused rather than stamped downwards', async () => {
   after.close();
 });
 
-check('the v5 index is created even with no tombstones to clean', async () => {
+await checkAsync('the v5 index is created even with no tombstones to clean', async () => {
   // Regression: the CREATE INDEX sat inside `if (removed.changes > 0)`, so the
   // common upgrade path — a database that never held a revoked key — ended up
   // without it, making the schema depend on data rather than on version.
@@ -2206,7 +2415,7 @@ await checkAsync('the sign-in card gives one instruction, and it is the one that
       insertAdjacentHTML() {}, scrollIntoView() {},
     });
     for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-      'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle']) nodes.set(id, node());
+      'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle', 'auth-button']) nodes.set(id, node());
     const sandbox = {
       document: {
         getElementById: (id) => nodes.get(id) ?? null,
@@ -2309,7 +2518,7 @@ await checkAsync('both signed-out screens offer the one route', async () => {
       insertAdjacentHTML() {}, scrollIntoView() {},
     });
     for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-      'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle']) nodes.set(id, node());
+      'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle', 'auth-button']) nodes.set(id, node());
     const sandbox = {
       document: {
         getElementById: (id) => nodes.get(id) ?? null,
@@ -2405,7 +2614,7 @@ await checkAsync('nothing asks the visitor through a browser dialog', async () =
     focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
   });
   for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-    'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle']) nodes.set(id, node());
+    'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle', 'auth-button']) nodes.set(id, node());
   const sandbox = {
     document: {
       getElementById: (id) => nodes.get(id) ?? null,
@@ -2461,35 +2670,87 @@ await checkAsync('nothing asks the visitor through a browser dialog', async () =
   assert.equal(typeof answer.then, 'function', 'the caller gets an answer it can await');
 });
 
-check('the top bar has no sign-in button, and logging out is still reachable', async () => {
+await checkAsync('the top bar offers log out and never a second way in', async () => {
   /*
-   * A "Log in" button sat beside a sign-in form that already filled the page — a second
-   * door to the same room. It is gone, and logging out moved into the account card, where
-   * the other account actions are. Removing the button without moving its other job would
-   * have left no way to log out at all, so both halves are asserted here.
+   * The control appears only when it has something to do. Signed out it is hidden: the
+   * overview *is* the sign-in form, so a "Log in" button beside it was a second door to
+   * the same room. Signed in it ends the session, and it stays in the top bar rather than
+   * moving into the account card, where it briefly lived and did not belong.
    */
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
+  const vm = await import('node:vm');
   const root = new URL('..', import.meta.url).pathname;
   const html = readFileSync(join(root, 'public', 'index.html'), 'utf8');
   const app = readFileSync(join(root, 'public', 'app.js'), 'utf8');
 
-  // The control and everything that referred to it are gone.
-  assert.ok(!html.includes('auth-button'), 'the top bar must not carry a sign-in button');
-  assert.ok(!app.includes('auth-button'), 'and nothing may still look for it');
-  assert.ok(!app.includes('onAuthButton'), 'nor keep its handler');
-  assert.ok(!app.includes('btn--signin'), 'nor style a control that does not exist');
+  // The markup carries one control, and it is a log out.
+  assert.match(html, /id="auth-button"[^>]*>Log out</, 'the top bar carries a log-out control');
+  assert.ok(!/>Log in</.test(html), 'and no log-in button');
+  assert.match(html, /id="auth-button" hidden/, 'it starts hidden until the account is known');
+  // The account card must not offer a second one.
+  assert.ok(!app.includes("id=\"log-out\""), 'logging out is not duplicated in the account card');
 
-  // The badge is what remains on the right.
-  assert.match(html, /id="account-badge"/, 'the account badge stays');
+  /** Boot the client and read the button's state for a given account. */
+  const buttonState = async (account) => {
+    const nodes = new Map();
+    const node = () => ({
+      innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
+      dataset: {}, style: {}, value: '', children: [],
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      addEventListener() {}, appendChild(c) { this.children.push(c); },
+      append(...c) { this.children.push(...c); }, remove() {},
+      replaceChildren(...c) { this.children = c; },
+      querySelector: () => null, querySelectorAll: () => [],
+      setAttribute() {}, getAttribute: () => null, closest: () => null,
+      focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
+    });
+    for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
+      'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button']) nodes.set(id, node());
+    const sandbox = {
+      document: {
+        getElementById: (id) => nodes.get(id) ?? null,
+        createElement: () => node(), querySelector: () => null, querySelectorAll: () => [],
+        addEventListener() {}, documentElement: node(), visibilityState: 'visible', body: node(),
+      },
+      window: { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }), location: { assign() {} } },
+      location: { search: '', pathname: '/', hash: '' },
+      history: { replaceState() {} },
+      localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      navigator: {},
+      fetch: async (url) => new Response(
+        JSON.stringify(String(url).includes('/account') ? account : { ok: true, models: [] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+      setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
+      console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
+      Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
+    };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    new vm.Script(app, { filename: 'app.js' }).runInContext(sandbox);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    // The startup load settles the account, which is what decides the button.
+    return nodes.get('auth-button').hidden;
+  };
 
-  // Logging out lives in the account card, next to the other account actions.
-  assert.match(app, /id="log-out"/, 'the account card must offer a way out');
-  assert.match(app, /\$\('log-out'\)\?\.addEventListener\('click', \(\) => void logOutEverywhere\(\)\)/,
-    'and it must call the logout that ends this session');
+  const signedOut = await buttonState({
+    ok: true, signedIn: false, username: '', displayName: '', allowance: null, balanceLow: false,
+    keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false },
+  });
+  assert.equal(signedOut, true, 'signed out, there is nothing for the control to do');
 
-  // No page may claim to close itself: browsers refuse it for a tab a script did not open.
-  assert.ok(!app.includes('window.close'), 'nothing may try to close the tab');
+  const signedIn = await buttonState({
+    ok: true, signedIn: true, username: 'key-abc', displayName: 'milo@example.com',
+    allowance: null, balanceLow: false,
+    keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false },
+  });
+  assert.equal(signedIn, false, 'signed in, it is the way out');
+
+  // Its handler must only ever end a session.
+  assert.match(app, /async function onAuthButton\(\) \{\s*\n\s*if \(state\.account\?\.signedIn === true\) await logOutEverywhere\(\);/,
+    'the top-bar action logs out and does nothing else');
+  assert.ok(!app.includes('btn--signin'), 'no style remains for a sign-in control');
 });
 
 await checkAsync('copying a key works on a plain http:// origin', async () => {
@@ -2525,7 +2786,7 @@ await checkAsync('copying a key works on a plain http:// origin', async () => {
     });
     const nodes = new Map();
     for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-      'account-badge', 'account-badge-text', 'nav', 'theme-toggle']) nodes.set(id, node());
+      'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button']) nodes.set(id, node());
 
     const range = { selectNodeContents() {}, };
     const selection = { removeAllRanges() {}, addRange(r) { this.range = r; } };
@@ -2622,7 +2883,7 @@ await checkAsync('the catalog loads once a session exists, without a reload', as
     focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
   });
   for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-    'account-badge', 'account-badge-text', 'nav', 'theme-toggle']) nodes.set(id, node());
+    'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button']) nodes.set(id, node());
 
   const emptyTotals = { totalTokens: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, requests: 0, costUsd: 0 };
   const sandbox = {
@@ -2677,7 +2938,7 @@ await checkAsync('the catalog loads once a session exists, without a reload', as
   assert.equal(catalogCalls.length, 0, 'a catalog already in hand is not fetched again');
 });
 
-check('every sign-in failure has something useful to say', async () => {
+await checkAsync('every sign-in failure has something useful to say', async () => {
   /*
    * The reasons the paste parser and the key check can report must each have a message,
    * and no message may name a protocol parameter — the reader is looking at a page, not
@@ -2739,7 +3000,7 @@ check('every sign-in failure has something useful to say', async () => {
 });
 
 
-check('the pasted console output is read forgivingly', async () => {
+await checkAsync('the pasted console output is read forgivingly', async () => {
   const { parseAccountPaste } = await import('../src/deepai/account.js');
 
   // What the console prints for `console.log(await (await fetch(…)).text())`, pasted
@@ -2854,7 +3115,7 @@ await checkAsync('an account with no password signs in by pasting its console ou
   }
 });
 
-check('a pasted key owns itself, so nobody can claim another account', async () => {
+await checkAsync('a pasted key owns itself, so nobody can claim another account', async () => {
   const { usernameForKey } = await import('../src/deepai/account.js');
 
   const owner = usernameForKey('sk-aaaa');

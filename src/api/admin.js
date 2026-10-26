@@ -684,7 +684,7 @@ function readExpiry(body, fallback) {
   return parsed;
 }
 
-/** Whether the Theos balance is low enough to warn about. */
+/** Whether the Credits balance is low enough to warn about. */
 function isBalanceLow(allowance) {
   if (allowance === null || allowance === undefined || allowance.balance === null) return false;
   const balance = Number(allowance.balance);
@@ -711,6 +711,6 @@ export async function refreshAllowance(db, runtime, username) {
   saveAllowance(db, username, check.allowance);
   if (typeof check.isPro === 'boolean') savePro(db, username, check.isPro);
   recordAuthEvent(db, 'refresh', { username, detail: `balance ${check.allowance.balance ?? '?'}` });
-  runtime.log?.(`allowance refreshed for ${username}: ${check.allowance.balance ?? '?'} Theos`);
+  runtime.log?.(`allowance refreshed for ${username}: ${check.allowance.balance ?? '?'} Credits`);
   return { ok: true, allowance: check.allowance };
 }

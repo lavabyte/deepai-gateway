@@ -39,6 +39,7 @@ export OPENAI_API_KEY=sk-…
 | `HOST` | `127.0.0.1` | Listen address. Set `0.0.0.0` to expose on the network |
 | `DATABASE` | `./data/deepai.db` | SQLite file |
 | `TRUST_PROXY` | unset | Set `1` behind a TLS proxy: trust `X-Forwarded-*` and set `Secure` cookies |
+| `FORGET_ACCOUNT_AFTER_DAYS` | `0` | Forget accounts nobody has used for this many days — see [Retention](#retention). `0` (the default) forgets nothing, so this has to be set deliberately |
 | `LOG_REQUESTS` | `1` | Set `0` to silence per-request logging |
 | `PRICING_CACHE` | `./data/pricing.json` | Where the fetched price table is cached |
 
@@ -144,8 +145,8 @@ The key inside the pasted JSON is checked the same way a stored account is
 
 | What DeepAI said | What the visitor is told |
 | --- | --- |
-| `theos` returns 401 and the public API does not recognise the key either | "DeepAI did not recognise that key" |
-| `theos` returns 401 but the public model API *does* accept it | the key is valid but **not enabled for DeepAI Code** — which is what this gateway uses |
+| `credits` returns 401 and the public API does not recognise the key either | "DeepAI did not recognise that key" |
+| `credits` returns 401 but the public model API *does* accept it | the key is valid but **not enabled for DeepAI Code** — which is what this gateway uses |
 | anything else | DeepAI is unreachable; not the visitor's mistake |
 
 That middle case is the likeliest failure of all, because `deepai.org` issues a key for
@@ -195,15 +196,15 @@ email from DeepAI's page rather than trying to derive it:
   are not listed at all.
 - **Recent requests** — newest first, failures included, with token split,
   duration and status.
-- **Account card** — who is signed in, the Theos balance, and a low-balance
+- **Account card** — who is signed in, the Credits balance, and a low-balance
   warning.
 - **14-day sparkline** of daily tokens.
 
 ### Models
 
 Every catalog model with tier, context window, max output, reasoning levels,
-input modalities, Theos rate and this month's usage. Free models are marked
-`… Free`; **Premium** models draw on the Theos balance. (The provider calls
+input modalities, Credits rate and this month's usage. Free models are marked
+`… Free`; **Premium** models draw on the Credits balance. (The provider calls
 this tier "Premier" internally; the panel always says Premium.)
 
 ### Log in / log out
@@ -261,6 +262,37 @@ Only `/` (and unknown page paths, so client-side routes survive a refresh)
 serves the dashboard. `/v1/*` and `/api/*` always answer with JSON, never HTML,
 so a client never receives a page it cannot parse.
 
+## Retention
+
+`FORGET_ACCOUNT_AFTER_DAYS` asks the gateway to forget accounts nobody has used for a
+while. It is **off by default**: `0`, unset, or anything that is not a positive whole
+number removes nothing, so a deployment has to opt in on purpose.
+
+```bash
+FORGET_ACCOUNT_AFTER_DAYS=30 npm start
+```
+
+**"Used" means either kind of activity**, which is why the account carries a
+`last_seen_at` column rather than reusing `updated_at`:
+
+- a dashboard request through a session, or
+- traffic through one of the account's gateway keys.
+
+`updated_at` could not serve, because the background allowance refresh writes it — an
+abandoned account would have looked busy forever. The timestamp is written at most once an
+hour per account, so activity costs almost nothing.
+
+Forgetting is the same operation as **Forget this account**: the account, its DeepAI
+credential and its gateway keys are removed. **Usage history is kept** — those rows carry
+`key_name`, and they are what a bill or an audit is read from. The sweep runs at startup
+and then once a day, so a gateway that stays up for months still forgets; the log names
+every account it removes and how long it had been idle.
+
+```text
+[deepai-gateway] forgot stale-account: unused for 45 days (limit 30), 2 key(s) deleted
+[deepai-gateway] retention sweep (startup): 1 account(s) forgotten, usage history kept
+```
+
 ## Backups
 
 ```bash
@@ -306,7 +338,8 @@ The dashboard's **Export CSV** button uses the same endpoint.
 ## How accounts and sessions are stored
 
 - **`accounts`** — one row per DeepAI user: `username`, the DeepAI `api_key`, the
-  cached Theos allowance, `is_pro`. Username is the identity, so signing in again
+  cached Credits allowance, `is_pro`, and `last_seen_at` (the last time the account was
+  used, for [retention](#retention)). Username is the identity, so signing in again
   replaces that row's key instead of adding a second row.
 - **`sessions`** — one row per browser session. Only the **SHA-256 hash** of the
   token is stored, so a database dump does not hand out dashboard access. The
@@ -378,7 +411,7 @@ hardcode them:
   "context_window": 1048576,
   "max_output_tokens": 131072,
   "api": "openai-completions",
-  "theos_per_second": { "none": "0", "low": "0", "medium": "0", "high": "0" },
+  "credits_per_second": { "none": "0", "low": "0", "medium": "0", "high": "0" },
   "rate_label": "Unmetered"
 }
 ```
@@ -397,7 +430,7 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | `GET` | `/api/account` | This session's account, allowance, default model, key quota |
 | `GET` | `/api/account/events` | That account's auth trail (login, logout, refresh, denied) |
 | `POST` | `/api/account/forget` | Remove the account, its keys and its DeepAI credential |
-| `POST` | `/api/account/refresh` | Re-read the Theos balance |
+| `POST` | `/api/account/refresh` | Re-read the Credits balance |
 | `GET` `POST` | `/api/keys` | List / create |
 | `PATCH` `DELETE` | `/api/keys/:id` | Edit / delete |
 | `POST` | `/api/keys/:id/revoke` | Revoke a key: it is deleted |
@@ -552,7 +585,7 @@ glyph still reads at 32px.
 
 ```
 server.js               Express wiring, static hosting, error shaping
-src/db.js               SQLite schema and migrations (v4: accounts + sessions, v5: revoke deletes)
+src/db.js               SQLite schema and migrations (v4: accounts + sessions, v5: revoke deletes, v6: last_seen_at)
 src/keys.js             key generation, hashing, limit checks
 src/usage.js            usage recording and every aggregate query
 src/pricing.js          live OpenRouter prices, cache, and the savings estimate
@@ -594,7 +627,7 @@ and no external database. The only runtime dependency is Express.
   paste their own account JSON gets their own account, isolated from the others.
 - The Responses route has no stop-sequence field, so `stop` is dropped for
   `gpt-6-astra`.
-- Premier models require Theos balance on the DeepAI account; free models are
+- Premier models require Credits balance on the DeepAI account; free models are
   unmetered.
 
 ## Tests

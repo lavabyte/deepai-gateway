@@ -104,17 +104,17 @@ export function saveAccount(db, account) {
 
   if (existing === undefined) {
     db.prepare(`
-      INSERT INTO accounts (username, api_key, is_pro, balance, granted, refresh_at, checked_at, created_at, updated_at)
-      VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)
-    `).run(username, account.apiKey, account.isPro ? 1 : 0, now, now);
+      INSERT INTO accounts (username, api_key, is_pro, balance, granted, refresh_at, checked_at, created_at, updated_at, last_seen_at)
+      VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?)
+    `).run(username, account.apiKey, account.isPro ? 1 : 0, now, now, now);
   } else {
     // The key is replaced, but the cached allowance is kept: it belongs to the
     // same DeepAI user and is still the best reading until a refresh lands.
     db.prepare(`
       UPDATE accounts
-         SET api_key = ?, is_pro = ?, updated_at = ?
+         SET api_key = ?, is_pro = ?, updated_at = ?, last_seen_at = ?
        WHERE username = ?
-    `).run(account.apiKey, account.isPro ? 1 : 0, now, username);
+    `).run(account.apiKey, account.isPro ? 1 : 0, now, now, username);
   }
 
   return {
@@ -151,9 +151,82 @@ export function savePro(db, username, isPro) {
  * usage rows stay so aggregate history does not silently shrink.
  */
 export function clearAccount(db, username) {
+  const keys = db.prepare('DELETE FROM api_keys WHERE owner_username = ?').run(username).changes;
   db.prepare('DELETE FROM sessions WHERE account_id IN (SELECT id FROM accounts WHERE username = ?)').run(username);
-  db.prepare('DELETE FROM api_keys WHERE owner_username = ?').run(username);
-  db.prepare('DELETE FROM accounts WHERE username = ?').run(username);
+  const removed = db.prepare('DELETE FROM accounts WHERE username = ?').run(username).changes;
+  // Usage rows are deliberately untouched: they carry `key_name`, so history stays
+  // attributable to the name it had even though the key is gone.
+  return { removed: removed > 0, keys };
+}
+
+/* ---------------------------------------------------------- account activity */
+
+/**
+ * How stale a `last_seen_at` may be before it is written again.
+ *
+ * Activity arrives per request, and a write per request would put a lock on the database
+ * for every call the gateway serves. An hour is far finer than any retention window, so
+ * the timestamp stays accurate enough to decide by while costing almost nothing.
+ */
+const ACTIVITY_WRITE_INTERVAL_MS = 60 * 60_000;
+
+/**
+ * Record that an account was just used.
+ *
+ * Called for dashboard requests and for traffic through the account's keys, so an account
+ * kept alive by either one is not mistaken for abandoned. Throttled: the update only
+ * happens when the stored timestamp is already old.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {string} username
+ * @param {number} [now]
+ * @returns {boolean} whether a row was written.
+ */
+export function touchAccount(db, username, now = Date.now()) {
+  if (typeof username !== 'string' || username === '') return false;
+  const row = db.prepare('SELECT last_seen_at FROM accounts WHERE username = ?').get(username);
+  if (row === undefined) return false;
+  const seen = Number(row.last_seen_at ?? 0);
+  if (Number.isFinite(seen) && now - seen < ACTIVITY_WRITE_INTERVAL_MS) return false;
+  db.prepare('UPDATE accounts SET last_seen_at = ? WHERE username = ?').run(now, username);
+  return true;
+}
+
+/**
+ * Forget accounts nobody has used for `days`.
+ *
+ * This is the destructive half of the retention setting, so it is explicit about what it
+ * removes: the account, its DeepAI credential and its gateway keys — the same as pressing
+ * "Forget this account". Usage history survives, because those rows carry `key_name` and
+ * are what a bill or an audit would be read from.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {{days: number, now?: number}} options
+ * @returns {{username: string, keys: number, idleDays: number}[]} what was removed.
+ */
+export function forgetInactiveAccounts(db, { days, now = Date.now() }) {
+  // `days <= 0` means the setting is off, never "delete everything at once".
+  if (!Number.isFinite(days) || days <= 0) return [];
+  const cutoff = now - days * 24 * 60 * 60_000;
+  const stale = db.prepare(`
+    SELECT username, COALESCE(last_seen_at, updated_at, created_at) AS seen
+      FROM accounts
+     WHERE COALESCE(last_seen_at, updated_at, created_at) < ?
+     ORDER BY seen ASC
+  `).all(cutoff);
+
+  const removed = [];
+  for (const row of stale) {
+    const result = clearAccount(db, row.username);
+    if (result.removed) {
+      removed.push({
+        username: row.username,
+        keys: result.keys,
+        idleDays: Math.floor((now - Number(row.seen)) / (24 * 60 * 60_000)),
+      });
+    }
+  }
+  return removed;
 }
 
 /* --------------------------------------------------------------- sessions */

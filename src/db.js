@@ -16,7 +16,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 /** Current schema version. Bump when a migration below is added. */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /**
  * Open (creating if needed) the database at `file` and bring it to the current
@@ -63,6 +63,7 @@ export function openDatabase(file) {
   if (current < 3) migrateToV3(db);
   if (current < 4) migrateToV4(db);
   if (current < 5) migrateToV5(db);
+  if (current < 6) migrateToV6(db);
 
   // Only ever move forwards.
   if (current < SCHEMA_VERSION) {
@@ -302,6 +303,24 @@ function migrateToV5(db) {
   // on `changes > 0` made the schema depend on whether a deployment happened to
   // hold a tombstone, and the common upgrade path ended up without it.
   db.exec('CREATE INDEX IF NOT EXISTS api_keys_active ON api_keys (owner_username, revoked_at)');
+}
+
+/**
+ * v6 — track when each account was last used.
+ *
+ * A deployment can ask the gateway to forget accounts nobody has used for a while
+ * (`FORGET_ACCOUNT_AFTER_DAYS`). "Used" means either a dashboard request through a session
+ * or traffic through one of the account's gateway keys — so the column records activity,
+ * not the row's last write. `updated_at` could not serve: a background allowance refresh
+ * touches it, which would keep an abandoned account alive forever.
+ *
+ * Existing rows start from `updated_at`, the best evidence available for them.
+ */
+function migrateToV6(db) {
+  addColumn(db, 'accounts', 'last_seen_at', 'INTEGER');
+  // Backfill rather than leave NULL, which would read as "never used" and make every
+  // existing account look abandoned on the first sweep.
+  db.prepare('UPDATE accounts SET last_seen_at = COALESCE(last_seen_at, updated_at, created_at) WHERE last_seen_at IS NULL').run();
 }
 
 /** Short stable digest used to derive a username when DeepAI gives none. */
