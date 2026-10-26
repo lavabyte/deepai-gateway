@@ -200,20 +200,36 @@ function finishStep({ pending, remote }) {
  *
  * A key is the same credential the browser sign-in would have produced, so it
  * needs no callback, no address to copy and no password — which makes it the
- * shortest route on a gateway reached over the network. Kept as a quiet
- * disclosure so it never competes with the ordinary sign-in.
+ * shortest route on a gateway reached over the network.
+ *
+ * The email is asked for because a DeepAI key genuinely does not say who it
+ * belongs to: `/deepai_code/theos` and `/get_usage_summary` both answer with
+ * allowance only, and no endpoint reports an identity. Without it the account can
+ * only be shown as the fingerprint that owns it, which is what made the badge read
+ * `key-…`. Ownership still comes from the key, never from this field, so the name
+ * cannot be used to claim another account.
  */
 function keyForm() {
   return `
     <details class="mt-3" id="key-step">
-      <summary class="card__sub step__summary">Or paste a DeepAI API key</summary>
+      <summary class="card__sub step__summary">Or log in with a DeepAI API key</summary>
+      <ol class="step__list mt-3">
+        <li>Go to <a href="https://deepai.org/dashboard/profile" target="_blank" rel="noreferrer noopener">deepai.org/dashboard/profile</a></li>
+        <li>Copy your API Key</li>
+        <li>Paste it below</li>
+      </ol>
       <div class="field mt-3">
-        <label class="field__label" for="api-key">DeepAI API key</label>
+        <label class="field__label" for="api-key">API Key</label>
         <input class="input" id="api-key" type="password" spellcheck="false" autocomplete="off"
-          placeholder="Paste your key">
-        <div class="field__hint">The key is stored on the server so it can serve your requests.</div>
+          placeholder="Paste your API Key">
       </div>
-      <div class="row mt-3"><button class="btn" id="login-with-key">Continue</button></div>
+      <div class="field mt-3">
+        <label class="field__label" for="api-key-email">Your DeepAI email</label>
+        <input class="input" id="api-key-email" type="email" spellcheck="false" autocomplete="email"
+          placeholder="you@example.com">
+        <div class="field__hint">Shown as your account name. Only the key can be used to reach DeepAI.</div>
+      </div>
+      <div class="row mt-3"><button class="btn" id="login-with-key">Log In</button></div>
     </details>`;
 }
 
@@ -265,15 +281,22 @@ function needsLogin() {
 /**
  * Sign in with a pasted DeepAI API key.
  *
- * The key is cleared from the field as soon as it has been accepted, so it does not
- * linger in the page after it is no longer needed.
+ * Both secrets are cleared from the fields once they have been accepted, so they
+ * do not linger in the page after they are no longer needed.
  */
 async function signInWithKey() {
   const field = $('api-key');
+  const emailField = $('api-key-email');
   const key = field?.value?.trim() ?? '';
+  const email = emailField?.value?.trim() ?? '';
   if (key === '') {
-    toast('Paste your DeepAI API key first.', 'error');
+    toast('Paste your API Key first.', 'error');
     field?.focus();
+    return;
+  }
+  if (email === '') {
+    toast('Add the email to show as your account name.', 'error');
+    emailField?.focus();
     return;
   }
 
@@ -284,16 +307,17 @@ async function signInWithKey() {
     button.textContent = 'Checking…';
   }
   try {
-    await api('/login/key', { method: 'POST', body: { key } });
+    await api('/login/key', { method: 'POST', body: { key, email } });
     if (field) field.value = '';
-    toast('Signed in with your API key');
+    if (emailField) emailField.value = '';
+    toast('Logged in');
     await loadAccount();
     await render();
   } catch (error) {
     toast(String(error.message ?? error), 'error');
     if (button) {
       button.disabled = false;
-      button.textContent = label ?? 'Continue';
+      button.textContent = label ?? 'Log In';
     }
     field?.focus();
     field?.select();
@@ -446,10 +470,25 @@ function applyTheme(theme) {
   if (theme === 'system') {
     delete document.documentElement.dataset.theme;
     localStorage.removeItem(THEME_KEY);
-    return;
+  } else {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(THEME_KEY, theme);
   }
-  document.documentElement.dataset.theme = theme;
-  localStorage.setItem(THEME_KEY, theme);
+  // The header logo follows the theme in CSS, but a favicon cannot be reached
+  // from a stylesheet, so the tab icon is the one thing that has to be told.
+  syncFavicon();
+}
+
+/**
+ * Point the tab icon at the mark that is visible against the current theme.
+ *
+ * The artwork is one glyph in white and black, so the wrong one is invisible
+ * rather than merely off-brand.
+ */
+function syncFavicon() {
+  const favicon = $('favicon');
+  if (favicon === null) return;
+  favicon.href = effectiveTheme() === 'dark' ? '/icon-32.png' : '/icon-black-32.png';
 }
 
 /** The theme actually in effect right now. */
@@ -484,6 +523,24 @@ const state = {
 };
 
 /**
+ * What to call the signed-in account.
+ *
+ * `displayName` is the visitor's own name for the account — the email they gave
+ * when signing in with a key, or the DeepAI username the sign-in returned. The
+ * fallback is the owner id, which is a key fingerprint and only ever shown when
+ * nothing better is known.
+ *
+ * @param {object|undefined} account
+ * @returns {string}
+ */
+function accountName(account) {
+  const display = typeof account?.displayName === 'string' ? account.displayName.trim() : '';
+  if (display !== '') return display;
+  const username = typeof account?.username === 'string' ? account.username.trim() : '';
+  return username !== '' ? username : 'DeepAI user';
+}
+
+/**
  * Render the account pill and the single auth button in the top bar.
  *
  * One control, two states: "Log in" while logged out, a filled red
@@ -507,8 +564,8 @@ function renderAccountBadge() {
     badge.className = account.balanceLow ? 'badge badge--amber' : 'badge badge--green';
     const balance = account.allowance?.balance;
     text.textContent = balance
-      ? `${account.username || 'Logged in'} · ${balance} Theos`
-      : (account.username || 'Logged in');
+      ? `${accountName(account)} · ${balance} Theos`
+      : accountName(account);
     button.textContent = 'Log out';
     button.className = 'btn btn--sm btn--signout';
   } else {
@@ -723,7 +780,7 @@ function accountCard() {
       <div class="row row--between">
         <div>
           <div class="card__title">DeepAI account</div>
-          <div class="card__sub">Logged in as ${esc(account.username || 'DeepAI user')}${account.isPro ? ' · Pro' : ''}</div>
+          <div class="card__sub">Logged in as ${esc(accountName(account))}${account.isPro ? ' · Pro' : ''}</div>
         </div>
         <span class="badge ${account.balanceLow ? 'badge--amber' : 'badge--green'}"><span class="dot"></span>${account.balanceLow ? 'Low balance' : 'Active'}</span>
       </div>
@@ -873,7 +930,7 @@ function wireAccountCard(rerender) {
   // "Log out" only ends this browser's session. Removing the account is a
   // separate, destructive decision, so it gets its own confirm step.
   $('forget-account')?.addEventListener('click', async () => {
-    const username = state.account?.username || 'this account';
+    const username = accountName(state.account);
     const confirmed = window.confirm(
       `Remove the DeepAI account "${username}" from this gateway?\n\n`
       + 'Its API keys will be deleted and its DeepAI credential forgotten. '

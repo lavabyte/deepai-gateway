@@ -24,6 +24,7 @@ import {
   publicKey,
 } from '../keys.js';
 import {
+  accountForApiKey,
   clearAccount,
   clearSessionCookie,
   createSession,
@@ -109,6 +110,7 @@ const TERMINAL_COMPLETION_REASONS = new Set(['expired', 'too_many_attempts', 'ex
  */
 const KEY_LOGIN_FAILURES = {
   invalid_key: [400, 'Paste the API key itself — one line, with nothing else around it.'],
+  invalid_email: [400, 'That does not look like an email address — it is shown as your account name.'],
   rejected: [401, 'DeepAI did not recognise that key. Copy it again from your DeepAI profile.'],
   'not-for-code': [
     403,
@@ -167,6 +169,10 @@ export function adminRouter(db, runtime) {
     res.json({
       signedIn: account !== undefined,
       username: view?.username ?? '',
+      // The name to show: the email given at key sign-in, or the DeepAI username
+      // the browser sign-in returned. Never the owner fingerprint unless there is
+      // nothing else.
+      displayName: account === undefined ? '' : getSetting(db, account.username, 'display_name', ''),
       isPro: view?.isPro ?? false,
       allowance: view?.allowance ?? null,
       signedInSince: view?.signedInSince ?? null,
@@ -302,6 +308,15 @@ export function adminRouter(db, runtime) {
       return res.status(status).json({ ok: false, error: message, code: 'invalid_key' });
     }
 
+    // A DeepAI key carries no identity, so the name to show is asked for. It is
+    // only ever a label: the owner still comes from the key below, which is what
+    // stops a typed name from claiming another account.
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim() : '';
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+      const [status, message] = KEY_LOGIN_FAILURES.invalid_email;
+      return res.status(status).json({ ok: false, error: message, code: 'invalid_email' });
+    }
+
     let check;
     try {
       check = await checkPastedKey(key, AbortSignal.timeout(20_000));
@@ -317,12 +332,21 @@ export function adminRouter(db, runtime) {
       return res.status(status).json({ ok: false, error: message, code: check.reason });
     }
 
-    const username = usernameForKey(key);
+    // A key DeepAI has already issued for an account keeps that account, so pasting
+    // the same key twice — or pasting it after a browser sign-in — does not split
+    // one DeepAI account across two owners. Only a key never seen before gets a
+    // derived owner.
+    const known = accountForApiKey(db, key);
+    const username = known?.username ?? usernameForKey(key);
     const completed = completeLogin(db, runtime, {
       apiKey: key,
       username,
       isPro: check.isPro,
     }, { secure: runtime.trustProxy === true });
+
+    // The name to show, kept as a setting so `accounts.username` stays the derived
+    // owner it has to be.
+    setSetting(db, username, 'display_name', email);
 
     // Persist the allowance just read, so the badge shows a balance immediately
     // rather than waiting for the background refresh.

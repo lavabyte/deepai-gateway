@@ -147,10 +147,12 @@ when `HOST` is not loopback.
 
 **3. Sign in with an API key (simplest).** `POST /api/login/key` takes a DeepAI API
 key and turns it into a session, with no callback, no address to copy and no
-password. The dashboard offers it under **"Or paste a DeepAI API key"**. A key is
-the same credential the sign-in exchange would have produced, so nothing is lost by
-arriving with it directly — it is simply the shortest route when the gateway is
-reached over the network.
+password. The dashboard offers it under **"Or log in with a DeepAI API key"**, as
+three steps: open `deepai.org/dashboard/profile`, copy the key, paste it.
+
+A key is the same credential the sign-in exchange would have produced, so nothing is
+lost by arriving with it directly — it is simply the shortest route when the gateway
+is reached over the network.
 
 The key is checked the same way a stored account is (`GET /deepai_code/theos`), so a
 key that is refused says which kind of refusal it was:
@@ -164,12 +166,28 @@ key that is refused says which kind of refusal it was:
 That middle case is the likeliest failure of all, because `deepai.org` issues a key
 for the public model API and it is not automatically enabled for DeepAI Code.
 
-**Ownership is derived from the key, never typed by the visitor.** `api_keys.owner_username`
-decides who sees and pays for a key, so a name the visitor could choose would let
-them claim someone else's account. The owner is therefore
-`key-<sha256(key)[0..16]>`: one-to-one with the key, non-reversible, and impossible
-to point at another account. A test signs in with two keys and asserts that the
-second cannot see the first's gateway keys.
+### Why the email is asked for
+
+A DeepAI key genuinely does not say who it belongs to. `/deepai_code/theos` and
+`/get_usage_summary` both answer with allowance only, no endpoint reports an
+identity, and the desktop app learns the username from the *sign-in response* rather
+than from the key. So the name to display is asked for alongside the key, and shown
+wherever the account is named.
+
+**Ownership is still derived from the key, never typed by the visitor.** The name is
+only a label. `api_keys.owner_username` decides who sees and pays for a key, so an
+owner the visitor could choose would let them claim someone else's account. The owner
+is therefore `key-<sha256(key)[0..16]>`: one-to-one with the key, non-reversible, and
+impossible to point at another account. Two tests cover this — one signs in with two
+keys and asserts the second cannot see the first's gateway keys, and the other asserts
+that the badge shows `milo@example.com` while the stored owner is still the
+fingerprint.
+
+**A key already known to the gateway keeps its account.** DeepAI mints a fresh key on
+every sign-in, so one DeepAI account can hold several, and the same key can arrive
+twice — pasted, or pasted after a browser sign-in. Matching on the key keeps that on
+one owner instead of splitting the account, its keys and its usage across two
+identities that look unrelated in the dashboard.
 
 **2. Forward the port.** Make the loopback address reach the gateway:
 
@@ -492,6 +510,22 @@ The dashboard follows the **Geist** design language (Vercel): a monochrome
 frame, 1px hairline structure instead of shadows, Inter with JetBrains Mono
 micro-labels, and colour reserved for status. It has light and dark themes that
 follow the OS by default, and a manual toggle.
+
+### Brand marks
+
+`app-icon-512.png` and `app-icon-512-black.png` are the source artwork: one glyph in
+white and black, on a transparent background. Because each disappears against the
+opposite background, the visible one is chosen per theme:
+
+| Where | How it adapts |
+| --- | --- |
+| Header logo and the sign-in callback page | two `<img>` elements, one shown by `html[data-theme]` in CSS — a logo that waits for JavaScript is a logo that can be missing |
+| Favicon (`public/icon-32.png`, `public/icon-black-32.png`) | set from JavaScript, because a stylesheet cannot reach a favicon; `index.html` decides it before the first paint so the tab never shows the wrong mark |
+| `/favicon.ico` | a 16/32/48 fallback for clients that ask for it by convention |
+
+`public/icon.png` and `public/icon-black.png` are the full-size copies the pages
+serve; the favicons are generated from the same artwork, trimmed and re-padded so the
+glyph still reads at 32px.
 
 ## Architecture
 

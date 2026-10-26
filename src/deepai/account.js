@@ -323,6 +323,8 @@ export function callbackPage(title, message, tone, options = {}) {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>${title} — DeepAI Gateway</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/icon-black-32.png" id="favicon">
+<link rel="apple-touch-icon" href="/icon-black.png">
 <style>
   :root{
     --bg:#fafafa; --surface:#fff; --ink:#171717; --text-2:#737373; --text-3:#a3a3a3;
@@ -381,6 +383,15 @@ export function callbackPage(title, message, tone, options = {}) {
   .btn--ghost{background:transparent;color:var(--ink);border-color:var(--hairline-strong)}
   .btn--ghost:hover{border-color:var(--ink);opacity:1}
   .foot{margin:22px 0 0;font-size:11.5px;color:var(--text-3)}
+  /* The mark is one glyph in two colours, so the visible one is chosen by theme
+     with CSS rather than by script — this page is served by the same gateway as
+     the dashboard and carries the same brand. */
+  .brand{display:flex;justify-content:center;margin:0 0 18px}
+  .logo{width:28px;height:28px;display:none}
+  html[data-theme="light"] .logo--on-light,
+  html[data-theme="dark"] .logo--on-dark{display:block}
+  @media (prefers-color-scheme: light){html:not([data-theme]) .logo--on-light{display:block}}
+  @media (prefers-color-scheme: dark){html:not([data-theme]) .logo--on-dark{display:block}}
   @media (prefers-reduced-motion: no-preference){
     .card{animation:rise .18s ease}
     @keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
@@ -389,6 +400,10 @@ export function callbackPage(title, message, tone, options = {}) {
 </head>
 <body>
   <main class="card">
+    <div class="brand" aria-hidden="true">
+      <img class="logo logo--on-light" src="/icon-black.png" alt="" width="28" height="28">
+      <img class="logo logo--on-dark" src="/icon.png" alt="" width="28" height="28">
+    </div>
     <div class="mark" aria-hidden="true">${glyph}</div>
     <h1>${title}</h1>
     <p>${message}</p>
@@ -406,6 +421,10 @@ export function callbackPage(title, message, tone, options = {}) {
     try {
       var saved = localStorage.getItem('deepai-gateway-theme');
       if (saved === 'light' || saved === 'dark') document.documentElement.dataset.theme = saved;
+      // CSS can pick the right logo, but a favicon can only be set from script.
+      var dark = saved === 'dark'
+        || (saved !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      if (dark) document.getElementById('favicon').href = '/icon-32.png';
     } catch (e) {}
 
     // Login ran in this tab, so hand it straight back to the dashboard. The

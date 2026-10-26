@@ -109,6 +109,24 @@ export function listAccounts(db) {
 }
 
 /**
+ * The account a DeepAI key already belongs to, if any.
+ *
+ * DeepAI mints a fresh key on every sign-in, so one DeepAI account can hold
+ * several. Matching on the key is what keeps a key pasted twice — or pasted after
+ * a browser sign-in — on a single owner instead of splitting the account in two.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {string} apiKey
+ * @returns {object|undefined}
+ */
+export function accountForApiKey(db, apiKey) {
+  if (typeof apiKey !== 'string' || apiKey === '') return undefined;
+  return accountOf(
+    db.prepare('SELECT * FROM accounts WHERE api_key = ? ORDER BY created_at ASC').get(apiKey),
+  );
+}
+
+/**
  * Persist a freshly signed-in account.
  *
  * Username is the identity: signing in again as the same DeepAI user replaces

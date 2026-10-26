@@ -2148,7 +2148,7 @@ await checkAsync('the sign-in step speaks to the visitor, not to the protocol', 
     new vm.Script(source, { filename: 'app.js' }).runInContext(sandbox);
     // The boot sequence is async; let it paint before reading the view.
     await new Promise((resolve) => setTimeout(resolve, 60));
-    return nodes.get('view').innerHTML;
+    return { html: nodes.get('view').innerHTML, badge: nodes.get('account-badge-text').textContent };
   };
 
   const account = (extra) => ({
@@ -2159,7 +2159,7 @@ await checkAsync('the sign-in step speaks to the visitor, not to the protocol', 
 
   // On the gateway's own host the redirect works, so the step must stay out of the
   // way: no warning about a problem this visitor will not hit.
-  const local = await render(account());
+  const { html: local } = await render(account());
   assert.ok(!local.includes('The last page may not load'), 'no warning on loopback');
   assert.ok(!local.includes('One more step'), 'nothing is pending yet');
   assert.match(local, /Signed in on DeepAI already\?/, 'the escape hatch is still offered');
@@ -2170,7 +2170,7 @@ await checkAsync('the sign-in step speaks to the visitor, not to the protocol', 
 
   // A visitor on a public host is guaranteed to hit the dead address, so they are
   // told before they leave rather than stranded afterwards.
-  const remote = await render(account({ origin: 'http://gw.example.test:25912', callbackUrl: 'http://127.0.0.1:25912/auth-callback' }));
+  const { html: remote } = await render(account({ origin: 'http://gw.example.test:25912', callbackUrl: 'http://127.0.0.1:25912/auth-callback' }));
   assert.match(remote, /The last page may not load/, 'the certain failure is explained up front');
   assert.match(remote, /that is expected/, 'the scary page is pre-framed as normal');
   assert.match(remote, /Paste that page's address below/, 'the paste route is stated');
@@ -2181,7 +2181,7 @@ await checkAsync('the sign-in step speaks to the visitor, not to the protocol', 
   assert.match(remote, /<code>http:\/\/127\.0\.0\.1:25912<\/code>/, 'the address to look for is shown');
 
   // While a sign-in waits, the step becomes the only thing to do.
-  const pending = await render(account({ pendingLogin: true, origin: 'http://gw.example.test:25912', callbackUrl: 'http://127.0.0.1:25912/auth-callback' }));
+  const { html: pending } = await render(account({ pendingLogin: true, origin: 'http://gw.example.test:25912', callbackUrl: 'http://127.0.0.1:25912/auth-callback' }));
   assert.match(pending, /One more step to finish/, 'the step is announced plainly');
   assert.match(pending, /still waiting — nothing is lost/, 'and the sign-in is not framed as failed');
   assert.match(pending, /Press Forward/, 'it says how to get the address back');
@@ -2193,11 +2193,39 @@ await checkAsync('the sign-in step speaks to the visitor, not to the protocol', 
   for (const [name, html] of [['local', local], ['remote', remote], ['pending', pending]]) {
     assert.match(html, /id="key-step"/, `${name} must offer the API-key route`);
     assert.match(html, /<input class="input" id="api-key" type="password"/, `${name} must hide the key as it is typed`);
+    // The three steps the visitor follows, in order.
+    assert.match(html, /Go to <a href="https:\/\/deepai\.org\/dashboard\/profile"/, `${name} must link to the profile page`);
+    assert.match(html, /Copy your API Key/, `${name} must say what to copy`);
+    assert.match(html, /Paste it below/, `${name} must say where it goes`);
+    // The name to show is asked for, because a key cannot answer it.
+    assert.match(html, /id="api-key-email" type="email"/, `${name} must ask for the email to display`);
+    assert.match(html, />Log In</, `${name} must label the button as asked`);
     assert.match(html, /id="login-with-key"/, `${name} needs a way to submit the key`);
-    assert.match(html, /Or paste a DeepAI API key/, `${name} must name the route plainly`);
+    assert.match(html, /Or log in with a DeepAI API key/, `${name} must name the route plainly`);
     // It is the second route, not the warning: it must not be styled as one.
     assert.ok(!/<section class="note note--warning[^>]*id="key-step"/.test(html), `${name} must not alarm about the key route`);
   }
+
+  /*
+   * The signed-in badge is what the visitor actually reads, and the owner is a key
+   * fingerprint — showing that was the complaint. The name to show comes first,
+   * and the fingerprint only appears when nothing better is known.
+   */
+  const named = await render({
+    signedIn: true, username: 'key-e6fdcb55e6e89ab6', displayName: 'milo@example.com',
+    pendingLogin: false, origin: 'http://gw.example.test:25912', callbackUrl: '', isPro: false,
+    allowance: { balance: '44.00149', granted: '50.00000' }, balanceLow: false,
+  });
+  assert.match(named.badge, /milo@example\.com/, 'the badge must show the email');
+  assert.ok(!named.badge.includes('key-e6fdcb55'), 'the badge must not show the owner fingerprint');
+
+  // Without a name, the DeepAI username is still better than the fingerprint.
+  const unnamed = await render({
+    signedIn: true, username: 'kontomilosz350', displayName: '',
+    pendingLogin: false, origin: 'http://gw.example.test:25912', callbackUrl: '', isPro: false,
+    allowance: null, balanceLow: false,
+  });
+  assert.match(unnamed.badge, /kontomilosz350/);
 
   // No state may leak the old developer-facing wording.
   for (const [name, html] of [['local', local], ['remote', remote], ['pending', pending]]) {
@@ -2311,10 +2339,10 @@ await checkAsync('signing in with a pasted API key skips the browser round trip'
   try {
     globalThis.fetch = async (url) => answer(url);
 
-    const signIn = (key, cookie) => http(`${base}/api/login/key`, {
+    const signIn = (key, cookie, email = 'milo@example.com') => http(`${base}/api/login/key`, {
       method: 'POST',
       headers: cookie === undefined ? { 'content-type': 'application/json' } : { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ key }),
+      body: JSON.stringify({ key, email }),
     });
 
     // Whitespace around a pasted key is normal and must not matter.
@@ -2334,6 +2362,9 @@ await checkAsync('signing in with a pasted API key skips the browser round trip'
     const account = await http(`${base}/api/account`, { headers: { cookie } }).then((r) => r.json());
     assert.equal(account.signedIn, true);
     assert.equal(account.username, usernameForKey('sk-good-key'));
+    // The owner stays the derived fingerprint — what is *shown* is the email.
+    assert.equal(account.displayName, 'milo@example.com');
+    assert.ok(!account.displayName.includes('sk-'), 'the shown name must not be the key');
     assert.equal(account.isPro, true);
     assert.equal(account.allowance?.balance, '10.50000');
 
@@ -2350,10 +2381,11 @@ await checkAsync('signing in with a pasted API key skips the browser round trip'
     });
     assert.equal(created.status, 201, await created.text());
 
-    const second = await signIn('sk-other-key');
+    const second = await signIn('sk-other-key', undefined, 'other@example.com');
     const secondCookie = String(second.headers.get('set-cookie') ?? '').split(';')[0];
     const secondAccount = await http(`${base}/api/account`, { headers: { cookie: secondCookie } }).then((r) => r.json());
     assert.equal(secondAccount.username, usernameForKey('sk-other-key'));
+    assert.equal(secondAccount.displayName, 'other@example.com', 'each account shows its own name');
     assert.notEqual(secondAccount.username, account.username);
     const stolen = await http(`${base}/api/keys`, { headers: { cookie: secondCookie } }).then((r) => r.json());
     assert.deepEqual(stolen.keys, [], 'a second key must not inherit the first key\'s gateway keys');
@@ -2362,6 +2394,64 @@ await checkAsync('signing in with a pasted API key skips the browser round trip'
     // A key is a credential: it must not reach the log either.
     assert.ok(logs.length > 0, 'the sign-in should be logged');
     assert.ok(!logs.join('\n').includes('sk-good-key'), 'the key must never be logged');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('the same DeepAI key never becomes two accounts', async () => {
+  /*
+   * DeepAI mints a fresh key on every sign-in, so one DeepAI account can hold
+   * several — and a key pasted by hand must land on the account that already owns
+   * it rather than starting a second, poorer identity beside it. Without this the
+   * dashboard shows a fingerprint owner next to a real username for what is one
+   * account, with the keys and usage split between them.
+   */
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const { accountForApiKey, saveAccount } = await import('../src/store.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  // What the browser sign-in would have stored: the real DeepAI username.
+  saveAccount(fresh, { apiKey: 'sk-shared-key', username: 'kontomilosz350', isPro: false });
+  assert.equal(accountForApiKey(fresh, 'sk-shared-key').username, 'kontomilosz350');
+
+  const realFetch = globalThis.fetch;
+  const http = (...args) => realFetch(...args);
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    if (target.endsWith('/deepai_code/theos')) {
+      return new Response(JSON.stringify({ enabled: true, balance: '5.0', granted: '10.0', refresh_at: null }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ is_authenticated: true }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  try {
+    const res = await http(`${base}/api/login/key`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key: 'sk-shared-key', email: 'milo@example.com' }),
+    });
+    const body = await res.json();
+    assert.equal(res.status, 200, JSON.stringify(body));
+    // The account is kept, not replaced: same owner, and it already existed.
+    assert.equal(body.username, 'kontomilosz350');
+    assert.equal(body.created, false);
+    assert.equal(listAccounts(fresh).length, 1, 'one DeepAI key must not become two accounts');
+
+    const cookie = String(res.headers.get('set-cookie') ?? '').split(';')[0];
+    const account = await http(`${base}/api/account`, { headers: { cookie } }).then((r) => r.json());
+    // The owner stays the real username, and the shown name is the email.
+    assert.equal(account.username, 'kontomilosz350');
+    assert.equal(account.displayName, 'milo@example.com');
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));
@@ -2402,23 +2492,30 @@ await checkAsync('a refused API key explains which kind of refusal it was', asyn
   try {
     // Shapes that are not a key at all: refused before any network call.
     globalThis.fetch = async () => { throw new Error('must not be called'); };
-    for (const body of [{}, { key: '' }, { key: '   ' }, { key: 42 }, { key: null }, { key: 'a\nb' }, { key: 'x'.repeat(600) }]) {
+    for (const body of [
+      {}, { key: '' }, { key: '   ' }, { key: 42 }, { key: null }, { key: 'a\nb' }, { key: 'x'.repeat(600) },
+      // The email is the name that will be shown, so a missing or implausible one
+      // is refused before any key is checked.
+      { key: 'sk-fine' }, { key: 'sk-fine', email: '' }, { key: 'sk-fine', email: '   ' },
+      { key: 'sk-fine', email: 'not-an-email' }, { key: 'sk-fine', email: 'a@b' },
+      { key: 'sk-fine', email: `${'x'.repeat(250)}@example.com` },
+    ]) {
       const bad = await post(body);
       assert.equal(bad.status, 400, `${JSON.stringify(body).slice(0, 40)} must be refused`);
-      assert.equal((await bad.json()).code, 'invalid_key');
+      assert.ok(['invalid_key', 'invalid_email'].includes((await bad.json()).code));
     }
     assert.equal(listAccounts(fresh).length, 0, 'nothing may be created from a malformed key');
 
     // A key DeepAI does not recognise.
     globalThis.fetch = lane({ theos: 401, usage: 401 });
-    const rejected = await post({ key: 'sk-nonsense' });
+    const rejected = await post({ key: 'sk-nonsense', email: 'milo@example.com' });
     assert.equal(rejected.status, 401);
     assert.equal((await rejected.json()).code, 'rejected');
 
     // A real DeepAI key that is not enabled for the Code lane: the likeliest
     // failure of all, and the one that must not be reported as a typo.
     globalThis.fetch = lane({ theos: 401, usage: 'auth' });
-    const wrongLane = await post({ key: 'sk-model-api-only' });
+    const wrongLane = await post({ key: 'sk-model-api-only', email: 'milo@example.com' });
     assert.equal(wrongLane.status, 403);
     const wrongLaneBody = await wrongLane.json();
     assert.equal(wrongLaneBody.code, 'not-for-code');
@@ -2426,13 +2523,13 @@ await checkAsync('a refused API key explains which kind of refusal it was', asyn
 
     // DeepAI is down, which is not the visitor's mistake.
     globalThis.fetch = lane({ theos: 500, usage: 401 });
-    const down = await post({ key: 'sk-fine' });
+    const down = await post({ key: 'sk-fine', email: 'milo@example.com' });
     assert.equal(down.status, 502);
     assert.equal((await down.json()).code, 'unreachable');
 
     // And a network failure is reported as one rather than as a bad key.
     globalThis.fetch = async () => { throw new Error('offline'); };
-    const offline = await post({ key: 'sk-fine' });
+    const offline = await post({ key: 'sk-fine', email: 'milo@example.com' });
     assert.equal(offline.status, 502);
     assert.equal((await offline.json()).code, 'unreachable');
 

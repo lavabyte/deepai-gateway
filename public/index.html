@@ -8,13 +8,36 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/app.css">
+<link rel="icon" type="image/png" sizes="32x32" href="/icon-black-32.png" id="favicon">
+<link rel="apple-touch-icon" href="/icon-black.png">
+<script>
+  /*
+   * Pick the tab icon that is actually visible, before the first paint.
+   *
+   * The artwork is one glyph in two colours, so each disappears against the
+   * opposite background. CSS can choose between two <img> elements but cannot
+   * touch a favicon at all, so this one case is decided here rather than in
+   * app.js — which also keeps the tab from showing the wrong mark while the
+   * module loads.
+   */
+  (function () {
+    var stored = null;
+    try { stored = localStorage.getItem('deepai-gateway-theme'); } catch (e) {}
+    var dark = stored === 'dark'
+      || (stored !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    if (dark) document.getElementById('favicon').href = '/icon-32.png';
+  })();
+</script>
 </head>
 <body>
 
 <header class="topbar">
   <div class="topbar__inner">
     <a class="brand" href="#/">
-      <span class="brand__mark" aria-hidden="true"></span>
+      <span class="brand__mark" aria-hidden="true">
+        <img class="brand__logo brand__logo--on-light" src="/icon-black.png" alt="" width="20" height="20">
+        <img class="brand__logo brand__logo--on-dark" src="/icon.png" alt="" width="20" height="20">
+      </span>
       <span class="brand__name">DeepAI Gateway</span>
     </a>
     <nav class="nav" id="nav">
