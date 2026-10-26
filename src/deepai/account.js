@@ -593,6 +593,63 @@ async function postForm(url, fields, signal) {
 }
 
 /**
+ * Read the account JSON a visitor pasted out of their own browser.
+ *
+ * The shape is the answer to `GET /daily-time-sync/user/`, which is the one place a
+ * DeepAI key and the account's own email appear together. A visitor who signs in with
+ * Google or Apple has no password to give, so this is how they hand over the key.
+ *
+ * Parsing is deliberately forgiving: a console prints a copied string with its quotes
+ * still around it, and a paste can pick up a stray line. The only thing that must be
+ * present is the key, because everything else can be re-derived.
+ *
+ * @param {unknown} input
+ * @returns {{ok: true, apiKey: string, email?: string}
+ *   | {ok: false, reason: 'empty'|'too-long'|'not-json'|'no-key'}}
+ */
+export function parseAccountPaste(input) {
+  if (typeof input !== 'string') return { ok: false, reason: 'empty' };
+  let text = input.trim();
+  if (text === '') return { ok: false, reason: 'empty' };
+  if (text.length > 65536) return { ok: false, reason: 'too-long' };
+
+  // A copied console string keeps its quotes.
+  if (text.length > 1
+    && ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'")))) {
+    text = text.slice(1, -1).trim();
+  }
+  /*
+   * Anything around the object — a log prefix, a trailing `undefined` line — is
+   * ignored. Every `{` is tried in turn rather than only the first, because a console
+   * can print more than one thing and a stray brace before the object would otherwise
+   * make the whole paste unreadable. The candidate count is bounded so a pathological
+   * paste cannot turn this into work.
+   */
+  const end = text.lastIndexOf('}');
+  if (end <= 0) return { ok: false, reason: 'not-json' };
+
+  let data;
+  let from = -1;
+  for (let tries = 0; tries < 64; tries += 1) {
+    const start = text.indexOf('{', from + 1);
+    if (start === -1 || start >= end) break;
+    from = start;
+    try {
+      data = JSON.parse(text.slice(start, end + 1));
+      break;
+    } catch {
+      /* try the next candidate */
+    }
+  }
+  if (data === undefined) return { ok: false, reason: 'not-json' };
+
+  const apiKey = typeof data?.userprofile?.api_key === 'string' ? data.userprofile.api_key.trim() : '';
+  if (apiKey === '') return { ok: false, reason: 'no-key' };
+  const email = typeof data?.email === 'string' ? data.email.trim() : '';
+  return { ok: true, apiKey, ...(email === '' ? {} : { email }) };
+}
+
+/**
  * Ask DeepAI who the session we hold belongs to.
  *
  * This is the endpoint DeepAI's own page polls, and it answers with the account's

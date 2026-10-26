@@ -2633,7 +2633,13 @@ await checkAsync('the sign-in step speaks to the visitor, not to the protocol', 
     new vm.Script(source, { filename: 'app.js' }).runInContext(sandbox);
     // The boot sequence is async; let it paint before reading the view.
     await new Promise((resolve) => setTimeout(resolve, 60));
-    return { html: nodes.get('view').innerHTML, badge: nodes.get('account-badge-text').textContent };
+    return {
+      html: nodes.get('view').innerHTML,
+      badge: nodes.get('account-badge-text').textContent,
+      // Some of the card is revealed by a click, so it never appears in `view`.
+      // Evaluating in the same context reaches it without a second stub.
+      run: (expression) => vm.runInContext(expression, sandbox),
+    };
   };
 
   const account = (extra) => ({
@@ -2714,6 +2720,28 @@ await checkAsync('the sign-in step speaks to the visitor, not to the protocol', 
     allowance: null, balanceLow: false,
   });
   assert.match(unnamed.badge, /kontomilosz350/);
+
+  /*
+   * The Google/Apple route is revealed by a click, so it is rendered directly here.
+   * The command has to print *text*: `console.log` of a Response shows an object that
+   * cannot be copied as JSON, which is the whole difference between working and not.
+   */
+  const help = (await render(account())).run('profilePasteHelp()');
+  assert.match(help, /\.text\(\)/, 'the command must print text, not a Response object');
+  // The command is HTML-escaped on the way in, which is why its quotes read as
+  // `&#39;` — and the assertion allowing either form also proves the escaping happens.
+  assert.match(
+    help,
+    /console\.log\(await \(await fetch\((?:&#39;|')https:\/\/api\.deepai\.org\/daily-time-sync\/user\/(?:&#39;|')\)\)\.text\(\)\)/,
+  );
+  for (const step of ['Go to', 'Log in or register', 'Open DevTools', 'Console', 'Copy what it prints']) {
+    assert.ok(help.includes(step), `the steps must include ${step}`);
+  }
+  // The console's own warning is pre-empted, because it stops people cold.
+  assert.match(help, /allow pasting/);
+  assert.match(help, /note--warning/, 'the warning is called out, not buried');
+  assert.match(help, /<textarea class="textarea" id="profile-paste" rows="5"/, 'a multiline field, sized for JSON');
+  assert.match(help, /id="login-with-profile"/);
 
   // No state may leak the old developer-facing wording.
   for (const [name, html] of [['local', local], ['remote', remote], ['pending', pending]]) {
@@ -2821,6 +2849,121 @@ check('every sign-in failure has something useful to say', async () => {
   }
   for (const terminal of ['expired', 'too_many_attempts', 'exchange_failed']) {
     assert.ok(terminalReasons.has(terminal), `${terminal} ends the attempt`);
+  }
+});
+
+check('the pasted console output is read forgivingly', async () => {
+  const { parseAccountPaste } = await import('../src/deepai/account.js');
+
+  // What the console prints for `console.log(await (await fetch(…)).text())`, pasted
+  // exactly as it appears — quotes included.
+  const printed = JSON.stringify({
+    pk: 9726455,
+    username: 'kontomilosz350',
+    email: 'kontomilosz350@gmail.com',
+    userprofile: { api_key: 'key-from-console' },
+  });
+  assert.deepEqual(parseAccountPaste(printed), {
+    ok: true,
+    apiKey: 'key-from-console',
+    email: 'kontomilosz350@gmail.com',
+  });
+
+  // A console string keeps its quotes when copied.
+  assert.deepEqual(
+    parseAccountPaste(`"${JSON.stringify({ email: 'a@b.co', userprofile: { api_key: 'k' } })}"`),
+    { ok: true, apiKey: 'k', email: 'a@b.co' },
+  );
+  // A stray log prefix or trailing line must not defeat it: only the object is needed.
+  assert.deepEqual(
+    parseAccountPaste(`{pk: 1}\n{"email":"a@b.co","userprofile":{"api_key":"k"}}\nundefined`).apiKey,
+    'k',
+  );
+  // The email is optional; the key is not.
+  assert.deepEqual(parseAccountPaste('{"userprofile":{"api_key":"k"}}'), { ok: true, apiKey: 'k' });
+
+  // Rejections say which part is wrong, because the visitor is told to fix it.
+  assert.deepEqual(parseAccountPaste(''), { ok: false, reason: 'empty' });
+  assert.deepEqual(parseAccountPaste('   '), { ok: false, reason: 'empty' });
+  assert.deepEqual(parseAccountPaste(42), { ok: false, reason: 'empty' });
+  assert.deepEqual(parseAccountPaste('hello'), { ok: false, reason: 'not-json' });
+  assert.deepEqual(parseAccountPaste('{"pk": 1}'), { ok: false, reason: 'no-key' });
+  assert.deepEqual(parseAccountPaste('{"userprofile": {"api_key": ""}}'), { ok: false, reason: 'no-key' });
+  // A Response object logged without `.text()` is the mistake this guards against.
+  assert.deepEqual(parseAccountPaste('Response {type: "cors", url: "…"}'), { ok: false, reason: 'not-json' });
+  assert.deepEqual(parseAccountPaste(`{"a":"${'x'.repeat(70000)}"}`), { ok: false, reason: 'too-long' });
+});
+
+await checkAsync('an account with no password signs in by pasting its console output', async () => {
+  /*
+   * The route for Google and Apple: their sign-in happens in the visitor's browser, and
+   * the account JSON DeepAI produced for that browser is read back out with one command.
+   * It carries both the key and the account's own email, so nothing is typed from memory.
+   */
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const realFetch = globalThis.fetch;
+  const http = (...args) => realFetch(...args);
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    if (target.endsWith('/deepai_code/theos')) {
+      return new Response(JSON.stringify({ enabled: true, balance: '9.0', granted: '10.0', refresh_at: null }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (target.endsWith('/get_usage_summary')) {
+      return new Response('{"is_authenticated":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  const post = (body) => http(`${base}/api/login/profile`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+
+  try {
+    // Unreadable pastes are refused before anything is contacted.
+    for (const [body, code] of [
+      [{}, 'empty'],
+      [{ text: '' }, 'empty'],
+      [{ text: 'nonsense' }, 'not-json'],
+      [{ text: '{"pk":1}' }, 'no-key'],
+      [{ text: 'Response {type: "cors"}' }, 'not-json'],
+    ]) {
+      const bad = await post(body);
+      assert.equal(bad.status, 400, `${JSON.stringify(body)} must be refused`);
+      assert.equal((await bad.json()).code, code);
+    }
+    assert.equal(listAccounts(fresh).length, 0);
+
+    // The real paste: key and email both come out of it.
+    const done = await post({
+      text: JSON.stringify({
+        pk: 9726455,
+        email: 'kontomilosz350@gmail.com',
+        userprofile: { api_key: 'sk-from-console-output' },
+      }),
+    });
+    const doneText = await done.text();
+    assert.equal(done.status, 200, doneText);
+    const body = JSON.parse(doneText);
+    assert.equal(body.created, true);
+    assert.ok(!doneText.includes('sk-from-console-output'), 'the key must not be echoed back');
+
+    const cookie = String(done.headers.get('set-cookie') ?? '').split(';')[0];
+    const account = await http(`${base}/api/account`, { headers: { cookie } }).then((r) => r.json());
+    assert.equal(account.signedIn, true);
+    // The name is the account's own, taken from what DeepAI returned for that browser.
+    assert.equal(account.displayName, 'kontomilosz350@gmail.com');
+    assert.equal(account.allowance?.balance, '9.0');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 

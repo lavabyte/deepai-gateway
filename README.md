@@ -165,7 +165,25 @@ page:
 
 Apple uses the same redirect shape (`/accounts/apple/login/?process=login`).
 
-**What does work is making the loopback real on the visitor's machine.** Then the
+**The route that works for them, with nothing installed**, is to read the key out of
+DeepAI's own page. The visitor signs in with Google or Apple at deepai.org as usual,
+then runs one command in the browser console:
+
+```js
+console.log(await (await fetch('https://api.deepai.org/daily-time-sync/user/')).text())
+```
+
+and pastes what it prints into the dashboard. That output is DeepAI's own answer for
+the browser that is signed in, and it carries both the account's `email` and its
+`userprofile.api_key` — so the key is the account key the Code lane accepts, and the
+name to show is the account's own rather than something typed. The dashboard shows the
+steps, the command, and a warning about the console's paste prompt (`allow pasting`).
+
+`console.log` of the `Response` itself would print an object that cannot be copied as
+JSON, which is the one detail that turns this from a two-second job into a puzzle; the
+command therefore prints `.text()`.
+
+**Or make the loopback real on the visitor's machine.** Then the
 browser is in exactly the situation DeepAI's desktop app expects: the page's own host
 check passes, Google and Apple work natively, and the redirect arrives here — with no
 password passing through the gateway at all. The dashboard shows the command:
@@ -540,6 +558,7 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | `GET` | `/login` | Browser sign-in; redirects to DeepAI (`?json=1` returns the URL and the callback address) |
 | `GET` | `/auth-callback` · `/callback` | Where DeepAI sends the browser back. The host is DeepAI's — always loopback — so see [Signing in from another machine](#signing-in-from-another-machine) |
 | `POST` | `/api/login/complete` | Finish that sign-in from the dashboard by pasting the address the browser was sent to |
+| `POST` | `/api/login/profile` | Sign in with the account JSON copied out of the visitor's own browser — the route for Google and Apple |
 | `POST` | `/api/login/password` | Sign in with a DeepAI email and password; the gateway performs DeepAI's own requests |
 | `POST` | `/api/login/key` | Sign in directly with a DeepAI API key — no callback and no password |
 | `GET` | `/deepai_code/desktop_auth/` and the paths its page calls (`/daily-time-sync/…`, `/get_user_login_type`, `/static/…`) | The relay: allowlisted, fixed-upstream, and only when `AUTH_PROXY` is on |

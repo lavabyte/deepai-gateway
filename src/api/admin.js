@@ -17,6 +17,7 @@ import {
   checkKey,
   checkPastedKey,
   loopbackCallbackUrl,
+  parseAccountPaste,
   signInWithPassword,
   startLogin,
   usernameForKey,
@@ -136,6 +137,9 @@ const PASSWORD_LOGIN_FAILURES = {
 const KEY_LOGIN_FAILURES = {
   invalid_key: [400, 'Paste the API key itself — one line, with nothing else around it.'],
   invalid_email: [400, 'That does not look like an email address — it is shown as your account name.'],
+  empty: [400, 'Paste what your browser console printed first.'],
+  'not-json': [400, 'That is not the console output. Copy everything it printed, starting with “{”.'],
+  'no-key': [400, 'That output has no API key in it. Sign in at deepai.org in the same browser, then run the command again.'],
   rejected: [401, 'DeepAI did not recognise that key. Copy it again from your DeepAI profile.'],
   'not-for-code': [
     403,
@@ -318,6 +322,79 @@ export function adminRouter(db, runtime) {
   });
 
   /**
+   * Turn a DeepAI key into a session.
+   *
+   * Shared by both key routes — a key pasted on its own, and a key that arrived inside
+   * the account JSON its owner copied out of their browser — so the validation, the
+   * owner resolution and the cookie cannot drift apart between them.
+   *
+   * @param {import('express').Response} res
+   * @param {{key: string, displayName?: string}} input
+   * @returns {Promise<void>} always sends the response.
+   */
+  const signInWithKey = async (res, { key, displayName }) => {
+    let check;
+    try {
+      check = await checkPastedKey(key, AbortSignal.timeout(20_000));
+    } catch (error) {
+      runtime.log?.(`key sign-in failed: ${error?.message ?? error}`);
+      check = { ok: false, reason: 'unreachable' };
+    }
+
+    if (check.ok !== true) {
+      const [status, message] = KEY_LOGIN_FAILURES[check.reason] ?? [400, 'That key could not be used.'];
+      runtime.log?.(`key sign-in refused: ${check.reason}`);
+      return res.status(status).json({ ok: false, error: message, code: check.reason });
+    }
+
+    // A key DeepAI has already issued for an account keeps that account, so the same
+    // key arriving twice does not split one DeepAI account across two owners. Only a
+    // key never seen before gets a derived owner — which is what keeps a name from
+    // claiming somebody else's account.
+    const known = accountForApiKey(db, key);
+    const username = known?.username ?? usernameForKey(key);
+    const completed = completeLogin(db, runtime, {
+      apiKey: key,
+      username,
+      isPro: check.isPro,
+    }, { secure: runtime.trustProxy === true });
+
+    // The name to show, kept as a setting so `accounts.username` stays the derived
+    // owner it has to be.
+    if (typeof displayName === 'string' && displayName !== '') {
+      setSetting(db, username, 'display_name', displayName);
+    }
+
+    // Persist the allowance just read, so the badge shows a balance immediately
+    // rather than waiting for the background refresh.
+    saveAllowance(db, username, check.allowance);
+    if (typeof check.isPro === 'boolean') savePro(db, username, check.isPro);
+
+    res.setHeader('set-cookie', completed.cookie);
+    return res.json({ ok: true, username: completed.username, created: completed.created });
+  };
+
+  /**
+   * Sign in with the account details copied out of the visitor's own browser.
+   *
+   * The one route that works for a Google or Apple account without a tunnel: their
+   * sign-in happens in their browser as usual, and the console command hands back the
+   * account JSON DeepAI itself produced — which carries both the API key and the
+   * account's own email. Nothing is typed from memory and nothing has to be trusted
+   * but the key, which DeepAI validates.
+   */
+  router.post('/login/profile', async (req, res) => {
+    const text = typeof req.body?.text === 'string' ? req.body.text : '';
+    const parsed = parseAccountPaste(text);
+    if (parsed.ok !== true) {
+      const [status, message] = KEY_LOGIN_FAILURES[parsed.reason] ?? [400, 'That could not be read.'];
+      runtime.log?.(`profile sign-in refused: ${parsed.reason}`);
+      return res.status(status).json({ ok: false, error: message, code: parsed.reason });
+    }
+    return signInWithKey(res, { key: parsed.apiKey, displayName: parsed.email });
+  });
+
+  /**
    * Sign in by pasting a DeepAI API key.
    *
    * The browser sign-in has to end at a loopback address DeepAI chooses, which a
@@ -348,44 +425,7 @@ export function adminRouter(db, runtime) {
       return res.status(status).json({ ok: false, error: message, code: 'invalid_email' });
     }
 
-    let check;
-    try {
-      check = await checkPastedKey(key, AbortSignal.timeout(20_000));
-    } catch (error) {
-      runtime.log?.(`api key sign-in failed: ${error?.message ?? error}`);
-      const [status, message] = KEY_LOGIN_FAILURES.unreachable;
-      return res.status(status).json({ ok: false, error: message, code: 'unreachable' });
-    }
-
-    if (check.ok !== true) {
-      const [status, message] = KEY_LOGIN_FAILURES[check.reason] ?? [400, 'That key could not be used.'];
-      runtime.log?.(`api key sign-in refused: ${check.reason}`);
-      return res.status(status).json({ ok: false, error: message, code: check.reason });
-    }
-
-    // A key DeepAI has already issued for an account keeps that account, so pasting
-    // the same key twice — or pasting it after a browser sign-in — does not split
-    // one DeepAI account across two owners. Only a key never seen before gets a
-    // derived owner.
-    const known = accountForApiKey(db, key);
-    const username = known?.username ?? usernameForKey(key);
-    const completed = completeLogin(db, runtime, {
-      apiKey: key,
-      username,
-      isPro: check.isPro,
-    }, { secure: runtime.trustProxy === true });
-
-    // The name to show, kept as a setting so `accounts.username` stays the derived
-    // owner it has to be.
-    setSetting(db, username, 'display_name', email);
-
-    // Persist the allowance just read, so the badge shows a balance immediately
-    // rather than waiting for the background refresh.
-    saveAllowance(db, username, check.allowance);
-    if (typeof check.isPro === 'boolean') savePro(db, username, check.isPro);
-
-    res.setHeader('set-cookie', completed.cookie);
-    return res.json({ ok: true, username: completed.username, created: completed.created });
+    return signInWithKey(res, { key, displayName: email });
   });
 
   /**

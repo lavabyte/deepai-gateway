@@ -196,50 +196,90 @@ function finishStep({ pending, remote }) {
 }
 
 /**
- * What a Google or Apple account actually needs.
+ * The route for an account with no password: Google, Apple, anything else.
  *
- * Neither can be routed through this gateway, for two independent reasons: their
- * sign-in is an OAuth redirect whose `redirect_uri` is DeepAI's own host, so the
- * session is created in the browser and never reaches us — and Google's One Tap is
- * refused on any origin that is not registered for DeepAI's client id.
+ * Their sign-in has to happen in their own browser on DeepAI's site, and the result
+ * of it — the account's API key and its own email — is already in the page they are
+ * looking at. So they are asked to read it out with one command and paste it back.
  *
- * What does work is making the loopback address real on the visitor's own machine.
- * Then the browser is in exactly the situation DeepAI's desktop app expects: the
- * page's own host check passes, Google and Apple work natively, and the redirect
- * arrives here — with no password passing through the gateway at all.
+ * The command prints *text*, not a `Response`: `console.log` of a Response shows an
+ * object that cannot be copied as JSON, which is the one detail that turns this from
+ * a two-second job into a puzzle.
  */
-function socialHelp() {
-  const origin = state.account?.origin ?? '';
-  const host = origin.replace(/^https?:\/\//, '');
-  const port = (/(?::(\d+))\/auth-callback$/.exec(state.callbackUrl ?? '') ?? [])[1]
-    ?? (host.match(/:(\d+)$/) ?? [])[1]
-    ?? '25912';
-  const name = host.replace(/:\d+$/, '') || 'your-gateway-host';
-  const hostPort = host.includes(':') ? host : `${name}:${port}`;
-
+function profilePasteHelp() {
+  const command = "console.log(await (await fetch('https://api.deepai.org/daily-time-sync/user/')).text())";
   return `
-    <section class="note mt-3 step" id="social-help">
-      <div class="step__title">Google and Apple need one command on your computer</div>
+    <section class="note mt-3 step" id="profile-step">
+      <div class="step__title">Sign in with Google or Apple</div>
       <p class="step__lead">
-        Their sign-in finishes at an address only your own machine can open
-        (<code>http://127.0.0.1:${esc(port)}</code>), and that address cannot be routed through this
-        gateway — so the sign-in has to end where it was always meant to: on your computer.
+        These accounts have no password to give, so this reads your key straight out of
+        DeepAI's own page — where you are already signed in.
       </p>
-      <p class="step__lead">Run one of these on the computer with the browser:</p>
-      <div class="snippet snippet--block"><code>socat TCP-LISTEN:${esc(port)},fork,reuseaddr TCP:${esc(hostPort)}</code></div>
-      <p class="step__lead step__aside">No socat? Any equivalent will do —
-        <code>ssh -L ${esc(port)}:${esc(hostPort)} user@${esc(name)}</code>.</p>
-      <p class="step__lead">
-        Then open <code>http://127.0.0.1:${esc(port)}</code> and sign in with Google or Apple as usual.
-      </p>
-      <p class="step__lead step__aside">
-        Or skip it: sign in with Google on deepai.org, copy the key from your profile, and paste it
-        in the API-key section below.
-      </p>
-      <div class="row mt-3">
-        <button class="btn btn--ghost" id="login-browser-anyway" type="button">Try DeepAI's page anyway</button>
+      <ol class="step__list mt-3">
+        <li>Go to <a href="https://deepai.org" target="_blank" rel="noreferrer noopener">https://deepai.org</a></li>
+        <li>Log in or register</li>
+        <li>Open DevTools — <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> or <kbd>F12</kbd></li>
+        <li>
+          Go to <strong>Console</strong> and run this command:
+          <div class="snippet snippet--block mt-2"><code id="profile-command">${esc(command)}</code></div>
+        </li>
+        <li>Copy what it prints and paste it below</li>
+      </ol>
+
+      <div class="note note--warning mt-3" id="paste-warning">
+        <strong>Chrome will warn you about pasting into the Console.</strong>
+        That warning exists because a console command can do anything you can. This one only
+        reads your own account details — but check it yourself before running it.
+        If the warning appears, type <code>allow pasting</code> and press Enter, then paste again.
       </div>
+
+      <div class="field mt-3">
+        <label class="field__label" for="profile-paste">What the console printed</label>
+        <textarea class="textarea" id="profile-paste" rows="5" spellcheck="false" autocomplete="off"
+          placeholder='{"pk": …, "username": "…", "email": "…", "userprofile": {"api_key": "…"}}'></textarea>
+        <div class="field__hint">
+          It contains your DeepAI API key, which is kept on this server to serve your requests.
+        </div>
+      </div>
+      <div class="row mt-3"><button class="btn btn--primary" id="login-with-profile" type="button">Log In</button></div>
     </section>`;
+}
+
+/**
+ * Sign in with the account details the visitor pasted.
+ *
+ * Both secrets are cleared from the field once accepted, so nothing lingers in the page.
+ */
+async function signInWithProfile() {
+  const field = $('profile-paste');
+  const text = field?.value?.trim() ?? '';
+  if (text === '') {
+    toast('Run the command and paste what it printed.', 'error');
+    field?.focus();
+    return;
+  }
+
+  const button = $('login-with-profile');
+  const label = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Signing in…';
+  }
+  try {
+    await api('/login/profile', { method: 'POST', body: { text } });
+    if (field) field.value = '';
+    toast('Logged in');
+    await loadAccount();
+    await render();
+  } catch (error) {
+    toast(String(error.message ?? error), 'error');
+    if (button) {
+      button.disabled = false;
+      button.textContent = label ?? 'Log In';
+    }
+    field?.focus();
+    field?.select();
+  }
 }
 
 /**
@@ -348,8 +388,9 @@ function needsLogin() {
   $('login-browser')?.addEventListener('click', () => {
     const host = $('login-browser')?.parentElement;
     if (host === null || host === undefined) return;
-    host.insertAdjacentHTML('afterend', socialHelp());
-    $('login-browser-anyway')?.addEventListener('click', () => void startLoginFlow());
+    host.insertAdjacentHTML('afterend', profilePasteHelp());
+    $('login-with-profile')?.addEventListener('click', () => void signInWithProfile());
+    $('profile-paste')?.focus();
     host.remove();
   });
   $('password-form')?.addEventListener('submit', (event) => {
