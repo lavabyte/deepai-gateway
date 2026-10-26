@@ -2647,31 +2647,36 @@ check('a pasted callback address yields its code and state', async () => {
   );
 });
 
-await checkAsync('the sign-in step speaks to the visitor, not to the protocol', async () => {
+await checkAsync('the sign-in card gives one instruction, and it is the one that works', async () => {
+  /*
+   * Two earlier versions of this instruction were wrong, and both were taught by trying
+   * them: a console command returns `'OK'` unless the console is on DeepAI's own origin,
+   * because the API answers `201 OK` to an unauthenticated request; and the steps sat
+   * behind a click, so the instructions a visitor needed were the ones they could not
+   * see.
+   *
+   * What ships now is a page they open, a tab they click and text they copy — and the
+   * `OK` case is called out, because that is what a signed-out visitor will see.
+   */
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
   const vm = await import('node:vm');
   const root = new URL('..', import.meta.url).pathname;
   const source = readFileSync(join(root, 'public', 'app.js'), 'utf8');
 
-  /*
-   * Render the real dashboard against a DOM stand-in, so what is asserted here is
-   * the markup a visitor receives rather than the source that produces it. A
-   * template error would otherwise only show up in a browser.
-   */
   const render = async (account) => {
     const nodes = new Map();
     const node = () => ({
       innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
       dataset: {}, style: {}, value: '',
-      classList: { add() {}, remove() {}, contains: () => false },
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
       addEventListener() {}, appendChild() {}, remove() {}, replaceChildren() {},
       querySelector: () => null, querySelectorAll: () => [], setAttribute() {},
-      getAttribute: () => null, closest: () => null, focus() {}, select() {}, scrollIntoView() {},
+      getAttribute: () => null, closest: () => null, focus() {}, select() {},
+      insertAdjacentHTML() {}, scrollIntoView() {},
     });
     for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
       'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle']) nodes.set(id, node());
-
     const sandbox = {
       document: {
         getElementById: (id) => nodes.get(id) ?? null,
@@ -2693,144 +2698,52 @@ await checkAsync('the sign-in step speaks to the visitor, not to the protocol', 
     sandbox.globalThis = sandbox;
     vm.createContext(sandbox);
     new vm.Script(source, { filename: 'app.js' }).runInContext(sandbox);
-    // The boot sequence is async; let it paint before reading the view.
     await new Promise((resolve) => setTimeout(resolve, 60));
-    return {
-      html: nodes.get('view').innerHTML,
-      badge: nodes.get('account-badge-text').textContent,
-      // Some of the card is revealed by a click, so it never appears in `view`.
-      // Evaluating in the same context reaches it without a second stub.
-      run: (expression) => vm.runInContext(expression, sandbox),
-    };
+    return nodes.get('view').innerHTML;
   };
 
-  const account = (extra) => ({
-    signedIn: false, pendingLogin: false,
-    origin: 'http://127.0.0.1:8787', callbackUrl: 'http://127.0.0.1:8787/auth-callback',
-    ...extra,
-  });
+  const signedOut = {
+    ok: true, signedIn: false, username: '', displayName: '', pendingLogin: false,
+    origin: 'http://gw.example.test:25912', callbackUrl: 'http://127.0.0.1:25912/auth-callback',
+    authProxy: false, allowance: null, balanceLow: false,
+    keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false },
+  };
+  const html = await render(signedOut);
 
-  /*
-   * The three routes are tabs, all present in the markup, so a visitor sees that the
-   * Google/Apple route exists without having to click a link to discover it. That was
-   * the whole complaint: the instructions they needed were behind a click.
-   */
-  const { html: local } = await render(account());
-  assert.match(local, /id="login-tabs"/, 'the routes are tabs');
-  for (const [id, label] of [['password', 'Email & password'], ['profile', 'Google \/ Apple'], ['key', 'API key']]) {
-    assert.ok(local.includes(`id="tab-${id}"`), `the ${id} tab must exist`);
-    assert.ok(local.includes(label), `the ${id} tab must be labelled`);
+  // The three steps, in order, with the two addresses as real links.
+  const step = (n) => new RegExp(`<li>[\\s\\S]{0,400}?</li>`, 'g');
+  assert.match(html, /Go to <a href="https:\/\/deepai\.org"[^>]*>https:\/\/deepai\.org<\/a>\s*and log in or register/,
+    'step 1 sends them to DeepAI and says what to do there');
+  assert.match(html, /<a href="https:\/\/api\.deepai\.org\/daily-time-sync\/user\/"[^>]*>https:\/\/api\.deepai\.org\/daily-time-sync\/user\/<\/a>/,
+    'step 2 links the API page itself');
+  assert.match(html, /<strong>Raw Data<\/strong> tab/, 'step 2 names the tab to click');
+  assert.match(html, /Copy the <strong>Content<\/strong> and paste it below/, 'step 3 says what to copy');
+
+  // The signed-out case is called out in blue, because `OK` is what they will see.
+  assert.match(html, /note--info/, 'the "plain OK" hint is an info note, not an error');
+  assert.match(html, /shows a plain <code>OK<\/code>, you are not logged in/);
+  assert.match(html, /201 OK/, 'and it explains why, so `OK` is not mistaken for success');
+
+  // One field, sized for JSON, and the control that submits it.
+  assert.match(html, /<textarea class="textarea" id="profile-paste" rows="7"/);
+  assert.match(html, /id="login-with-profile"/);
+
+  // The removed routes must be gone from the screen entirely.
+  for (const gone of ['id="password-form"', 'id="api-key"', 'id="login-tabs"', 'password']) {
+    assert.ok(!html.includes(gone), `the removed route must not remain: ${gone}`);
   }
-  // All three panels ship, and only the first is open.
-  assert.match(local, /id="panel-password">/, 'the password panel is present');
-  assert.match(local, /id="panel-profile" hidden/, 'the profile panel starts hidden');
-  assert.match(local, /id="panel-key" hidden/, 'the key panel starts hidden');
-  assert.match(local, /id="tab-password" role="tab"\s+aria-selected="true"/.test(local) ? /aria-selected="true"/ : /aria-selected="true"/, 'the first tab is selected');
-
-  /*
-   * The Google/Apple instructions must be on the screen itself — the five steps, the
-   * command, and the console's paste warning — because they are what a visitor with
-   * such an account needs and they used to be hidden. The command has to print
-   * *text*: `console.log` of a Response shows an object that cannot be copied as JSON.
-   */
-  assert.match(local, /daily-time-sync\/user\//, 'the command is on the screen, not behind a click');
-  assert.match(local, /allow pasting/, 'the console paste warning is pre-empted');
-  for (const step of ['Go to', 'Log in or register', 'Open DevTools', 'Console', 'Copy what it prints']) {
-    assert.ok(local.includes(step), `the Google/Apple steps must include ${step}`);
-  }
-  /*
-   * The command must be copyable as-is. `esc()` turns an apostrophe into `&#39;`, which
-   * would make a visitor hand-edit the one line they are supposed to paste — so this is
-   * asserted on the rendered text, not on the source.
-   */
-  const commandText = /<code id="profile-command">([^<]*)<\/code>/.exec(local);
-  assert.ok(commandText !== null, 'the command must be in a copyable element');
-  assert.ok(!commandText[1].includes('&#'), `the command must not be entity-escaped: ${commandText[1]}`);
-  assert.ok(!commandText[1].includes('&amp;'), `and not double-escaped: ${commandText[1]}`);
-  assert.equal(
-    commandText[1].trim(),
-    "console.log(await (await fetch('https://api.deepai.org/daily-time-sync/user/')).text())",
-    'the command must be exactly the one the visitor is told to run',
-  );
-  // The tab label is read as prose, so it must not show a raw entity either.
-  assert.match(local, /Email & password/, 'the tab label is not double-escaped');
-  assert.ok(!local.includes('&amp;amp;'), 'no double-escaping anywhere');
-  assert.match(local, /id="profile-paste"/, 'the paste field is present');
-  assert.match(local, /id="login-with-profile"/, 'and its submit control');
-
-  // No browser-flow warning any more: that route is not what the card offers, so
-  // telling the visitor their last page may not load was about a flow they had not
-  // started.
-  assert.ok(!local.includes('The last page may not load'), 'no warning about a flow this card does not offer');
-
-  // While a sign-in waits, the step displaces the routes: there is nothing to choose,
-  // only an address to paste.
-  const { html: pending } = await render(account({ pendingLogin: true, callbackUrl: 'http://127.0.0.1:25912/auth-callback' }));
-  assert.match(pending, /One more step to finish/, 'the step is announced plainly');
-  assert.match(pending, /still waiting — nothing is lost/, 'and the sign-in is not framed as failed');
-  assert.match(pending, /Press Forward/, 'it says how to get the address back');
-  assert.match(pending, /Finish signing in/, 'the control names the outcome');
-  assert.match(pending, /note--warning/, 'and it is visually prominent');
-  assert.match(pending, /id="callback-url"/, 'with the paste field');
-  assert.match(pending, /id="login-complete"/, 'and its submit control');
-  assert.ok(!pending.includes('id="login-tabs"'), 'the routes give way to the one thing left to do');
-
-  // Every state offers the API-key route, one tab among three.
-  for (const [name, html] of [['local', local], ['pending', pending]]) {
-    if (name === 'pending') continue;
-    assert.match(html, /id="key-step"/, `${name} must offer the API-key route`);
-    assert.match(html, /<input class="input" id="api-key" type="password"/, `${name} must hide the key as it is typed`);
-    assert.match(html, /Go to <a href="https:\/\/deepai\.org\/dashboard\/profile"/, `${name} must link to the profile page`);
-    assert.match(html, /Copy your API Key/, `${name} must say what to copy`);
-    assert.match(html, /Paste it below/, `${name} must say where it goes`);
-    assert.match(html, /id="api-key-email" type="email"/, `${name} must ask for the email to display`);
-    assert.match(html, /cannot be checked/, `${name} must not imply the name is verified`);
-    assert.match(html, />Log In</, `${name} must label the button as asked`);
-    assert.match(html, /id="login-with-key"/, `${name} needs a way to submit the key`);
-  }
-
-  /*
-   * The signed-in badge is what the visitor actually reads, and the owner is a key
-   * fingerprint — showing that was the complaint. The name to show comes first,
-   * and the fingerprint only appears when nothing better is known.
-   */
-  const named = await render({
-    signedIn: true, username: 'key-e6fdcb55e6e89ab6', displayName: 'milo@example.com',
-    pendingLogin: false, origin: 'http://gw.example.test:25912', callbackUrl: '', isPro: false,
-    allowance: { balance: '44.00149', granted: '50.00000' }, balanceLow: false,
-  });
-  assert.match(named.badge, /milo@example\.com/, 'the badge must show the email');
-  assert.ok(!named.badge.includes('key-e6fdcb55'), 'the badge must not show the owner fingerprint');
-
-  // Without a name, the DeepAI username is still better than the fingerprint.
-  const unnamed = await render({
-    signedIn: true, username: 'kontomilosz350', displayName: '',
-    pendingLogin: false, origin: 'http://gw.example.test:25912', callbackUrl: '', isPro: false,
-    allowance: null, balanceLow: false,
-  });
-  assert.match(unnamed.badge, /kontomilosz350/);
-
-  // No state may leak the old developer-facing wording.
-  for (const [name, html] of [['local', local], ['pending', pending]]) {
-    for (const jargon of ['Browser did not come back', 'Finish manually', 'login-manual', 'window.close']) {
-      assert.ok(!html.includes(jargon), `${name} must not contain ${JSON.stringify(jargon)}`);
-    }
-    // Template expressions must have been evaluated, not shipped.
-    assert.ok(!html.includes('${'), `${name} has an unrendered template expression`);
-    assert.ok(!html.includes('undefined<'), `${name} interpolated undefined`);
-  }
+  // And no command to run in a console, which is the version that printed 'OK'.
+  assert.ok(!html.includes('console.log'), 'no console command: it returns OK off-origin');
+  assert.ok(!html.includes('allow pasting'), 'and no paste warning to go with it');
+  assert.ok(!html.includes('${'), 'no unrendered template expression');
 });
 
-await checkAsync('every signed-out screen offers the same ways in', async () => {
+await checkAsync('both signed-out screens offer the one route', async () => {
   /*
-   * There are two: the log-in screen, and the account card on the overview. They each
-   * carried their own copy of the sign-in markup, so when the primary form was
-   * rewritten only one of them changed — the overview kept a button that no longer
-   * existed anywhere else, which is why an old screen stayed visible after a deploy
-   * that had, in fact, shipped.
-   *
-   * Each is rendered here and must offer the same three routes. A third screen added
-   * later without them fails this on purpose.
+   * There are two: the log-in screen and the account card on the overview. They each
+   * carried their own copy of the sign-in markup once, so rewriting the screen changed
+   * only one of them — a deploy that had shipped, showing a screen that did not exist.
+   * Both now render the same block through one function, and this holds them to it.
    */
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
@@ -2843,7 +2756,7 @@ await checkAsync('every signed-out screen offers the same ways in', async () => 
     const node = () => ({
       innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
       dataset: {}, style: {}, value: '',
-      classList: { add() {}, remove() {}, contains: () => false },
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
       addEventListener() {}, appendChild() {}, remove() {}, replaceChildren() {},
       querySelector: () => null, querySelectorAll: () => [], setAttribute() {},
       getAttribute: () => null, closest: () => null, focus() {}, select() {},
@@ -2883,23 +2796,24 @@ await checkAsync('every signed-out screen offers the same ways in', async () => 
     keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false },
   };
 
-  const loginScreen = (await boot(signedOut)).nodes.get('view').innerHTML;
-  const card = (await boot(signedOut)).sandbox.accountCard();
+  const first = await boot(signedOut);
+  const loginScreen = first.nodes.get('view').innerHTML;
+  const second = await boot(signedOut);
+  const card = second.sandbox.accountCard();
 
   for (const [name, html] of [['the log-in screen', loginScreen], ['the account card', card]]) {
-    assert.match(html, /id="(account-)?password-form"/, `${name} must offer the password form`);
-    assert.match(html, /id="(account-)?login-submit"/, `${name} must have a way to submit it`);
-    // The Google/Apple route is on the screen itself, not behind a link: it was behind
-    // one, which is how the instructions a visitor needed stayed invisible.
-    assert.match(html, /Google \/ Apple/, `${name} must offer the visible Google/Apple tab`);
-    assert.match(html, /daily-time-sync\/user\//, `${name} must show the command for it`);
-    assert.match(html, /id="(account-)?key-step"/, `${name} must offer the API-key route`);
-    // And none may keep the control that was replaced.
+    assert.match(html, /id="(account-)?profile-paste"/, `${name} must offer the paste field`);
+    assert.match(html, /id="(account-)?login-with-profile"/, `${name} must submit it`);
+    assert.match(html, /Raw Data/, `${name} must name the tab to click`);
+    assert.ok(!html.includes('id="password-form"'), `${name} must not offer a removed route`);
+    assert.ok(!html.includes('id="api-key"'), `${name} must not offer a removed route`);
     assert.ok(!html.includes('id="signin"'), `${name} must not resurrect the old button`);
   }
 
-  // The old control has to be gone from the source entirely, not merely unreachable.
-  assert.ok(!source.includes('id="signin"'), 'the replaced control must not remain in the source');
+  // The replaced controls must be gone from the source, not merely unreachable.
+  for (const gone of ['id="password-form"', 'id="api-key"', 'id="signin"', 'passwordForm(', 'keyForm(']) {
+    assert.ok(!source.includes(gone), `${gone} must not remain in the source`);
+  }
 });
 
 check('every sign-in failure has something useful to say', async () => {

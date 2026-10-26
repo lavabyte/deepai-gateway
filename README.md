@@ -109,108 +109,37 @@ binds `127.0.0.1:0`, hands over the ephemeral port, and expects the browser to
 come back to loopback. `PUBLIC_URL` therefore changes what the dashboard *reports*
 as your origin, never where DeepAI sends the browser.
 
-### 1. Email and password, handled by the gateway (default)
+### 1. Copy the account JSON from DeepAI's API page (the only route)
 
-The dashboard has its own email and password form. The gateway performs DeepAI's own
-three requests itself:
+The dashboard gives one instruction, and it is one a browser can carry out:
 
-1. `POST /get_user_login_type` — does the account exist, and can it use a password?
-2. `POST /daily-time-sync/login/` with `username` and `password`. A rejection is a
-   plain `400 {"non_field_errors": […]}`, which is a verdict rather than a failure.
-3. `GET /deepai_code/desktop_auth/` **with the session cookies just issued** — the
-   reply is the same redirect to loopback a browser would have followed, and the
-   sign-in code is in its `Location`.
+1. Go to `https://deepai.org` and log in or register.
+2. Go to `https://api.deepai.org/daily-time-sync/user/`, scroll down and choose the
+   **Raw Data** tab. A browser asks for a JSON page and gets the account itself.
+3. Copy the **Content** and paste it below.
 
-Doing it here is what removes the whole problem: no loopback redirect for the browser
-to reach, no page to rewrite, and no list of requests to pass through. The password is
-sent once, used once, and kept nowhere.
+That JSON carries both the account's `email` and its `userprofile.api_key` — the account
+key the Code lane accepts — so pressing **Log In** signs in with a key DeepAI has already
+issued and names the account from DeepAI's own answer rather than from anything typed.
 
-The failures are distinguishable, because they need different fixes:
+**If the page shows a plain `OK`, the visitor is not logged in.** The API answers `200`
+with the account JSON and `201 OK` without one, so the dashboard calls this out in an
+info note rather than leaving `OK` to be mistaken for success.
 
-| What happened | What the visitor is told |
-| --- | --- |
-| `user_exists: false` | there is no DeepAI account with that email |
-| `login_with_password: false` | the account has no password — it signs in with Google or Apple, **named** |
-| `400` from the login | that email and password do not match |
-| no code in the redirect | DeepAI accepted the password but returned nothing usable |
+Two earlier versions of this instruction were worse, and both were taught by trying them:
 
-A sign-in attempt must already be waiting, so this cannot be used as a password oracle
-by someone who has not started one, and its attempts are bounded by the flow's own
-limit. Both `POST /api/login/password` and the API-key route are in the endpoints
-table below.
+- a browser-console command (`console.log(await (await fetch(…)).text())`) returns `'OK'`
+  for anyone not already on DeepAI's own origin, because of the same `201`;
+- the steps once sat behind a click, so the instructions a visitor needed were the ones
+  they could not see.
 
-The display name for this route comes from DeepAI, not from the form. Once the
-password is accepted the gateway holds the session and asks
-`GET /daily-time-sync/user/` who it belongs to, which answers with the account's own
-`email` (and its `api_key`). So there is nothing here for a visitor to get wrong.
+The password form and the bare-key form were removed with it. A DeepAI account created
+with Google or Apple has no password, and a bare key cannot say whose account it is, so
+three doors meant two of them were the wrong one for most visitors. `POST /api/login/password`
+and `POST /api/login/key` still exist as endpoints and are reached by the tests; only the
+dashboard stopped offering them.
 
-That endpoint needs a **session**: the same request with an API key answers `201`
-"not signed in" whatever headers it is given, so a pasted key still cannot reveal an
-identity.
-
-### Google and Apple accounts cannot be routed through the gateway
-
-Not a limitation of the allowlist — two independent blockers, both in DeepAI's own
-page:
-
-- The **"Sign in with Google" button** calls `social_auth()`, which navigates to
-  `app_base_url + /accounts/google/login/?process=login`. That is a redirect-based
-  OAuth flow on `api.deepai.org` with a **static `redirect_uri`**, so Google returns
-  the browser to DeepAI's own host, the session is created there, and the gateway
-  never sees it. Rewriting `redirect_uri` to this host is not an option: Google
-  rejects an unregistered one.
-- **Google One Tap** posts its credential to `app_base_url + /auth/google/one-tap/`,
-  which a relay *would* carry — but Google Identity Services refuses any origin that
-  is not registered against DeepAI's client id, and a gateway's origin is not.
-
-Apple uses the same redirect shape (`/accounts/apple/login/?process=login`).
-
-**The route that works for them, with nothing installed**, is to read the key out of
-DeepAI's own page. The visitor signs in with Google or Apple at deepai.org as usual,
-then runs one command in the browser console:
-
-```js
-console.log(await (await fetch('https://api.deepai.org/daily-time-sync/user/')).text())
-```
-
-and pastes what it prints into the dashboard. That output is DeepAI's own answer for
-the browser that is signed in, and it carries both the account's `email` and its
-`userprofile.api_key` — so the key is the account key the Code lane accepts, and the
-name to show is the account's own rather than something typed. The dashboard shows the
-steps, the command, and a warning about the console's paste prompt (`allow pasting`).
-
-It is a **tab beside the password form**, not a link that reveals it: these instructions
-were the ones behind a click, which is the wrong way round for the route most people
-with a Google or Apple account need. The command is emitted verbatim — `esc()` would
-turn its apostrophes into `&#39;`, leaving a visitor to un-escape the one line they are
-told to paste.
-
-`console.log` of the `Response` itself would print an object that cannot be copied as
-JSON, which is the one detail that turns this from a two-second job into a puzzle; the
-command therefore prints `.text()`.
-
-**Or make the loopback real on the visitor's machine.** Then the
-browser is in exactly the situation DeepAI's desktop app expects: the page's own host
-check passes, Google and Apple work natively, and the redirect arrives here — with no
-password passing through the gateway at all. The dashboard shows the command:
-
-```sh
-socat TCP-LISTEN:<port>,fork,reuseaddr TCP:<your-gateway-host>:<port>
-# or, equivalently:
-ssh -L <port>:<your-gateway-host>:<port> user@<your-gateway-host>
-```
-
-…then open `http://127.0.0.1:<port>`.
-
-**Or copy the key from your profile**, which needs no tunnel and no relay: sign in with
-Google or Apple at deepai.org, open `deepai.org/dashboard/profile`, and paste the key
-shown there into the API-key section. That key is the same account key the DeepAI Code
-lane accepts — `userprofile.api_key` answers `GET /deepai_code/theos` with
-`lane_version: 2` — so it is not a model-API-only key. Note that the Theos balance is
-per key, so a newly shown key can report a different balance from the one already
-stored.
-
-### 2. Relay DeepAI's page (opt-in, `AUTH_PROXY=1`)
+### 2. Relay DeepAI's page (opt-in, `AUTH_PROXY=1`)### 2. Relay DeepAI's page (opt-in, `AUTH_PROXY=1`)
 
 Off by default, because route 1 does not need it. It serves DeepAI's own sign-in page
 from this origin and rewrites the redirect that ends it — useful for the browser flow

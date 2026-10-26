@@ -103,102 +103,49 @@ function isAuthFailure(error) {
   return error instanceof ApiError && error.status === 401;
 }
 
-/**
- * The "finish signing in" step.
- *
- * DeepAI ends the sign-in by sending the browser to a `127.0.0.1` address, and
- * that address only opens on the machine running the gateway. A visitor browsing a
- * public address therefore lands on a page that cannot load — while DeepAI is
- * holding a sign-in that is still perfectly valid.
- *
- * Three states, because the same explanation is useful at different moments:
- *
- *   - **before** the visitor leaves, and only when their browser is *not* on the
- *     gateway's own host (so the failure is certain, not hypothetical): what is
- *     about to happen, and the two ways to finish it;
- *   - **while** a sign-in is waiting: the single action that finishes it;
- *   - **on the gateway's own host**: nothing, beyond a quiet fallback, because the
- *     redirect simply works there.
- *
- * @param {string} prefix - distinguishes the ids when both cards are in the DOM.
- * @returns {string} markup with the paste field and its submit control.
- */
-function finishStep(prefix = '') {
-  const address = state.callbackUrl;
-  const prefixUrl = address.replace(/\/auth-callback$/, '');
-  return `
-    <section class="note note--warning mt-3 step" id="${prefix}finish-step" aria-labelledby="${prefix}finish-title">
-      <div class="step__title" id="${prefix}finish-title">One more step to finish</div>
-      <p class="step__lead">
-        DeepAI sent your browser to an address that only opens on the server, so that page could
-        not load. Your sign-in is still waiting — nothing is lost.
-      </p>
-      <p class="step__lead">
-        Paste that page's address below.
-        <span class="step__aside">Need it again? Press Forward to return to that page.</span>
-      </p>
-      <div class="field mt-3">
-        <label class="field__label" for="${prefix}callback-url">Address from that page</label>
-        <textarea class="textarea" id="${prefix}callback-url" rows="3" spellcheck="false" autocomplete="off"
-          placeholder="${esc(address || 'http://127.0.0.1:8787/auth-callback?code=…&state=…')}"></textarea>
-        <div class="field__hint">
-          It starts with <code>${esc(prefixUrl || 'http://127.0.0.1:8787')}</code> and ends with <code>state=…</code>
-        </div>
-      </div>
-      <div class="row mt-3"><button class="btn btn--primary" id="${prefix}login-complete">Finish signing in</button></div>
-    </section>`;
-}
 
 /**
- * The route for an account with no password: Google, Apple, anything else.
+ * The one way in: the account JSON, read out of DeepAI's own API page.
  *
- * Their sign-in has to happen in their own browser on DeepAI's site, and the result
- * of it — the account's API key and its own email — is already in the page they are
- * looking at. So they are asked to read it out with one command and paste it back.
+ * DeepAI has no public endpoint that turns a password into the account's API key for a
+ * Google or Apple account, and its sign-in page cannot be relayed for them. But the
+ * account JSON is served to their own browser, and a browser shows it as a plain page —
+ * so the visitor opens that address and copies what it says.
  *
- * The command prints *text*, not a `Response`: `console.log` of a Response shows an
- * object that cannot be copied as JSON, which is the one detail that turns this from
- * a two-second job into a puzzle.
+ * Two earlier versions of this instruction were worse, and both were taught by trying
+ * them: a browser-console command returns `'OK'` unless the console happens to be on
+ * DeepAI's own origin, because the API answers `201 OK` to an unauthenticated request;
+ * and a link the visitor had to click to reveal these steps meant the instructions they
+ * needed were the ones they could not see.
  */
 function profilePasteHelp(prefix = '') {
-  const command = "console.log(await (await fetch('https://api.deepai.org/daily-time-sync/user/')).text())";
-  /*
-   * `esc()` turns an apostrophe into `&#39;`, which is right for prose but wrong inside
-   * a command the visitor is meant to copy: they would have to un-escape it by hand.
-   * Only the characters that could break out of the element are escaped here, and the
-   * command contains no others.
-   */
-  const copyable = command.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   return `
     <section class="step" id="${prefix}profile-step">
-      <p class="step__lead">
-        A Google or Apple account has no DeepAI password, so this reads your key out of
-        DeepAI's own page — where you are already signed in. One command, five steps.
-      </p>
-      <ol class="step__list mt-3">
-        <li>Go to <a href="https://deepai.org" target="_blank" rel="noreferrer noopener">https://deepai.org</a></li>
-        <li>Log in or register</li>
-        <li>Open DevTools — <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> or <kbd>F12</kbd></li>
+      <ol class="step__list">
         <li>
-          Go to <strong>Console</strong> and run this command:
-          <div class="snippet snippet--block mt-2"><code id="profile-command">${copyable}</code></div>
+          Go to <a href="https://deepai.org" target="_blank" rel="noreferrer noopener">https://deepai.org</a>
+          and log in or register
         </li>
-        <li>Copy what it prints and paste it below</li>
+        <li>
+          Go to
+          <a href="https://api.deepai.org/daily-time-sync/user/" target="_blank" rel="noreferrer noopener">https://api.deepai.org/daily-time-sync/user/</a>,
+          scroll down and choose the <strong>Raw Data</strong> tab
+        </li>
+        <li>Copy the <strong>Content</strong> and paste it below</li>
       </ol>
 
-      <div class="note note--warning mt-3" id="paste-warning">
-        <strong>Chrome will warn you about pasting into the Console.</strong>
-        That warning exists because a console command can do anything you can. This one only
-        reads your own account details — but check it yourself before running it.
-        If the warning appears, type <code>allow pasting</code> and press Enter, then paste again.
+      <div class="note note--info mt-3">
+        If that page shows a plain <code>OK</code>, you are not logged in — the API answers
+        <code>200</code> with your account and <code>201 OK</code> without one. Go back to
+        step 1, sign in, then reload step 2.
       </div>
 
       <div class="field mt-3">
-        <label class="field__label" for="${prefix}profile-paste">What the console printed</label>
-        <textarea class="textarea" id="${prefix}profile-paste" rows="5" spellcheck="false" autocomplete="off"
+        <label class="field__label" for="${prefix}profile-paste">Content</label>
+        <textarea class="textarea" id="${prefix}profile-paste" rows="7" spellcheck="false" autocomplete="off"
           placeholder='{"pk": …, "username": "…", "email": "…", "userprofile": {"api_key": "…"}}'></textarea>
         <div class="field__hint">
-          It contains your DeepAI API key, which is kept on this server to serve your requests.
+          It contains your DeepAI API key, which is stored on this server to serve your requests.
         </div>
       </div>
       <div class="row mt-3"><button class="btn btn--primary" id="${prefix}login-with-profile" type="button">Log In</button></div>
@@ -261,29 +208,18 @@ async function signInWithProfile() {
  * used to claim another account — and it is scoped to the session that typed it.
  */
 /**
- * The three ways in, as one block.
+ * The way in.
  *
- * Rendered by both signed-out screens rather than written out twice. They were written
- * out twice, and that is how the overview kept a control the log-in screen had already
- * replaced — a deploy that had shipped, showing a screen that no longer existed.
+ * One route only: the account JSON, copied from DeepAI's own API page. The password
+ * form and the bare-key form were both removed — the password route cannot work for a
+ * Google or Apple account, and a bare key cannot supply the email, so keeping three
+ * doors meant two of them were the wrong one for most visitors.
  *
- * @param {string} prefix - distinguishes the ids when both screens are in the DOM at
- *   once, which they can be while a view is being replaced.
- * @returns {string} markup containing all three panels and their tab buttons.
+ * @param {string} prefix - distinguishes the ids when both cards are in the DOM.
+ * @returns {string} markup containing the pasted-JSON form.
  */
 function signInRoutes(prefix = '') {
-  const tab = (name, label, on) =>
-    `<button class="tab${on ? ' tab--on' : ''}" id="${prefix}tab-${name}" role="tab"
-      aria-selected="${on ? 'true' : 'false'}" type="button">${label}</button>`;
-  return `
-    <div class="row mt-3" id="${prefix}login-tabs" role="tablist">
-      ${tab('password', 'Email & password', true)}
-      ${tab('profile', 'Google / Apple', false)}
-      ${tab('key', 'API key', false)}
-    </div>
-    <div class="tabpanel" id="${prefix}panel-password">${passwordForm(prefix)}</div>
-    <div class="tabpanel" id="${prefix}panel-profile" hidden>${profilePasteHelp(prefix)}</div>
-    <div class="tabpanel" id="${prefix}panel-key" hidden>${keyForm(prefix)}</div>`;
+  return `<div class="mt-3">${profilePasteHelp(prefix)}</div>`;
 }
 
 /**
@@ -296,96 +232,7 @@ function signInRoutes(prefix = '') {
  */
 function wireSignInForms(prefix = '') {
   const id = (name) => $(`${prefix}${name}`);
-
-  /*
-   * The three ways in, side by side rather than hidden behind a link.
-   *
-   * They used to be layered: the password form, then a "Google or Apple?" link that
-   * revealed the instructions, then a collapsed API-key section. The instructions a
-   * visitor needed were therefore the ones they could not see — the wrong way round for
-   * the route most people with a Google or Apple account need.
-   */
-  const tabs = [['password', 'panel-password'], ['profile', 'panel-profile'], ['key', 'panel-key']];
-  const caretFor = { password: 'login-email', profile: 'profile-paste', key: 'api-key' };
-  const show = (name) => {
-    for (const [candidate, panel] of tabs) {
-      const on = candidate === name;
-      const button = id(`tab-${candidate}`);
-      if (button !== null) {
-        button.classList.toggle('tab--on', on);
-        button.setAttribute('aria-selected', on ? 'true' : 'false');
-      }
-      const body = id(panel);
-      if (body !== null) body.hidden = !on;
-    }
-    // Put the caret where the chosen route starts.
-    id(caretFor[name])?.focus();
-  };
-  for (const [name] of tabs) id(`tab-${name}`)?.addEventListener('click', () => show(name));
-
   id('login-with-profile')?.addEventListener('click', () => void signInWithProfile(prefix));
-  id('password-form')?.addEventListener('submit', (event) => {
-    event.preventDefault();
-    void signInWithPassword(prefix);
-  });
-  id('login-with-key')?.addEventListener('click', () => void signInWithKey(prefix));
-  id('api-key')?.addEventListener('keydown', (event) => {
-    // Enter submits, as it would in any other field.
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      void signInWithKey(prefix);
-    }
-  });
-}
-
-/**
- * The primary way in: DeepAI's own email and password, posted to this gateway.
- *
- * The Gateway performs DeepAI's three requests itself, so the browser never follows
- * a redirect to loopback and nothing has to be passed through. The password is sent
- * once, used once, and kept nowhere.
- */
-function passwordForm(prefix = '') {
-  return `
-    <form class="mt-3" id="${prefix}password-form" autocomplete="on">
-      <div class="field">
-        <label class="field__label" for="${prefix}login-email">DeepAI email</label>
-        <input class="input" id="${prefix}login-email" type="email" autocomplete="username"
-          spellcheck="false" placeholder="you@example.com" required>
-      </div>
-      <div class="field mt-3">
-        <label class="field__label" for="${prefix}login-password">Password</label>
-        <input class="input" id="${prefix}login-password" type="password" autocomplete="current-password"
-          placeholder="Your DeepAI password" required>
-      </div>
-      <div class="row mt-3"><button class="btn btn--primary" id="${prefix}login-submit" type="submit">Log In</button></div>
-    </form>`;
-}
-
-function keyForm(prefix = '') {
-  return `
-    <section class="step" id="${prefix}key-step">
-      <ol class="step__list">
-        <li>Go to <a href="https://deepai.org/dashboard/profile" target="_blank" rel="noreferrer noopener">deepai.org/dashboard/profile</a></li>
-        <li>Copy your API Key</li>
-        <li>Paste it below</li>
-      </ol>
-      <div class="field mt-3">
-        <label class="field__label" for="${prefix}api-key">API Key</label>
-        <input class="input" id="${prefix}api-key" type="password" spellcheck="false" autocomplete="off"
-          placeholder="Paste your API Key">
-      </div>
-      <div class="field mt-3">
-        <label class="field__label" for="${prefix}api-key-email">Your DeepAI email</label>
-        <input class="input" id="${prefix}api-key-email" type="email" spellcheck="false" autocomplete="email"
-          placeholder="you@example.com">
-        <div class="field__hint" id="${prefix}api-key-email-hint">
-          Shown as your account name. DeepAI does not say which account a key belongs to, so
-          this cannot be checked — it is yours to get right.
-        </div>
-      </div>
-      <div class="row mt-3"><button class="btn btn--primary" id="${prefix}login-with-key">Log In</button></div>
-    </section>`;
 }
 
 /**
@@ -395,10 +242,6 @@ function keyForm(prefix = '') {
  */
 function needsLogin() {
   if (state.account?.signedIn === true) return false;
-  // A sign-in the browser could not finish is the one thing that displaces the usual
-  // routes: there is nothing left to choose, only an address to paste.
-  const pending = state.account?.pendingLogin === true;
-
   view.innerHTML = `
     <div class="page__head">
       <h1 class="page__title">Log in required</h1>
@@ -407,142 +250,15 @@ function needsLogin() {
     <div class="card">
       <div class="card__title">Not logged in</div>
       <div class="card__sub mt-2">Log in with your DeepAI account to see your API keys and usage.</div>
-      ${pending ? finishStep() : signInRoutes()}
+      ${signInRoutes()}
     </div>`;
 
   wireSignInForms();
-  // The finish step replaces the routes, so its own controls are wired separately.
-  $('login-complete')?.addEventListener('click', () => void completeLoginManually());
-  if (pending) $('callback-url')?.focus();
   return true;
 }
 
-/**
- * Sign in with the DeepAI email and password.
- *
- * One request to this gateway; the gateway talks to DeepAI. Both fields are cleared
- * once they have been used, so the password does not linger in the page.
- */
-async function signInWithPassword() {
-  const emailField = $('login-email');
-  const passwordField = $('login-password');
-  const email = emailField?.value?.trim() ?? '';
-  const password = passwordField?.value ?? '';
-  if (email === '' || password === '') {
-    toast('Enter your DeepAI email and password.', 'error');
-    (email === '' ? emailField : passwordField)?.focus();
-    return;
-  }
 
-  const button = $('login-submit');
-  const label = button?.textContent;
-  if (button) {
-    button.disabled = true;
-    button.textContent = 'Signing in…';
-  }
-  try {
-    await api('/login/password', { method: 'POST', body: { email, password } });
-    if (emailField) emailField.value = '';
-    if (passwordField) passwordField.value = '';
-    toast('Logged in');
-    await loadAccount();
-    await render();
-  } catch (error) {
-    toast(String(error.message ?? error), 'error');
-    if (button) {
-      button.disabled = false;
-      button.textContent = label ?? 'Log In';
-    }
-    // The password is the likely mistake, so put the caret back in it.
-    passwordField?.focus();
-    passwordField?.select();
-  }
-}
 
-/**
- * Sign in with a pasted DeepAI API key.
- *
- * Both secrets are cleared from the fields once they have been accepted, so they
- * do not linger in the page after they are no longer needed.
- */
-async function signInWithKey() {
-  const field = $('api-key');
-  const emailField = $('api-key-email');
-  const key = field?.value?.trim() ?? '';
-  const email = emailField?.value?.trim() ?? '';
-  if (key === '') {
-    toast('Paste your API Key first.', 'error');
-    field?.focus();
-    return;
-  }
-  if (email === '') {
-    toast('Add the email to show as your account name.', 'error');
-    emailField?.focus();
-    return;
-  }
-
-  const button = $('login-with-key');
-  const label = button?.textContent;
-  if (button) {
-    button.disabled = true;
-    button.textContent = 'Checking…';
-  }
-  try {
-    await api('/login/key', { method: 'POST', body: { key, email } });
-    if (field) field.value = '';
-    if (emailField) emailField.value = '';
-    toast('Logged in');
-    await loadAccount();
-    await render();
-  } catch (error) {
-    toast(String(error.message ?? error), 'error');
-    if (button) {
-      button.disabled = false;
-      button.textContent = label ?? 'Log In';
-    }
-    field?.focus();
-    field?.select();
-  }
-}
-
-/**
- * Send back the address the failed page was sitting on.
- *
- * The gateway checks it against the sign-in this browser started and redeems the
- * one-shot code in it, exactly as the callback route would have. On success the
- * visitor is simply logged in, so the step disappears with the rest of the card.
- */
-async function completeLoginManually(prefix = '') {
-  const field = $(`${prefix}callback-url`);
-  const url = field?.value?.trim() ?? '';
-  if (url === '') {
-    toast('Copy the address from the page that did not load, then paste it here.', 'error');
-    field?.focus();
-    return;
-  }
-
-  const button = $(`${prefix}login-complete`);
-  const label = button?.textContent;
-  if (button) {
-    button.disabled = true;
-    button.textContent = 'Signing in…';
-  }
-  try {
-    await api('/login/complete', { method: 'POST', body: { url } });
-    toast('Signed in to DeepAI');
-    await loadAccount();
-    await render();
-  } catch (error) {
-    toast(String(error.message ?? error), 'error');
-    if (button) {
-      button.disabled = false;
-      button.textContent = label ?? 'Finish signing in';
-    }
-    // The address is the only thing that can be wrong, so make it easy to retry.
-    field?.focus();
-    field?.select();
-  }
-}
 
 /* ------------------------------------------------------------------ toasts */
 
@@ -945,7 +661,7 @@ function accountCard() {
         </div>
         <div class="mt-3 stack">
           <div class="note">Sign in with your DeepAI account to let the gateway reach the models. The account key is stored in the gateway database and never leaves this machine.</div>
-          ${account.pendingLogin === true ? finishStep('account-') : signInRoutes('account-')}
+          ${signInRoutes('account-')}
         </div>
       </div>`;
   }
