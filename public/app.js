@@ -851,7 +851,7 @@ function renderAccountBadge() {
     badge.className = account.balanceLow ? 'badge badge--amber' : 'badge badge--green';
     const balance = account.allowance?.balance;
     text.textContent = balance
-      ? `${accountName(account)} · ${balance} Credits`
+      ? `${accountName(account)} · ${t('common.creditsAmount', { amount: balance })}`
       : accountName(account);
   } else {
     badge.className = 'badge badge--red';

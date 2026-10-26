@@ -1978,6 +1978,36 @@ await checkAsync('every language is complete and agrees on its placeholders', as
     }
   }
 
+  /*
+   * Every key must be reachable from the code.
+   *
+   * This is not tidiness: an unreferenced key is how a lost edit looks. A conversion that
+   * was never applied leaves the English hardcoded in the markup *and* the key unused, and
+   * that pair is what this catches — it found the account badge still rendering a literal
+   * "Credits" after the conversion had been dropped by a failed script.
+   */
+  const { join } = await import('node:path');
+  const root = new URL('..', import.meta.url).pathname;
+  const app = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+  const html = readFileSync(join(root, 'public', 'index.html'), 'utf8');
+  const used = new Set();
+  for (const m of app.matchAll(/\bt\(\s*'([a-zA-Z][\w.]*)'/g)) used.add(m[1]);
+  for (const m of app.matchAll(/counted\(\s*'([a-zA-Z][\w.]*)'/g)) used.add(m[1]);
+  // Keys built at runtime from a stable family: `t(`status.${status}`)`.
+  for (const m of app.matchAll(/(authEvent|status|window)\.\$\{/g)) {
+    for (const key of Object.keys(english)) if (key.startsWith(`${m[1]}.`)) used.add(key);
+  }
+  for (const m of html.matchAll(/data-i18n(?:-attr)?="([^"]+)"/g)) {
+    for (const pair of m[1].split(',')) {
+      for (const part of pair.split(':')) {
+        const value = part.trim();
+        if (value.includes('.')) used.add(value);
+      }
+    }
+  }
+  const orphaned = Object.keys(english).filter((key) => !used.has(key));
+  assert.deepEqual(orphaned, [], 'locale keys nothing references');
+
   // English must not have been translated into itself for any key a translator touched.
   assert.notEqual(LOCALES.pl['common.cancel'], english['common.cancel'],
     'a translation must actually differ from English');
