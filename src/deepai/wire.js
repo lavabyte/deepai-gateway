@@ -35,7 +35,7 @@ export class UpstreamError extends Error {
 }
 
 /** Session-affinity headers, matching the desktop client (raw session id). */
-export function sessionHeaders(sessionId) {
+function sessionHeaders(sessionId) {
   if (typeof sessionId !== 'string' || sessionId === '') return {};
   return {
     session_id: sessionId,
@@ -62,7 +62,7 @@ export function laneHeaders(accept = 'application/json') {
 }
 
 /** Convert a `Retry-After` header into milliseconds. */
-export function retryAfterMs(response) {
+function retryAfterMs(response) {
   const raw = response.headers?.get?.('retry-after');
   if (typeof raw !== 'string' || raw === '') return undefined;
   const seconds = Number(raw);

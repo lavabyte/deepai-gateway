@@ -14,7 +14,6 @@
   --hairline: #ebebeb;
   --hairline-strong: #d4d4d4;
   --link: #0070f3;
-  --success: #17c964;
   --error: #ee0000;
   --warning: #f5a623;
 
@@ -36,7 +35,6 @@
 
   --radius: 6px;
   --radius-lg: 8px;
-  --ring: 0 0 0 1px rgba(0, 0, 0, .08), 0 2px 2px rgba(0, 0, 0, .04);
   --shadow-pop: 0 0 0 1px rgba(0, 0, 0, .08), 0 8px 24px rgba(0, 0, 0, .08);
   --maxw: 1200px;
 }
@@ -66,7 +64,6 @@
   --danger-tint-strong: rgba(255, 122, 122, .2);
   --danger-edge: rgba(255, 122, 122, .35);
 
-  --ring: 0 0 0 1px rgba(255, 255, 255, .1), 0 2px 2px rgba(0, 0, 0, .4);
   --shadow-pop: 0 0 0 1px rgba(255, 255, 255, .1), 0 8px 24px rgba(0, 0, 0, .6);
 }
 /* The OS preference, used until the user makes an explicit choice.
@@ -97,7 +94,6 @@
   --danger-tint-strong: rgba(255, 122, 122, .2);
   --danger-edge: rgba(255, 122, 122, .35);
   
-    --ring: 0 0 0 1px rgba(255, 255, 255, .1), 0 2px 2px rgba(0, 0, 0, .4);
     --shadow-pop: 0 0 0 1px rgba(255, 255, 255, .1), 0 8px 24px rgba(0, 0, 0, .6);
   }
 }
@@ -248,7 +244,6 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
   font-size: 11.5px; font-weight: 500; font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.badge--blue   { background: var(--badge-blue-bg);   color: var(--badge-blue-tx); }
 .badge--gray   { background: var(--badge-gray-bg);   color: var(--badge-gray-tx); }
 .badge--red    { background: var(--badge-red-bg);    color: var(--badge-red-tx); }
 .badge--green  { background: var(--badge-green-bg);  color: var(--badge-green-tx); }
@@ -263,14 +258,12 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
   transition: border-color .15s;
 }
 .card--flush { padding: 0; overflow: hidden; }
-.card--hover:hover { border-color: var(--hairline-strong); }
 .card__head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 16px 20px; border-bottom: 1px solid var(--hairline);
 }
 .card__title { font-size: 14px; font-weight: 600; letter-spacing: -.02em; }
 .card__sub { font-size: 12px; color: var(--text-2); margin-top: 2px; }
-.card__body { padding: 20px; }
 
 .eyebrow {
   font-family: var(--mono); font-size: 11px; font-weight: 500;
@@ -309,15 +302,6 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
   border-radius: 4px; padding: 0 4px;
 }
 
-/* The "finish signing in" step. A note rather than a bare block, because it
-   explains an outcome the visitor may have just mistaken for a failure. */
-.step__title { font-weight: 600; margin-bottom: 4px; }
-.step__lead { margin-bottom: 8px; }
-.step__lead:last-of-type { margin-bottom: 0; }
-.step__aside { display: block; opacity: .75; font-size: 12px; }
-/* A disclosure that reads as a quiet secondary route, not as a button. */
-.step__summary { cursor: pointer; color: var(--link); }
-.step__summary:hover { text-decoration: underline; }
 .step__list { margin: 0 0 2px; padding-left: 18px; }
 .step__list li { margin-bottom: 4px; }
 .step__list li:last-child { margin-bottom: 0; }
@@ -325,14 +309,6 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
    inherited colour and keeps its own surface. */
 .step .textarea, .step .input { background: var(--surface); color: var(--ink); }
 .step .field__hint code { background: var(--bg-soft); }
-
-/* A button that reads as a link: used where an action is secondary enough that a
-   full button would compete with the primary one. */
-.linklike {
-  border: 0; background: none; padding: 0; font: inherit;
-  color: var(--link); cursor: pointer; text-decoration: underline;
-  text-underline-offset: 2px;
-}
 
 
 .table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -379,7 +355,6 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
 .note--info { background: var(--badge-blue-bg); border-color: var(--link); color: var(--badge-blue-tx); }
 .note--info code { background: transparent; border-color: currentColor; color: inherit; }
 .note--error { background: var(--badge-red-bg); border-color: var(--error); color: var(--badge-red-tx); }
-.note--success { background: var(--badge-green-bg); border-color: var(--success); color: var(--badge-green-tx); }
 
 .snippet {
   display: flex; align-items: center; gap: 10px;
@@ -394,10 +369,6 @@ kbd {
   background: var(--bg); color: var(--ink);
   border: 1px solid var(--hairline-strong);
 }
-
-/* A command the visitor has to copy, so it gets its own block and can wrap. */
-.snippet--block { display: block; padding: 10px 12px; user-select: all; }
-.snippet--block code { white-space: pre-wrap; word-break: break-all; font-size: 12px; }
 
 .snippet code { flex: 1; overflow-x: auto; white-space: pre; }
 .snippet__copy {
@@ -417,7 +388,6 @@ kbd {
 .grid { display: grid; gap: 14px; }
 .grid--4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .grid--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.grid--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .grid--main { grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); align-items: start; }
 .stack { display: flex; flex-direction: column; gap: 14px; }
 .row { display: flex; align-items: center; gap: 10px; }
@@ -428,7 +398,7 @@ kbd {
 .muted { color: var(--text-2); }
 .tiny { font-size: 11.5px; }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mt-2 { margin-top: 8px; } .mt-3 { margin-top: 14px; } .mt-4 { margin-top: 20px; }
+.mt-2 { margin-top: 8px; } .mt-3 { margin-top: 14px; }
 
 /* ------------------------------------------------------------------ toasts */
 
@@ -470,7 +440,6 @@ kbd {
 
 .model-row { display: flex; align-items: center; gap: 12px; }
 .model-row__name { font-weight: 500; }
-.model-tier { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; }
 
 .pill-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .pill {
@@ -510,7 +479,7 @@ kbd {
   #account-badge { max-width: 150px; overflow: hidden; }
   #account-badge-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .page { padding: 20px 16px 64px; }
-  .grid--4, .grid--3, .grid--2 { grid-template-columns: minmax(0, 1fr); }
+  .grid--4, .grid--3 { grid-template-columns: minmax(0, 1fr); }
   .table th, .table td { padding-left: 14px; padding-right: 14px; }
   .table-wrap .table { min-width: 460px; }
   .hide-sm { display: none; }

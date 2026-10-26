@@ -14,7 +14,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 
 /** Prefix every gateway key carries. */
-export const KEY_PREFIX = 'sk-';
+const KEY_PREFIX = 'sk-';
 
 /** Number of random bytes behind a key (40 hex characters). */
 const KEY_BYTES = 20;

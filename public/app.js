@@ -487,10 +487,6 @@ $('auth-button').addEventListener('click', () => { void onAuthButton(); });
 const state = {
   account: undefined,
   models: [],
-  // The loopback address DeepAI will send this browser to. DeepAI chooses the
-  // host itself, so it is only ever shown to the visitor as the address to copy
-  // when their browser cannot open it.
-  callbackUrl: '',
 };
 
 /**
@@ -553,41 +549,16 @@ async function onAuthButton() {
     await logOutEverywhere();
     return;
   }
-  await startLoginFlow();
-}
-
-/**
- * Start the DeepAI login in **this** tab.
- *
- * Navigating the current tab rather than opening a popup means DeepAI returns
- * the browser to the dashboard when it is done, so there is no second window to
- * chase and nothing to close. `/login?json=1` is asked first so a failure is
- * reported here instead of replacing the page with an error.
- *
- * DeepAI then redirects to a loopback address of its own choosing, which this
- * browser can only open when it runs on the gateway's host. The address is kept
- * so the dashboard can show it as the thing to copy when that fails.
- */
-async function startLoginFlow() {
-  const buttons = [$('auth-button'), $('login-inline')].filter(Boolean);
-  for (const button of buttons) {
-    button.disabled = true;
-    button.dataset.label = button.textContent;
-    button.textContent = 'Redirecting…';
-  }
-  try {
-    const payload = await api('/login', { method: 'POST' });
-    state.callbackUrl = payload.callbackUrl ?? '';
-    // Full navigation, not window.open: the callback lands back on the panel.
-    window.location.assign(payload.url);
+  // Signed out, the one thing this control can usefully do is take the visitor to the
+  // form. It used to start DeepAI's browser sign-in, which no longer exists and whose
+  // last page cannot open on their machine anyway.
+  if (currentRoute() !== 'home') {
+    location.hash = '#/';
     return;
-  } catch (error) {
-    for (const button of buttons) {
-      button.disabled = false;
-      button.textContent = button.dataset.label ?? 'Log in';
-    }
-    toast(String(error.message ?? error), 'error');
   }
+  const field = $('profile-paste');
+  field?.focus();
+  field?.scrollIntoView({ block: 'center' });
 }
 
 /** Log out and repaint the current view. */
@@ -606,10 +577,6 @@ async function logOutEverywhere() {
 async function loadAccount() {
   try {
     state.account = await api('/account');
-    // The server derives this from the request the dashboard was served on, so it
-    // stays correct across a reload — which is exactly when the visitor comes back
-    // from the callback address their browser could not open.
-    state.callbackUrl = state.account.callbackUrl ?? '';
   } catch (error) {
     state.account = { signedIn: false, username: '', error: String(error.message ?? error) };
   }

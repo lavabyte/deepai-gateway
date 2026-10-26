@@ -53,13 +53,8 @@ export function loginCookie(id, { secure = false } = {}) {
   return parts.join('; ');
 }
 
-/** Clear the login-grouping cookie. */
-export function clearLoginCookie() {
-  return `${LOGIN_COOKIE}=; Path=/; SameSite=Lax; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
-}
-
 /** How long a session stays valid without being used. */
-export const SESSION_TTL_MS = 14 * 24 * 60 * 60_000;
+const SESSION_TTL_MS = 14 * 24 * 60 * 60_000;
 
 /** Number of random bytes in a session token (64 hex characters). */
 const TOKEN_BYTES = 32;

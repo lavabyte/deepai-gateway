@@ -309,7 +309,7 @@ export function exportJsonRow(row) {
 }
 
 /** One usage row as sent to the browser. */
-export function publicUsage(row) {
+function publicUsage(row) {
   return {
     id: row.id,
     keyId: row.key_id ?? null,

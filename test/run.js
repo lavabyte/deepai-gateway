@@ -37,7 +37,6 @@ import {
   effortOf,
   openAIUsage,
   openAIToResponsesInput,
-  openAIToResponsesTools,
   stopSequences,
 } from '../src/openai.js';
 import { completionsUsage, responsesUsage } from '../src/deepai/wire.js';
@@ -1377,21 +1376,41 @@ await checkAsync('the dashboard shell names versioned assets and is never cached
   }
 });
 
-check('the command block is not overridden by the inline snippet rule', async () => {
+check('the stylesheet carries no dead classes or variables', async () => {
   /*
-   * Both selectors have one class of specificity, so the later rule wins. `.snippet`
-   * sets `display: flex`; a `.snippet--block` placed before it lost its
-   * `display: block` and the copyable command rendered inline. Order is the whole
-   * fix, so order is what this pins.
+   * This replaces a check that pinned the order of a rule which no longer exists, and it
+   * guards the thing that actually accumulates: after a rewrite, selectors and custom
+   * properties are left behind with nothing referencing them. Both audits are
+   * deliberately permissive — a name is only reported when nothing in the client
+   * mentions it at all — so a false report means genuinely dead CSS, not a live rule
+   * that happens to be built dynamically.
    */
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
-  const css = readFileSync(join(new URL('..', import.meta.url).pathname, 'public', 'app.css'), 'utf8');
-  const base = css.indexOf('.snippet {');
-  const variant = css.indexOf('.snippet--block {');
-  assert.ok(base !== -1 && variant !== -1, 'both snippet rules must exist');
-  assert.ok(variant > base, 'the block variant must come after the flex one to win');
-  assert.match(css.slice(variant, variant + 120), /display: block/);
+  const root = new URL('..', import.meta.url).pathname;
+  const css = readFileSync(join(root, 'public', 'app.css'), 'utf8');
+  const js = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+  const html = readFileSync(join(root, 'public', 'index.html'), 'utf8');
+
+  const classes = new Set([...css.matchAll(/\.([a-zA-Z][\w-]*)/g)].map((m) => m[1]));
+  const deadClasses = [...classes].filter((name) => {
+    const inHtml = new RegExp(`class="[^"]*\\b${name}\\b`).test(html);
+    return !inHtml && !js.includes(name);
+  });
+  assert.deepEqual(deadClasses, [], `unused CSS classes: ${deadClasses.join(', ')}`);
+
+  const variables = new Set([...css.matchAll(/^\s*(--[a-z0-9-]+):/gm)].map((m) => m[1]));
+  const deadVariables = [...variables].filter((name) => {
+    const used = (css.match(new RegExp(`var\\(${name}\\)`, 'g')) ?? []).length;
+    return used === 0 && !js.includes(name) && !html.includes(name);
+  });
+  assert.deepEqual(deadVariables, [], `unused CSS variables: ${deadVariables.join(', ')}`);
+
+  // And the client must not carry ids the markup never defines, which is how the
+  // replaced controls left their listeners behind.
+  const ids = new Set([...html.matchAll(/id="([^"]+)"/g)].map((m) => m[1]));
+  const deadIds = [...ids].filter((id) => !js.includes(id));
+  assert.deepEqual(deadIds, [], `ids in the shell that nothing uses: ${deadIds.join(', ')}`);
 });
 
 check('the stylesheet makes the hidden attribute win', async () => {

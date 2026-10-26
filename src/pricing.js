@@ -322,11 +322,6 @@ export function isPriced(model) {
   return priceOf(model) !== null;
 }
 
-/** The whole table, as DeepAI ids. */
-export function priceTable() {
-  return state.prices;
-}
-
 /* ------------------------------------------------------------------ pricing */
 
 /**
