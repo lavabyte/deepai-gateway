@@ -593,6 +593,39 @@ async function postForm(url, fields, signal) {
 }
 
 /**
+ * Ask DeepAI who the session we hold belongs to.
+ *
+ * This is the endpoint DeepAI's own page polls, and it answers with the account's
+ * own `email` — which is better than the name a visitor typed, because it is the
+ * truth rather than a claim. It needs the *session*: the same request with an API
+ * key instead answers 201 "not signed in", whatever headers it is given.
+ *
+ * @param {string} apiOrigin
+ * @param {string[]} cookiePairs
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<{email?: string}|undefined>}
+ */
+async function fetchAccountIdentity(apiOrigin, cookiePairs, signal) {
+  try {
+    const response = await fetch(`${apiOrigin}/daily-time-sync/user/`, {
+      headers: {
+        cookie: cookiePairs.join('; '),
+        // The request the page itself makes; their endpoint is happy either way.
+        origin: 'https://deepai.org',
+        accept: '*/*',
+      },
+      signal,
+    });
+    if (!response.ok) return undefined;
+    const data = await response.json().catch(() => undefined);
+    const email = typeof data?.email === 'string' ? data.email.trim() : '';
+    return email === '' ? undefined : { email };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Sign in with a DeepAI email and password, entirely on this server.
  *
  * This is the direct route the browser page would have taken, minus the page: no
@@ -618,7 +651,7 @@ async function postForm(url, fields, signal) {
  * @param {number} params.port - the port that goes into the callback DeepAI builds.
  * @param {string} [params.apiOrigin]
  * @param {AbortSignal} [params.signal]
- * @returns {Promise<{ok: true, code: string}
+ * @returns {Promise<{ok: true, code: string, identity?: {email?: string}}
  *   | {ok: false, reason: 'no-account'|'social-only'|'bad-credentials'|'no-code'|'unreachable', providers?: string[]}>}
  */
 export async function signInWithPassword({
@@ -685,5 +718,7 @@ export async function signInWithPassword({
   if (code === '') {
     return { ok: false, reason: landed.status >= 500 ? 'unreachable' : 'no-code' };
   }
-  return { ok: true, code };
+  // Who this actually is, asked while the session is in hand.
+  const identity = await fetchAccountIdentity(apiOrigin, cookies, signal);
+  return { ok: true, code, ...(identity === undefined ? {} : { identity }) };
 }

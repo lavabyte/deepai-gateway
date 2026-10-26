@@ -139,6 +139,15 @@ by someone who has not started one, and its attempts are bounded by the flow's o
 limit. Both `POST /api/login/password` and the API-key route are in the endpoints
 table below.
 
+The display name for this route comes from DeepAI, not from the form. Once the
+password is accepted the gateway holds the session and asks
+`GET /daily-time-sync/user/` who it belongs to, which answers with the account's own
+`email` (and its `api_key`). So there is nothing here for a visitor to get wrong.
+
+That endpoint needs a **session**: the same request with an API key answers `201`
+"not signed in" whatever headers it is given, so a pasted key still cannot reveal an
+identity.
+
 ### Google and Apple accounts cannot be routed through the gateway
 
 Not a limitation of the allowlist — two independent blockers, both in DeepAI's own
@@ -167,9 +176,15 @@ socat TCP-LISTEN:<port>,fork,reuseaddr TCP:<your-gateway-host>:<port>
 ssh -L <port>:<your-gateway-host>:<port> user@<your-gateway-host>
 ```
 
-…then open `http://127.0.0.1:<port>`. The other route for a social account is to sign
-in at deepai.org, copy the key from the profile, and paste it into the API-key
-section.
+…then open `http://127.0.0.1:<port>`.
+
+**Or copy the key from your profile**, which needs no tunnel and no relay: sign in with
+Google or Apple at deepai.org, open `deepai.org/dashboard/profile`, and paste the key
+shown there into the API-key section. That key is the same account key the DeepAI Code
+lane accepts — `userprofile.api_key` answers `GET /deepai_code/theos` with
+`lane_version: 2` — so it is not a model-API-only key. Note that the Theos balance is
+per key, so a newly shown key can report a different balance from the one already
+stored.
 
 ### 2. Relay DeepAI's page (opt-in, `AUTH_PROXY=1`)
 

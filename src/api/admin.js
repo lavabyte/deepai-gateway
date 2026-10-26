@@ -465,6 +465,11 @@ export function adminRouter(db, runtime) {
     const completed = completeLogin(db, runtime, submitted.account, {
       secure: runtime.trustProxy === true,
     });
+    // Name the account from DeepAI's own answer rather than from what was typed, so
+    // this route cannot display an email that belongs to somebody else.
+    if (result.identity?.email !== undefined) {
+      setSetting(db, completed.username, 'display_name', result.identity.email);
+    }
     res.setHeader('set-cookie', completed.cookie);
     return res.json({ ok: true, username: completed.username });
   });

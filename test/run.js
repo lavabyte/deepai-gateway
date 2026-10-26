@@ -2972,6 +2972,20 @@ await checkAsync('the gateway can sign in with a DeepAI password itself', async 
         });
         return res.end('{"ok":true}');
       }
+      if (url.pathname === '/daily-time-sync/user/') {
+        fixture.seen.push(url.pathname);
+        if (!(req.headers.cookie ?? '').includes('sessionid=fixture-session')) {
+          res.writeHead(201, { 'content-type': 'text/plain' });
+          return res.end('OK');
+        }
+        // The account's own identity, key included, exactly as DeepAI answers it.
+        return json({
+          pk: 1,
+          username: 'kontomilosz350',
+          email: 'verified@example.com',
+          userprofile: { api_key: '00000000-0000-4000-8000-000000000000' },
+        });
+      }
       if (url.pathname === '/deepai_code/desktop_auth/') {
         fixture.seen.push(url.pathname);
         // The one response the browser could never have followed on a public host.
@@ -3072,6 +3086,12 @@ await checkAsync('the gateway can sign in with a DeepAI password itself', async 
     const session = String(done.headers.get('set-cookie') ?? '').split(';')[0];
     const account = await call(`${base}/api/account`, { headers: { cookie: session } }).then((r) => r.json());
     assert.equal(account.signedIn, true);
+    /*
+     * The displayed name is DeepAI's own answer, not the field that was typed: the
+     * session the gateway just obtained is asked who it belongs to. That is the end of
+     * "the user could type a wrong email" — for this route there is nothing to type.
+     */
+    assert.equal(account.displayName, 'verified@example.com');
 
     /*
      * The successful attempt really took DeepAI's own route, in order: the password
@@ -3080,8 +3100,14 @@ await checkAsync('the gateway can sign in with a DeepAI password itself', async 
      * first endpoint too.
      */
     assert.deepEqual(
-      fixture.seen.slice(-3),
-      ['/get_user_login_type', '/daily-time-sync/login/', '/deepai_code/desktop_auth/'],
+      fixture.seen.slice(-4),
+      [
+        '/get_user_login_type',
+        '/daily-time-sync/login/',
+        '/deepai_code/desktop_auth/',
+        // And then, with the session in hand, who this is.
+        '/daily-time-sync/user/',
+      ],
     );
 
     // A password is a credential: it must not reach the log.
