@@ -122,10 +122,13 @@ export function parseCallbackInput(input) {
  * @param {number} [params.maxAttempts] - how many rejected `code`/`state` pairs
  *   the attempt tolerates before it gives up. Both entry points are
  *   unauthenticated, so a pending attempt must not become an unlimited oracle.
+ * @param {string} [params.pageBase] - origin to send the browser to for the sign-in
+ *   page: DeepAI's own by default, or this gateway's when the sign-in is relayed,
+ *   because only then can DeepAI's final redirect be put back on this host.
  * @returns {object} the flow: `url`, `state`, `done`, `close`, `submit`,
  *   `complete` and `handleCallback`.
  */
-export function startLogin({ port, timeoutMs = 300_000, maxAttempts = 5 }) {
+export function startLogin({ port, timeoutMs = 300_000, maxAttempts = 5, pageBase = API_ORIGIN }) {
   const state = randomBytes(32).toString('hex');
 
   let settleResolve;
@@ -154,7 +157,7 @@ export function startLogin({ port, timeoutMs = 300_000, maxAttempts = 5 }) {
     else settleResolve(account);
   };
 
-  const url = new URL('/deepai_code/desktop_auth/', API_ORIGIN);
+  const url = new URL('/deepai_code/desktop_auth/', pageBase);
   url.search = new URLSearchParams({ state, port: String(port) }).toString();
 
   let attemptsLeft = maxAttempts;

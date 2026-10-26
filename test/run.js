@@ -676,12 +676,15 @@ await checkAsync('/ serves the dashboard and /login is browser-navigable', async
     assert.equal(deep.status, 404);
     assert.match(await deep.text(), /DeepAI Gateway/);
 
-    // /login with ?json=1 answers with the DeepAI URL instead of redirecting.
+    // /login with ?json=1 answers with the sign-in URL instead of redirecting.
+    // With the relay on — the default — that URL is this gateway's own, which is the
+    // whole point: DeepAI's final redirect can then be rewritten back here.
     const login = await fetch(`${base}/login?json=1`);
     assert.equal(login.status, 200);
     const payload = await login.json();
     assert.equal(payload.ok, true);
-    assert.match(payload.url, /^https:\/\/api\.deepai\.org\/deepai_code\/desktop_auth\//);
+    assert.match(payload.url, new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/deepai_code/desktop_auth/`));
+    assert.match(payload.url, /[?&]state=[0-9a-f]{64}/);
 
     // The response that starts a login also hands this browser its login cookie.
     // Sending it back identifies the same browser, which reuses its attempt
@@ -697,6 +700,33 @@ await checkAsync('/ serves the dashboard and /login is browser-navigable', async
     assert.notEqual(other.url, payload.url, 'a second browser must not hijack the first attempt');
 
     // Cancel it so the callback server does not outlive this check.
+    await fetch(`${base}/api/cancel-login`, { method: 'POST' });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('turning the relay off sends the browser back to DeepAI', async () => {
+  /*
+   * The relay exists so DeepAI's loopback redirect can be rewritten onto this host.
+   * Without it the browser must go to DeepAI directly, and the visitor finishes by
+   * pasting the address back — so the URL that starts a sign-in has to change with
+   * the setting. An operator disabling the relay still has to be able to sign in.
+   */
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false, authProxy: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    const login = await fetch(`${base}/api/login`, { method: 'POST' }).then((r) => r.json());
+    assert.match(login.url, /^https:\/\/api\.deepai\.org\/deepai_code\/desktop_auth\//);
+
+    // And the dashboard is told the relay is off, so it can explain the workaround.
+    const account = await fetch(`${base}/api/account`).then((r) => r.json());
+    assert.equal(account.authProxy, false);
     await fetch(`${base}/api/cancel-login`, { method: 'POST' });
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -1738,7 +1768,9 @@ await checkAsync('unauthenticated login flooding cannot grow state without bound
     assert.ok(pending.size <= 64, `pending logins must stay bounded, got ${pending.size}`);
     // Bounded, but still usable: the newest caller has a working attempt.
     const fresh_ = await fetch(`${base}/api/login`, { method: 'POST' }).then((r) => r.json());
-    assert.match(fresh_.url, /^https:\/\/api\.deepai\.org\/deepai_code\/desktop_auth\//);
+    // Which origin serves the page depends on the relay, but an evicted visitor must
+    // always get a usable attempt back rather than the evicted one's.
+    assert.match(fresh_.url, /\/deepai_code\/desktop_auth\//);
   } finally {
     // Cancel everything so no callback server outlives this check.
     const pending = app.locals.runtime.pendingLogins;
@@ -1977,6 +2009,333 @@ await checkAsync('the auth screen styles buttons by class and never closes a tab
   const error = callbackPage('Failed', 'Try again', 'error');
   assert.match(error, /var returnTo = null/);
   assert.ok(!error.includes('Taking you back'), 'no auto-return notice on failure');
+});
+
+/* ------------------------------------------------------ deepai sign-in relay */
+
+/*
+ * The relay is what makes the browser sign-in work on a public host: DeepAI ends
+ * the flow by redirecting to a loopback address it picks itself, and only
+ * something in the middle can rewrite that. These checks pin the rewrites, and
+ * then run the whole flow against a fixture that behaves like DeepAI — including
+ * its loopback redirect — so the relay is verified without needing a password.
+ */
+
+check('the relayed page stops DeepAI bouncing the browser to its own host', async () => {
+  const { rewriteAuthPage } = await import('../src/deepai/auth-proxy.js');
+
+  // The two constructs the relay depends on, as DeepAI ships them.
+  const page = [
+    '<script>var app_base_url=\'https://api.deepai.org\';</script>',
+    '<script>try{if(!(window.location.hostname==="deepai.org"||window.location.hostname==="127.0.0.1")){',
+    'window.location.href="https://deepai.org"+window.location.pathname+window.location.search;}}catch(e){}</script>',
+  ].join('\n');
+
+  const rewritten = rewriteAuthPage(page);
+  assert.equal(rewritten.ok, true);
+  // The bounce is what made a public host fail, so the comparison that triggered it
+  // must no longer be able to fire...
+  assert.ok(!rewritten.html.includes('window.location.hostname==="deepai.org"'), 'the guard must be disarmed');
+  // `!(true || …)` can never fire, whichever host the page is served from.
+  assert.match(rewritten.html, /if\(!\(true\|\|/);
+  // ...and every API call plus the page's self-reload must now resolve here.
+  assert.match(rewritten.html, /app_base_url=''/);
+  assert.ok(!rewritten.html.includes('api.deepai.org'), 'no absolute API origin may remain');
+  // Nothing else about the page is touched.
+  assert.ok(rewritten.html.includes('window.location.href="https://deepai.org"'), 'the rest is left alone');
+});
+
+check('a page the relay no longer recognises is refused, not half-served', async () => {
+  const { rewriteAuthPage } = await import('../src/deepai/auth-proxy.js');
+
+  // DeepAI changing either construct is the failure mode of any relay, and a page
+  // that is served but broken is worse than an honest refusal.
+  const nothing = rewriteAuthPage('<html><body>a different page</body></html>');
+  assert.equal(nothing.ok, false);
+  assert.deepEqual(nothing.missing, ['hostname guard', 'api base']);
+
+  const half = rewriteAuthPage('<script>window.location.hostname==="deepai.org"</script>');
+  assert.equal(half.ok, false);
+  assert.deepEqual(half.missing, ['api base']);
+});
+
+check('DeepAI\'s loopback redirect is put back on this origin', async () => {
+  const { rewriteLocation } = await import('../src/deepai/auth-proxy.js');
+  const origins = { pageOrigin: 'https://deepai.org', apiOrigin: 'https://api.deepai.org' };
+
+  // The redirect that decides whether the whole flow works. DeepAI picks both the
+  // host and the port, so the rewrite cannot depend on either.
+  for (const location of [
+    'http://127.0.0.1:25912/auth-callback?code=abc&state=def',
+    'http://127.0.0.1:8787/auth-callback?code=abc&state=def',
+    'http://localhost:5000/auth-callback?code=abc&state=def',
+    'http://[::1]:1234/auth-callback?code=abc&state=def',
+  ]) {
+    assert.equal(
+      rewriteLocation(location, origins),
+      '/auth-callback?code=abc&state=def',
+      `${location} must land on the gateway's own callback`,
+    );
+  }
+
+  // In-allowlist upstream locations stay on this origin too, so nothing falls out
+  // of the relay mid-flow.
+  assert.equal(
+    rewriteLocation('https://api.deepai.org/daily-time-sync/user/', origins),
+    '/daily-time-sync/user/',
+  );
+  // Anything else is left as it is: the relay is not a general rewriter.
+  assert.equal(rewriteLocation('https://accounts.google.com/o/oauth2/auth', origins), 'https://accounts.google.com/o/oauth2/auth');
+  assert.equal(rewriteLocation('not a url', origins), 'not a url');
+});
+
+check('relayed cookies are re-scoped to this origin', async () => {
+  const { COOKIE_PREFIX, relaySetCookie, upstreamCookieHeader } = await import('../src/deepai/auth-proxy.js');
+
+  // The browser is the cookie jar, so DeepAI's cookie has to be valid for this host:
+  // its Domain would be rejected, and a Secure cookie on plain HTTP would be
+  // dropped — which looks exactly like a wrong password.
+  const plain = relaySetCookie('sessionid=abc123; Domain=.deepai.org; Path=/; Secure; HttpOnly; SameSite=None', false);
+  assert.ok(plain.startsWith(`${COOKIE_PREFIX}sessionid=abc123`));
+  assert.match(plain, /Path=\//);
+  assert.match(plain, /HttpOnly/);
+  assert.match(plain, /SameSite=Lax/);
+  assert.ok(!/Domain/i.test(plain), 'a foreign Domain would be rejected by the browser');
+  assert.ok(!/Secure/i.test(plain), 'a Secure cookie would be dropped on plain HTTP');
+
+  // On TLS it is kept, because then it does protect something.
+  assert.match(relaySetCookie('a=b; Secure', true), /Secure/);
+  // Expiry survives, so an upstream session lifetime is respected.
+  assert.match(relaySetCookie('a=b; Max-Age=3600', false), /Max-Age=3600/);
+  assert.equal(relaySetCookie('=novalue', false), undefined);
+
+  // Only relayed cookies travel upstream: the gateway's own session must not.
+  assert.equal(upstreamCookieHeader(`deepai_gateway_session=secret; ${COOKIE_PREFIX}sessionid=abc; deepai_gateway_login=x`), 'sessionid=abc');
+  assert.equal(upstreamCookieHeader('deepai_gateway_session=secret'), '');
+  assert.equal(upstreamCookieHeader(undefined), '');
+});
+
+check('the relay forwards an allowlist and refuses to be an open proxy', async () => {
+  const { isProxiedPath } = await import('../src/deepai/auth-proxy.js');
+
+  for (const path of [
+    '/deepai_code/desktop_auth/',
+    '/daily-time-sync/login/',
+    '/daily-time-sync/user/',
+    '/get_user_login_type',
+    '/static/images/HiUser.svg',
+    '/privacy-preferences/get',
+  ]) {
+    assert.equal(isProxiedPath(path), true, `${path} is part of the sign-in flow`);
+  }
+  // Nothing arbitrary: a proxy that fetches whatever it is asked to is an open relay.
+  for (const path of ['/', '/api/account', '/v1/models', '/etc/passwd', '/dashboard/profile', '/chat']) {
+    assert.equal(isProxiedPath(path), false, `${path} must not be relayed`);
+  }
+  // Social sign-in would leave the relay, so it is answered rather than attempted.
+  assert.equal(isProxiedPath('/accounts/google/login/'), true);
+});
+
+await checkAsync('the whole sign-in works through the relay, loopback and all', async () => {
+  /*
+   * A fixture that behaves like DeepAI where it matters: a page carrying the two
+   * constructs the relay rewrites, an API that checks a password and sets a session
+   * cookie, and — the point of everything — a final redirect to a loopback address
+   * the browser could never reach on its own.
+   */
+  const http = await import('node:http');
+  const fixture = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://fixture');
+    fixture.seen.push({ path: url.pathname, cookie: req.headers.cookie ?? '', origin: req.headers.origin ?? '' });
+
+    const session = /(?:^|;\s*)sessionid=([^;]+)/.exec(req.headers.cookie ?? '')?.[1];
+
+    if (url.pathname === '/deepai_code/desktop_auth/') {
+      if (session === undefined) {
+        res.writeHead(200, { 'content-type': 'text/html' });
+        return res.end(fixture.page);
+      }
+      // Authenticated: this is the redirect no browser on another machine can open.
+      res.writeHead(302, {
+        location: `http://127.0.0.1:${url.searchParams.get('port')}/auth-callback?code=one-shot-code&state=${url.searchParams.get('state')}`,
+      });
+      return res.end();
+    }
+    if (url.pathname === '/static/app.css') {
+      res.writeHead(200, { 'content-type': 'text/css' });
+      return res.end('body{}');
+    }
+    if (url.pathname === '/daily-time-sync/login/') {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      return req.on('end', () => {
+        fixture.passwordsSeen.push(body);
+        if (!body.includes('hunter2')) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          return res.end('{"err":"bad credentials"}');
+        }
+        res.writeHead(200, {
+          'content-type': 'application/json',
+          'set-cookie': 'sessionid=fixture-session; Domain=.deepai.org; Path=/; HttpOnly; SameSite=None',
+        });
+        return res.end('{"ok":true}');
+      });
+    }
+    if (url.pathname === '/daily-time-sync/user/') {
+      // Their own sign-in page reads 200 as "signed in" and anything else as not.
+      return session === undefined
+        ? res.writeHead(201, { 'content-type': 'text/plain' }).end('OK')
+        : res.writeHead(200, { 'content-type': 'application/json' }).end('{"username":"kontomilosz350"}');
+    }
+    res.writeHead(404).end();
+  });
+  fixture.seen = [];
+  fixture.passwordsSeen = [];
+  fixture.page = [
+    '<html><head><title>Sign in to DeepAI Code</title></head><body>',
+    '<link rel="stylesheet" href="/static/app.css">',
+    '<script>var app_base_url=\'https://api.deepai.org\';</script>',
+    '<script>try{if(!(window.location.hostname==="deepai.org"||window.location.hostname==="127.0.0.1")){',
+    'window.location.href="https://deepai.org"+window.location.pathname+window.location.search;}}catch(e){}</script>',
+    '<form id="f"><input id="user-email"><input id="user-password" type="password"></form>',
+    '</body></html>',
+  ].join('\n');
+  await new Promise((resolve) => fixture.listen(0, '127.0.0.1', resolve));
+  const fixturePort = fixture.address().port;
+
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const logs = [];
+  const app = createApp(fresh, {
+    log: (message) => logs.push(message),
+    logRequests: false,
+    authPageOrigin: `http://127.0.0.1:${fixturePort}`,
+    authApiOrigin: `http://127.0.0.1:${fixturePort}`,
+  });
+  const gateway = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => gateway.once('listening', resolve));
+  const base = `http://127.0.0.1:${gateway.address().port}`;
+
+  const realFetch = globalThis.fetch;
+  const call = (...args) => realFetch(...args);
+  // Only the exchange and the allowance touch DeepAI directly; the relay uses the
+  // real fetch so it reaches the fixture.
+  globalThis.fetch = async (url, init) => {
+    const target = String(url);
+    if (target.includes('/desktop_auth/exchange/')) {
+      return new Response(JSON.stringify({ api_key: 'sk-relayed', username: 'kontomilosz350', is_pro: false }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (target.includes('/deepai_code/theos')) {
+      return new Response(JSON.stringify({ enabled: true, balance: '42.0', granted: '50.0', refresh_at: null }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (target.includes('/get_usage_summary')) {
+      return new Response('{"is_authenticated":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return realFetch(url, init);
+  };
+
+  try {
+    // 1. Starting the sign-in must point the browser at *this* origin, not DeepAI's.
+    const started = await call(`${base}/api/login`, { method: 'POST' });
+    const login = await started.json();
+    const loginCookie = String(started.headers.get('set-cookie') ?? '').split(';')[0];
+    assert.match(login.url, new RegExp(`^${base}/deepai_code/desktop_auth/`), 'the page must be served here');
+    // The dashboard learns the relay is on from the account view, so it can stop
+    // warning about a page that will now load.
+    const view = await call(`${base}/api/account`, { headers: { cookie: loginCookie } }).then((r) => r.json());
+    assert.equal(view.authProxy, true);
+    const signInPath = new URL(login.url).pathname + new URL(login.url).search;
+
+    // 2. The relayed page must no longer bounce the browser away, or call DeepAI.
+    const page = await call(`${base}${signInPath}`, { headers: { cookie: loginCookie } });
+    const html = await page.text();
+    assert.equal(page.status, 200);
+    assert.ok(!html.includes('window.location.hostname==="deepai.org"'), 'the bounce must be disarmed');
+    assert.match(html, /app_base_url=''/);
+    assert.ok(!html.includes(`127.0.0.1:${fixturePort}`), 'the fixture must not leak into the page');
+
+    // Assets are absolute paths on the page's host, so they have to be relayed too.
+    const asset = await call(`${base}/static/app.css`);
+    assert.equal(asset.status, 200);
+    assert.equal(asset.headers.get('content-type'), 'text/css');
+    assert.equal(await asset.text(), 'body{}');
+
+    // 3. The credential POST is relayed, and DeepAI's session cookie comes back
+    //    re-scoped to this origin under the relay prefix.
+    const posted = await call(`${base}/daily-time-sync/login/`, {
+      method: 'POST',
+      headers: { cookie: loginCookie, 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'username=kontomilosz350&password=hunter2',
+    });
+    assert.equal(posted.status, 200);
+    const relayed = String(posted.headers.get('set-cookie') ?? '');
+    assert.match(relayed, /dai_sessionid=fixture-session/, 'the upstream cookie must be relayed under our prefix');
+    assert.ok(!/Domain=/i.test(relayed), 'and re-scoped to this origin');
+    assert.ok(!/Secure/i.test(relayed), 'and not Secure on plain HTTP');
+    const daiCookie = relayed.split(';')[0];
+
+    // Upstream saw DeepAI's own origin, not the gateway's, and only the relayed
+    // cookie — the gateway's session cookie must never travel to DeepAI.
+    const loginSeen = fixture.seen.find((entry) => entry.path === '/daily-time-sync/login/');
+    assert.equal(loginSeen.origin, `http://127.0.0.1:${fixturePort}`);
+    // The browser held no DeepAI cookie yet, so nothing was forwarded — and in
+    // particular not the gateway's own login cookie.
+    assert.equal(loginSeen.cookie, '', 'no upstream cookie exists this early in the flow');
+
+    // 4. The poll now reports signed-in, through the relay.
+    const poll = await call(`${base}/daily-time-sync/user/`, { headers: { cookie: `${loginCookie}; ${daiCookie}` } });
+    assert.equal(poll.status, 200);
+
+    // 5. The decisive step: DeepAI redirects to a loopback address, and the relay
+    //    puts that same callback back on this origin.
+    const reloaded = await call(`${base}${signInPath}`, {
+      headers: { cookie: `${loginCookie}; ${daiCookie}` },
+      redirect: 'manual',
+    });
+    const reloadedBody = await reloaded.text();
+    assert.equal(reloaded.status, 302, `body=${reloadedBody} logs=${logs.join(' | ')}`);
+    const location = reloaded.headers.get('location');
+    assert.match(location, /^\/auth-callback\?code=one-shot-code&state=/);
+    assert.ok(!location.includes('127.0.0.1'), 'the redirect must not point at loopback any more');
+
+    // 6. Following it finishes the sign-in, exactly as the direct callback would.
+    const finished = await call(`${base}${location}`, { headers: { cookie: loginCookie } });
+    const finishedBody = await finished.text();
+    assert.equal(finished.status, 200, finishedBody);
+    assert.match(finishedBody, /Logged in to DeepAI/);
+    const sessionCookie = String(finished.headers.get('set-cookie') ?? '').split(';')[0];
+    const account = await call(`${base}/api/account`, { headers: { cookie: sessionCookie } }).then((r) => r.json());
+    assert.equal(account.signedIn, true);
+    assert.equal(account.username, 'kontomilosz350');
+
+    // 7. The password went through, and nowhere else: not into the log, and the
+    //    gateway kept no copy of it.
+    assert.ok(fixture.passwordsSeen.some((body) => body.includes('hunter2')), 'the fixture must have received it');
+    assert.ok(!logs.join('\n').includes('hunter2'), 'the password must never be logged');
+    assert.ok(!JSON.stringify(fixture.seen).includes('hunter2'), 'and it must not be echoed back');
+
+    /*
+     * 7b. The allowlist and the fetch must agree on one normalised path. If they did
+     *     not, a dotted path could be relayed even though its normalised form is not
+     *     on the list — which is how a relay turns into an open proxy.
+     */
+    const dotted = await call(`${base}/static/../healthz`, { redirect: 'manual' });
+    assert.equal(dotted.status, 200, 'a dotted path must reach the gateway, not the relay');
+    assert.deepEqual(await dotted.json(), { ok: true });
+
+    // 8. Social sign-in cannot work through a relay, and says so instead of leaving.
+    const social = await call(`${base}/accounts/google/login/`, { redirect: 'manual' });
+    assert.equal(social.status, 501);
+    assert.match(await social.text(), /email and password/);
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => gateway.close(resolve));
+    await new Promise((resolve) => fixture.close(resolve));
+  }
 });
 
 /* ------------------------------------------------------------------- brand */

@@ -39,6 +39,7 @@ export OPENAI_API_KEY=sk-…
 | `HOST` | `127.0.0.1` | Listen address. Set `0.0.0.0` to expose on the network |
 | `DATABASE` | `./data/deepai.db` | SQLite file |
 | `TRUST_PROXY` | unset | Set `1` behind a TLS proxy: trust `X-Forwarded-*` and set `Secure` cookies |
+| `AUTH_PROXY` | `1` | Relay DeepAI's sign-in through the gateway so the browser never needs loopback — see [Signing in from another machine](#signing-in-from-another-machine). Set `0` to disable; the sign-in password then never passes through the gateway |
 | `PUBLIC_URL` | unset | The address visitors use, e.g. `https://gw.example.com`. Reported to the dashboard as your origin; it cannot change where DeepAI sends the browser (see [Signing in from another machine](#signing-in-from-another-machine)) |
 | `LOG_REQUESTS` | `1` | Set `0` to silence per-request logging |
 | `PRICING_CACHE` | `./data/pricing.json` | Where the fetched price table is cached |
@@ -108,10 +109,47 @@ binds `127.0.0.1:0`, hands over the ephemeral port, and expects the browser to
 come back to loopback. `PUBLIC_URL` therefore changes what the dashboard *reports*
 as your origin, never where DeepAI sends the browser.
 
-The browser must run where `http://127.0.0.1:<port>` resolves to this gateway.
-There are two ways to arrange that:
+### 1. Let the gateway relay the sign-in (default)
 
-**1. Give the dead address a working host (works from anywhere).** After signing in
+`AUTH_PROXY` is on by default. The dashboard sends the browser to **this gateway**
+rather than to DeepAI, the gateway relays the sign-in page and its API calls, and
+DeepAI's final redirect — the one to `http://127.0.0.1:<port>/auth-callback` that a
+browser elsewhere can never open — is **rewritten back onto this origin**. Nothing to
+copy, nothing to paste, no address to edit.
+
+What it took to make that work, and why each piece is needed:
+
+| The page does | What the relay does |
+| --- | --- |
+| bounces the browser to `deepai.org` from any host except `deepai.org` and `127.0.0.1` | disarms that one comparison, which is exactly why the flow works locally and fails on a public host |
+| calls `app_base_url + path` for every API request, and reloads itself with `app_base_url + pathname + search` | empties `app_base_url`, so both resolve here. A prefix would make the self-reload recurse |
+| loads assets from absolute paths (`/static/…`) | relays `/static/` too, so the page still looks like itself |
+| sets its session cookie for `.deepai.org` | re-scopes it to this origin under a `dai_` prefix, so it cannot collide with the gateway's own cookies |
+
+**The trade-off, stated plainly: the visitor's DeepAI password passes through this
+process.** It is streamed straight upstream and never buffered to disk, never logged
+and never stored — but it does pass through, and that is a real difference from the
+other two routes. Set `AUTH_PROXY=0` to turn the relay off; the API-key route below
+needs no password, no callback and no proxy at all.
+
+Two limits are worth knowing before you rely on it:
+
+- **Google and Apple sign-in cannot work through a relay.** They return the browser to
+  `deepai.org`, where the session cookie is of no use to the gateway. Those buttons
+  answer with an explanation instead of leaving silently, so sign in with the email
+  and password form.
+- **It rewrites somebody else's page.** If DeepAI changes either construct above, the
+  relay cannot do its job — it then serves an explanation pointing at the API-key
+  route rather than half-working, and logs which marker went missing. A check against
+  DeepAI's live page is part of the test suite's manual verification, not its offline
+  run.
+
+### 2. Without the relay: the browser must reach loopback
+
+With `AUTH_PROXY=0` the browser has to run where `http://127.0.0.1:<port>` resolves to
+this gateway. There are two ways to arrange that:
+
+**a. Give the dead address a working host.** After signing in
 at DeepAI, the browser is sent to `http://127.0.0.1:<port>/auth-callback?code=…`
 and shows a connection error. The sign-in is not lost — the code is still valid and
 the address is still in the address bar. Both of these finish it:
@@ -145,7 +183,7 @@ itself.
 The dashboard shows the exact address to expect, and the gateway logs it at boot
 when `HOST` is not loopback.
 
-**3. Sign in with an API key (simplest).** `POST /api/login/key` takes a DeepAI API
+**b. Sign in with an API key.** `POST /api/login/key` takes a DeepAI API
 key and turns it into a session, with no callback, no address to copy and no
 password. The dashboard offers it under **"Or log in with a DeepAI API key"**, as
 three steps: open `deepai.org/dashboard/profile`, copy the key, paste it.
@@ -204,7 +242,7 @@ twice — pasted, or pasted after a browser sign-in. Matching on the key keeps t
 one owner instead of splitting the account, its keys and its usage across two
 identities that look unrelated in the dashboard.
 
-**2. Forward the port.** Make the loopback address reach the gateway:
+**c. Forward the port.** Make the loopback address reach the gateway:
 
 ```sh
 ssh -L 25912:127.0.0.1:8787 you@gateway-host
@@ -423,6 +461,7 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | `GET` | `/auth-callback` · `/callback` | Where DeepAI sends the browser back. The host is DeepAI's — always loopback — so see [Signing in from another machine](#signing-in-from-another-machine) |
 | `POST` | `/api/login/complete` | Finish that sign-in from the dashboard by pasting the address the browser was sent to |
 | `POST` | `/api/login/key` | Sign in directly with a DeepAI API key — no callback and no password |
+| `GET` | `/deepai_code/desktop_auth/` and the paths its page calls (`/daily-time-sync/…`, `/get_user_login_type`, `/static/…`) | The relay: allowlisted, fixed-upstream, and only when `AUTH_PROXY` is on |
 | `GET` | `/logout` | Sign out, then redirect to `/` |
 | `GET` | `/api/account` | This session's account, allowance, default model, key quota |
 | `GET` | `/api/account/events` | That account's auth trail (login, logout, refresh, denied) |

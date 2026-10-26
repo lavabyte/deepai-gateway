@@ -249,7 +249,10 @@ function needsLogin() {
   if (state.account?.signedIn === true) return false;
   const pending = state.account?.pendingLogin === true;
   const origin = state.account?.origin ?? '';
-  const remote = origin !== '' && !isLoopbackOrigin(origin);
+  // With the sign-in relayed, DeepAI's loopback redirect is rewritten back here, so
+  // there is nothing to warn about and nothing to paste — the page just loads.
+  const relayed = state.account?.authProxy === true;
+  const remote = !relayed && origin !== '' && !isLoopbackOrigin(origin);
 
   view.innerHTML = `
     <div class="page__head">

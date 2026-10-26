@@ -182,6 +182,9 @@ export function adminRouter(db, runtime) {
       origin: publicOrigin(req, runtime.publicUrl),
       callbackUrl: loopbackCallbackUrl(callbackPort),
       callbackPort,
+      // Whether the sign-in page is relayed here, in which case the redirect that
+      // used to be unreachable is rewritten and the visitor needs no workaround.
+      authProxy: runtime.authProxy === true,
       defaultModel: account === undefined
         ? 'glm-5.3-flash'
         : getSetting(db, account.username, 'default_model', 'glm-5.3-flash'),
@@ -212,7 +215,10 @@ export function adminRouter(db, runtime) {
   router.post('/login', async (req, res) => {
     try {
       const port = localPort(req, runtime.publicUrl);
-      const url = await beginLogin(db, runtime, port, { browser: browserOf(req) });
+      const url = await beginLogin(db, runtime, port, {
+        browser: browserOf(req),
+        pageBase: signInPageBase(req, runtime),
+      });
       res.json({
         ok: true,
         url,
@@ -724,6 +730,25 @@ export function publicOrigin(req, configured) {
   return `${proto}://${host}`;
 }
 
+/**
+ * Where to send the browser to sign in.
+ *
+ * With the relay on, this gateway's own origin: the sign-in page is served here and
+ * the redirect DeepAI ends with is rewritten back here, which is the only way a
+ * browser that cannot reach loopback can finish. With it off, DeepAI's own page,
+ * and the visitor finishes by pasting the address back.
+ *
+ * @param {import('express').Request} req
+ * @param {object} runtime
+ * @returns {string|undefined} `undefined` leaves DeepAI's own origin in place.
+ */
+export function signInPageBase(req, runtime) {
+  if (runtime?.authProxy !== true) return undefined;
+  // Without a usable origin the relay could not be reached anyway, so DeepAI's own
+  // page is the safer answer.
+  return publicOrigin(req, runtime.publicUrl) || undefined;
+}
+
 /** The first hop of a comma-separated forwarding header. */
 function firstForwarded(value) {
   if (typeof value !== 'string') return undefined;
@@ -771,6 +796,10 @@ export function localPort(req, configured) {
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {object} runtime
  * @param {number} port - the port the gateway listens on.
+ * @param {object} [options]
+ * @param {string} [options.browser] - which browser owns the attempt.
+ * @param {string} [options.pageBase] - origin serving the sign-in page: this
+ *   gateway's when the relay is on, otherwise DeepAI's.
  * @returns {Promise<string>} the DeepAI authorization URL.
  */
 export async function beginLogin(db, runtime, port, options = {}) {
@@ -800,7 +829,12 @@ export async function beginLogin(db, runtime, port, options = {}) {
     cancelLogin(runtime, oldest.value);
   }
 
-  const flow = startLogin({ port });
+  const flow = startLogin({
+    port,
+    // The relay needs the browser on this origin; without it DeepAI's own page is
+    // the right answer, and the visitor finishes by pasting the address back.
+    ...(options.pageBase === undefined ? {} : { pageBase: options.pageBase }),
+  });
   runtime.pendingLogins.set(browser, { flow });
 
   const forget = () => {
