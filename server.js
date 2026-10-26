@@ -49,10 +49,12 @@ export function config(env = process.env) {
     // used to report the origin back to the dashboard; it cannot change where
     // DeepAI sends the browser, because DeepAI fixes that to loopback.
     publicUrl: usableOrigin(env.PUBLIC_URL) ?? '',
-    // Relay DeepAI's sign-in through this gateway, so the browser never has to
-    // open the loopback address DeepAI redirects to. The visitor's DeepAI password
-    // then passes through this process — see the module doc. Off with AUTH_PROXY=0.
-    authProxy: env.AUTH_PROXY !== '0' && env.AUTH_PROXY !== 'false',
+    // Relay DeepAI's *page* through this gateway. Off by default: the direct
+    // password sign-in below performs DeepAI's own three requests server-side, which
+    // needs no relay at all and no list of requests to pass through. Turn it on with
+    // AUTH_PROXY=1 only for the browser flow — and note that the visitor's password
+    // then passes through this process.
+    authProxy: env.AUTH_PROXY === '1' || env.AUTH_PROXY === 'true',
     // Overridable so a test can point the relay at a fixture.
     authPageOrigin: env.AUTH_PAGE_ORIGIN || DEFAULT_PAGE_ORIGIN,
     authApiOrigin: env.AUTH_API_ORIGIN || DEFAULT_API_ORIGIN,
@@ -88,7 +90,7 @@ export function createApp(db, options = {}) {
     log: options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`)),
     trustProxy: options.trustProxy === true,
     publicUrl: options.publicUrl ?? '',
-    authProxy: options.authProxy !== false,
+    authProxy: options.authProxy === true,
     authPageOrigin: options.authPageOrigin ?? DEFAULT_PAGE_ORIGIN,
     authApiOrigin: options.authApiOrigin ?? DEFAULT_API_ORIGIN,
   };

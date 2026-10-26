@@ -213,6 +213,30 @@ function finishStep({ pending, remote }) {
  * Ownership still comes from the key, never from this field, so the name cannot be
  * used to claim another account — and it is scoped to the session that typed it.
  */
+/**
+ * The primary way in: DeepAI's own email and password, posted to this gateway.
+ *
+ * The Gateway performs DeepAI's three requests itself, so the browser never follows
+ * a redirect to loopback and nothing has to be passed through. The password is sent
+ * once, used once, and kept nowhere.
+ */
+function passwordForm() {
+  return `
+    <form class="mt-3" id="password-form" autocomplete="on">
+      <div class="field">
+        <label class="field__label" for="login-email">DeepAI email</label>
+        <input class="input" id="login-email" type="email" autocomplete="username"
+          spellcheck="false" placeholder="you@example.com" required>
+      </div>
+      <div class="field mt-3">
+        <label class="field__label" for="login-password">Password</label>
+        <input class="input" id="login-password" type="password" autocomplete="current-password"
+          placeholder="Your DeepAI password" required>
+      </div>
+      <div class="row mt-3"><button class="btn btn--primary" id="login-submit" type="submit">Log In</button></div>
+    </form>`;
+}
+
 function keyForm() {
   return `
     <details class="mt-3" id="key-step">
@@ -261,13 +285,22 @@ function needsLogin() {
     </div>
     <div class="card">
       <div class="card__title">Not logged in</div>
-      <div class="card__sub mt-2">Log in with DeepAI to see your API keys and usage.</div>
-      <div class="row mt-3"><button class="btn btn--primary" id="login-inline">Log in with DeepAI</button></div>
+      <div class="card__sub mt-2">Log in with your DeepAI account to see your API keys and usage.</div>
+      ${passwordForm()}
+      <p class="card__sub mt-3">
+        Signed in with Google or Apple?
+        <button class="linklike" id="login-browser" type="button">Use DeepAI's own sign-in page</button>
+      </p>
       ${finishStep({ pending, remote })}
       ${keyForm()}
     </div>`;
 
   $('login-inline')?.addEventListener('click', () => void startLoginFlow());
+  $('login-browser')?.addEventListener('click', () => void startLoginFlow());
+  $('password-form')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void signInWithPassword();
+  });
   $('login-complete')?.addEventListener('click', () => void completeLoginManually());
   $('login-with-key')?.addEventListener('click', () => void signInWithKey());
   $('api-key')?.addEventListener('keydown', (event) => {
@@ -286,6 +319,48 @@ function needsLogin() {
   // A waiting sign-in is the moment to type, so put the caret where it is needed.
   if (pending) $('callback-url')?.focus();
   return true;
+}
+
+/**
+ * Sign in with the DeepAI email and password.
+ *
+ * One request to this gateway; the gateway talks to DeepAI. Both fields are cleared
+ * once they have been used, so the password does not linger in the page.
+ */
+async function signInWithPassword() {
+  const emailField = $('login-email');
+  const passwordField = $('login-password');
+  const email = emailField?.value?.trim() ?? '';
+  const password = passwordField?.value ?? '';
+  if (email === '' || password === '') {
+    toast('Enter your DeepAI email and password.', 'error');
+    (email === '' ? emailField : passwordField)?.focus();
+    return;
+  }
+
+  const button = $('login-submit');
+  const label = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Signing in…';
+  }
+  try {
+    await api('/login/password', { method: 'POST', body: { email, password } });
+    if (emailField) emailField.value = '';
+    if (passwordField) passwordField.value = '';
+    toast('Logged in');
+    await loadAccount();
+    await render();
+  } catch (error) {
+    toast(String(error.message ?? error), 'error');
+    if (button) {
+      button.disabled = false;
+      button.textContent = label ?? 'Log In';
+    }
+    // The password is the likely mistake, so put the caret back in it.
+    passwordField?.focus();
+    passwordField?.select();
+  }
 }
 
 /**

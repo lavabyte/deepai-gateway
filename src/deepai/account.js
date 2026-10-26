@@ -211,6 +211,7 @@ export function startLogin({ port, timeoutMs = 300_000, maxAttempts = 5, pageBas
   return {
     url: url.href,
     state,
+    port,
     done,
     close: () => finish(new Error('DeepAI sign-in cancelled')),
     submit,
@@ -564,4 +565,125 @@ export async function checkPastedKey(apiKey, signal) {
     /* fall through: treated as simply rejected */
   }
   return { ok: false, reason: 'rejected' };
+}
+
+/**
+ * POST one multipart form the way DeepAI's own sign-in page does.
+ *
+ * The page builds a `FormData`, sends no CSRF token and keeps no session before
+ * logging in, so this is the whole protocol: the fields are the only input.
+ *
+ * @param {string} url
+ * @param {Record<string, string>} fields
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<Response>}
+ */
+async function postForm(url, fields, signal) {
+  const body = new FormData();
+  for (const [name, value] of Object.entries(fields)) body.append(name, value);
+  return fetch(url, {
+    method: 'POST',
+    body,
+    // The page sends this only for non-English locales, but it is harmless and
+    // keeps error bodies in one language.
+    headers: { 'accept-language': 'en-US,en;q=0.9' },
+    redirect: 'manual',
+    signal,
+  });
+}
+
+/**
+ * Sign in with a DeepAI email and password, entirely on this server.
+ *
+ * This is the direct route the browser page would have taken, minus the page: no
+ * loopback redirect, no rewritten HTML, no allowlist of requests to pass through,
+ * and nothing for the browser to reach beyond this gateway. The password is used
+ * once and kept nowhere.
+ *
+ * The three steps are DeepAI's own:
+ *
+ *   1. `POST /get_user_login_type` says whether the account exists and whether it
+ *      can use a password at all — an account created with Google has none, and
+ *      telling the visitor "wrong password" for it would be a lie.
+ *   2. `POST /daily-time-sync/login/` with `username` and `password`. A rejection is
+ *      a plain 400 with `non_field_errors`, which is a verdict, not a failure.
+ *   3. `GET /deepai_code/desktop_auth/` **with the session cookies just issued**
+ *      answers with the same redirect to loopback the browser would have followed,
+ *      and the sign-in code is in its `Location`.
+ *
+ * @param {object} params
+ * @param {string} params.email
+ * @param {string} params.password
+ * @param {string} params.state - the state this attempt was started with.
+ * @param {number} params.port - the port that goes into the callback DeepAI builds.
+ * @param {string} [params.apiOrigin]
+ * @param {AbortSignal} [params.signal]
+ * @returns {Promise<{ok: true, code: string}
+ *   | {ok: false, reason: 'no-account'|'social-only'|'bad-credentials'|'no-code'|'unreachable', providers?: string[]}>}
+ */
+export async function signInWithPassword({
+  email,
+  password,
+  state,
+  port,
+  apiOrigin = API_ORIGIN,
+  signal,
+}) {
+  let kind;
+  try {
+    const response = await postForm(`${apiOrigin}/get_user_login_type`, { email }, signal);
+    kind = await response.json().catch(() => undefined);
+  } catch (error) {
+    return { ok: false, reason: 'unreachable' };
+  }
+
+  // Only a definite "no such account" is reported as one; anything unreadable is
+  // left to the login step, which gives its own verdict.
+  if (kind?.user_exists === false) return { ok: false, reason: 'no-account' };
+  if (kind?.login_with_password === false) {
+    const providers = Array.isArray(kind.login_with_social_accounts)
+      ? kind.login_with_social_accounts.filter((name) => typeof name === 'string')
+      : [];
+    return { ok: false, reason: 'social-only', providers };
+  }
+
+  let login;
+  try {
+    login = await postForm(`${apiOrigin}/daily-time-sync/login/`, {
+      username: email,
+      password,
+    }, signal);
+  } catch {
+    return { ok: false, reason: 'unreachable' };
+  }
+  if (login.status === 400 || login.status === 401) return { ok: false, reason: 'bad-credentials' };
+  if (!login.ok) return { ok: false, reason: 'unreachable' };
+
+  // Only the name=value pairs matter: the attributes are DeepAI's business.
+  const cookies = (login.headers.getSetCookie?.() ?? [])
+    .map((cookie) => cookie.split(';')[0].trim())
+    .filter((pair) => pair.includes('='));
+
+  const callback = new URL('/deepai_code/desktop_auth/', apiOrigin);
+  callback.search = new URLSearchParams({ state, port: String(port) }).toString();
+
+  let landed;
+  try {
+    landed = await fetch(callback, {
+      headers: cookies.length === 0 ? {} : { cookie: cookies.join('; ') },
+      redirect: 'manual',
+      signal,
+    });
+  } catch {
+    return { ok: false, reason: 'unreachable' };
+  }
+
+  const location = landed.headers.get('location') ?? '';
+  const code = location === '' ? '' : (new URL(location, apiOrigin).searchParams.get('code') ?? '');
+  // An authenticated request is answered with the redirect; a page here means the
+  // session did not take, which is not something to paper over.
+  if (code === '') {
+    return { ok: false, reason: landed.status >= 500 ? 'unreachable' : 'no-code' };
+  }
+  return { ok: true, code };
 }

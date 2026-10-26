@@ -677,13 +677,12 @@ await checkAsync('/ serves the dashboard and /login is browser-navigable', async
     assert.match(await deep.text(), /DeepAI Gateway/);
 
     // /login with ?json=1 answers with the sign-in URL instead of redirecting.
-    // With the relay on — the default — that URL is this gateway's own, which is the
-    // whole point: DeepAI's final redirect can then be rewritten back here.
+    // The relay is opt-in, so by default the browser is sent to DeepAI's own page.
     const login = await fetch(`${base}/login?json=1`);
     assert.equal(login.status, 200);
     const payload = await login.json();
     assert.equal(payload.ok, true);
-    assert.match(payload.url, new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/deepai_code/desktop_auth/`));
+    assert.match(payload.url, /^https:\/\/api\.deepai\.org\/deepai_code\/desktop_auth\//);
     assert.match(payload.url, /[?&]state=[0-9a-f]{64}/);
 
     // The response that starts a login also hands this browser its login cookie.
@@ -706,7 +705,7 @@ await checkAsync('/ serves the dashboard and /login is browser-navigable', async
   }
 });
 
-await checkAsync('turning the relay off sends the browser back to DeepAI', async () => {
+await checkAsync('turning the relay on sends the browser to this gateway', async () => {
   /*
    * The relay exists so DeepAI's loopback redirect can be rewritten onto this host.
    * Without it the browser must go to DeepAI directly, and the visitor finishes by
@@ -715,18 +714,20 @@ await checkAsync('turning the relay off sends the browser back to DeepAI', async
    */
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
-  const app = createApp(fresh, { log: () => {}, logRequests: false, authProxy: false });
+  const app = createApp(fresh, { log: () => {}, logRequests: false, authProxy: true });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
 
   try {
     const login = await fetch(`${base}/api/login`, { method: 'POST' }).then((r) => r.json());
-    assert.match(login.url, /^https:\/\/api\.deepai\.org\/deepai_code\/desktop_auth\//);
+    // With the relay on, the page is served here — that is what makes DeepAI's
+    // loopback redirect rewritable.
+    assert.match(login.url, new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/deepai_code/desktop_auth/`));
 
-    // And the dashboard is told the relay is off, so it can explain the workaround.
+    // And the dashboard is told, so it stops offering the workaround.
     const account = await fetch(`${base}/api/account`).then((r) => r.json());
-    assert.equal(account.authProxy, false);
+    assert.equal(account.authProxy, true);
     await fetch(`${base}/api/cancel-login`, { method: 'POST' });
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -2316,6 +2317,7 @@ await checkAsync('the whole sign-in works through the relay, loopback and all', 
   const app = createApp(fresh, {
     log: (message) => logs.push(message),
     logRequests: false,
+    authProxy: true,
     authPageOrigin: `http://127.0.0.1:${fixturePort}`,
     authApiOrigin: `http://127.0.0.1:${fixturePort}`,
   });
@@ -2715,8 +2717,14 @@ check('every sign-in failure has something useful to say', async () => {
   const flow = readFileSync(join(root, 'src', 'deepai', 'account.js'), 'utf8');
   const admin = readFileSync(join(root, 'src', 'api', 'admin.js'), 'utf8');
 
-  /** The `reason:` values inside one slice of a module. */
-  const reasonsIn = (text) => new Set([...text.matchAll(/reason: '([a-z_-]+)'/g)].map((m) => m[1]));
+  /*
+   * Only reasons a function actually *returns*. Matching every `reason:` in a slice
+   * also picked up the `@returns` list in the next function's doc comment, which
+   * made one function appear to produce another's reasons.
+   */
+  const reasonsIn = (text) => new Set(
+    [...text.matchAll(/return \{ ok: false, reason: '([a-z_-]+)'/g)].map((m) => m[1]),
+  );
   /** The keys of one `const NAME = { ... }` table. */
   const keysOf = (name) => {
     const from = admin.indexOf(`const ${name} = {`);
@@ -2744,24 +2752,58 @@ check('every sign-in failure has something useful to say', async () => {
   const unanswered = [...completion].filter((reason) => !keysOf('COMPLETION_FAILURES').has(reason));
   assert.deepEqual(unanswered, [], `these completion reasons would fall back to a generic message: ${unanswered}`);
 
-  const keyLogin = reasonsIn(flow.slice(flow.indexOf('export async function checkPastedKey')));
-  assert.ok(keyLogin.size >= 3, `expected the API-key reasons to be found, saw ${keyLogin.size}`);
-  const unansweredKey = [...keyLogin].filter((reason) => !keysOf('KEY_LOGIN_FAILURES').has(reason));
-  assert.deepEqual(unansweredKey, [], `these API-key reasons would fall back to a generic message: ${unansweredKey}`);
+  /*
+   * One producer, one table. Slicing the module by position broke twice as soon as
+   * another producer with its own reasons was appended, so each function is taken by
+   * name and checked against the table that answers for it.
+   */
+  const functionBody = (name) => {
+    const from = flow.indexOf(`export async function ${name}`);
+    const at = from === -1 ? -1 : from;
+    assert.ok(at !== -1, `expected to find ${name}`);
+    const next = flow.indexOf('\nexport ', at + 10);
+    const docStart = next === -1 ? -1 : flow.lastIndexOf('/**', next);
+    const end = docStart > at ? docStart : next;
+    return flow.slice(at, end === -1 ? undefined : end);
+  };
+
+  for (const [name, table, minimum] of [
+    ['checkPastedKey', 'KEY_LOGIN_FAILURES', 3],
+    ['signInWithPassword', 'PASSWORD_LOGIN_FAILURES', 4],
+  ]) {
+    const reasons = reasonsIn(functionBody(name));
+    assert.ok(reasons.size >= minimum, `expected ${name}'s reasons to be found, saw ${reasons.size}`);
+    const unanswered = [...reasons].filter((reason) => !keysOf(table).has(reason));
+    assert.deepEqual(unanswered, [], `${name} reasons without a message in ${table}: ${unanswered}`);
+  }
 
   // The messages are read by someone looking at a page that would not load or a key
   // that was refused, so they must not name protocol parameters.
-  for (const table of ['COMPLETION_FAILURES', 'KEY_LOGIN_FAILURES']) {
+  for (const table of ['COMPLETION_FAILURES', 'KEY_LOGIN_FAILURES', 'PASSWORD_LOGIN_FAILURES']) {
     for (const message of messagesIn(table).matchAll(/'([^']{20,})'/g)) {
       assert.ok(!/\bstate\b|`code`/.test(message[1]), `jargon in ${table}: ${message[1]}`);
     }
   }
 
-  // Nothing may be terminal by accident: a mistyped paste must stay retryable.
-  const terminal = admin.slice(admin.indexOf('const TERMINAL_COMPLETION_REASONS'));
-  const terminalSet = terminal.slice(0, terminal.indexOf('];'));
+  /*
+   * Nothing may be terminal by accident: a mistyped paste must stay retryable.
+   *
+   * The set is parsed rather than sliced to a delimiter: the declaration ends with
+   * `]);`, so looking for `];` found nothing, yielded -1, and silently widened the
+   * search to the rest of the file — which passed only while no other table happened
+   * to mention those words.
+   */
+  const terminalMatch = /const TERMINAL_COMPLETION_REASONS = new Set\(\[([^\]]*)\]\)/.exec(admin);
+  assert.ok(terminalMatch !== null, 'the terminal set must be found');
+  const terminalReasons = new Set(
+    [...terminalMatch[1].matchAll(/'([a-z_-]+)'/g)].map((match) => match[1]),
+  );
+  assert.equal(terminalReasons.size, 3, 'the terminal set is the three that end an attempt');
   for (const retryable of ['not-an-address', 'too-long', 'no-code', 'no-state', 'invalid_state', 'busy']) {
-    assert.ok(!terminalSet.includes(retryable), `${retryable} must leave the sign-in retryable`);
+    assert.ok(!terminalReasons.has(retryable), `${retryable} must leave the sign-in retryable`);
+  }
+  for (const terminal of ['expired', 'too_many_attempts', 'exchange_failed']) {
+    assert.ok(terminalReasons.has(terminal), `${terminal} ends the attempt`);
   }
 });
 
@@ -2872,6 +2914,167 @@ await checkAsync('signing in with a pasted API key skips the browser round trip'
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('the gateway can sign in with a DeepAI password itself', async () => {
+  /*
+   * DeepAI's own three requests, performed here: does the account exist and can it
+   * use a password, the login POST, and the authenticated reload that answers with
+   * the loopback redirect. Doing them server-side is what removes the need to relay
+   * their page and to guess which requests have to be passed through.
+   */
+  const http = await import('node:http');
+  const fixture = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://fixture');
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      const json = (payload, status = 200) => {
+        res.writeHead(status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(payload));
+      };
+      if (url.pathname === '/get_user_login_type') {
+        fixture.seen.push(url.pathname);
+        if (body.includes('social@example.com')) {
+          return json({ user_exists: true, login_with_password: false, login_with_social_accounts: ['Google'] });
+        }
+        if (body.includes('ghost@example.com')) {
+          return json({ user_exists: false, login_with_password: true, login_with_social_accounts: [] });
+        }
+        return json({ user_exists: true, login_with_password: true, login_with_social_accounts: [] });
+      }
+      if (url.pathname === '/daily-time-sync/login/') {
+        fixture.seen.push(url.pathname);
+        if (!body.includes('correct-horse')) {
+          return json({ non_field_errors: ['Unable to log in with provided credentials.'] }, 400);
+        }
+        res.writeHead(200, {
+          'content-type': 'application/json',
+          'set-cookie': 'sessionid=fixture-session; Path=/; HttpOnly',
+        });
+        return res.end('{"ok":true}');
+      }
+      if (url.pathname === '/deepai_code/desktop_auth/') {
+        fixture.seen.push(url.pathname);
+        // The one response the browser could never have followed on a public host.
+        if (!(req.headers.cookie ?? '').includes('sessionid=fixture-session')) return json({ err: 'no session' }, 401);
+        res.writeHead(302, {
+          location: `http://127.0.0.1:${url.searchParams.get('port')}/auth-callback?code=server-side-code&state=${url.searchParams.get('state')}`,
+        });
+        return res.end();
+      }
+      return json({ err: 'unexpected' }, 404);
+    });
+  });
+  fixture.seen = [];
+  await new Promise((resolve) => fixture.listen(0, '127.0.0.1', resolve));
+  const fixtureOrigin = `http://127.0.0.1:${fixture.address().port}`;
+
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const logs = [];
+  const app = createApp(fresh, {
+    log: (message) => logs.push(message),
+    logRequests: false,
+    authApiOrigin: fixtureOrigin,
+  });
+  const gateway = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => gateway.once('listening', resolve));
+  const base = `http://127.0.0.1:${gateway.address().port}`;
+
+  const realFetch = globalThis.fetch;
+  const call = (...args) => realFetch(...args);
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('/desktop_auth/exchange/')) {
+      return new Response(JSON.stringify({ api_key: 'sk-from-password', username: 'kontomilosz350', is_pro: false }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (String(url).includes('/deepai_code/theos')) {
+      return new Response('{"enabled":true,"balance":"7.0","granted":"10.0","refresh_at":null}', {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (String(url).includes('/get_usage_summary')) {
+      return new Response('{"is_authenticated":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return realFetch(url, init);
+  };
+
+  /** Start a sign-in and return the cookie that owns it. */
+  const begin = async () => {
+    const started = await call(`${base}/api/login`, { method: 'POST' });
+    return String(started.headers.get('set-cookie') ?? '').split(';')[0];
+  };
+  const post = (cookie, body) => call(`${base}/api/login/password`, {
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  try {
+    // Without a waiting sign-in there is no state to bind a code to, so this must
+    // not be usable as a password oracle by anyone.
+    const unbound = await post('', { email: 'a@b.com', password: 'correct-horse' });
+    assert.equal(unbound.status, 410);
+    assert.equal((await unbound.json()).code, 'no_pending_login');
+
+    // Shapes that are not credentials.
+    let cookie = await begin();
+    for (const body of [{}, { email: '', password: '' }, { email: 'not-an-email', password: 'x' }, { email: 'a@b.com', password: '' }]) {
+      const bad = await post(cookie, body);
+      assert.equal(bad.status, 400, JSON.stringify(body));
+      assert.ok(['invalid_email', 'invalid_password'].includes((await bad.json()).code));
+    }
+
+    // An account that does not exist says so, rather than blaming the password.
+    const ghost = await post(cookie, { email: 'ghost@example.com', password: 'correct-horse' });
+    assert.equal(ghost.status, 404);
+    assert.equal((await ghost.json()).code, 'no-account');
+
+    // An account created with Google has no password, and naming the provider is
+    // the difference between a dead end and the next step.
+    const social = await post(cookie, { email: 'social@example.com', password: 'correct-horse' });
+    assert.equal(social.status, 409);
+    const socialBody = await social.json();
+    assert.equal(socialBody.code, 'social-only');
+    assert.match(socialBody.error, /Google/);
+
+    // A wrong password is a verdict from DeepAI, not a failure here.
+    const wrong = await post(cookie, { email: 'kontomilosz350@example.com', password: 'wrong' });
+    assert.equal(wrong.status, 401);
+    assert.equal((await wrong.json()).code, 'bad-credentials');
+
+    // The real thing.
+    const done = await post(cookie, { email: 'kontomilosz350@example.com', password: 'correct-horse' });
+    const doneText = await done.text();
+    assert.equal(done.status, 200, doneText);
+    assert.equal(JSON.parse(doneText).username, 'kontomilosz350');
+
+    const session = String(done.headers.get('set-cookie') ?? '').split(';')[0];
+    const account = await call(`${base}/api/account`, { headers: { cookie: session } }).then((r) => r.json());
+    assert.equal(account.signedIn, true);
+
+    /*
+     * The successful attempt really took DeepAI's own route, in order: the password
+     * check, the login, then the authenticated reload that answers with the loopback
+     * redirect. Asserted on the tail, because the rejected attempts above called the
+     * first endpoint too.
+     */
+    assert.deepEqual(
+      fixture.seen.slice(-3),
+      ['/get_user_login_type', '/daily-time-sync/login/', '/deepai_code/desktop_auth/'],
+    );
+
+    // A password is a credential: it must not reach the log.
+    assert.ok(logs.length > 0, 'the sign-in is logged');
+    assert.ok(!logs.join('\n').includes('correct-horse'), 'the password must never be logged');
+    assert.ok(!logs.join('\n').includes('wrong'), 'nor a rejected one');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => gateway.close(resolve));
+    await new Promise((resolve) => fixture.close(resolve));
   }
 });
 

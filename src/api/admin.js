@@ -13,7 +13,14 @@
 
 import express from 'express';
 import { randomUUID } from 'node:crypto';
-import { checkKey, checkPastedKey, loopbackCallbackUrl, startLogin, usernameForKey } from '../deepai/account.js';
+import {
+  checkKey,
+  checkPastedKey,
+  loopbackCallbackUrl,
+  signInWithPassword,
+  startLogin,
+  usernameForKey,
+} from '../deepai/account.js';
 import { loadCatalog, publicModel } from '../deepai/catalog.js';
 import {
   MAX_KEYS,
@@ -108,6 +115,24 @@ const TERMINAL_COMPLETION_REASONS = new Set(['expired', 'too_many_attempts', 'ex
  * enabled for DeepAI Code, so "wrong key" would send the visitor looking for a
  * mistake they did not make.
  */
+/**
+ * What each password sign-in failure says to the visitor.
+ *
+ * `social-only` carries a placeholder because DeepAI reports *which* providers the
+ * account uses, and naming them is the difference between "use another method" and
+ * something the visitor can act on.
+ */
+const PASSWORD_LOGIN_FAILURES = {
+  invalid_email: [400, 'Enter the email address of your DeepAI account.'],
+  invalid_password: [400, 'Enter your DeepAI password.'],
+  'no-account': [404, 'There is no DeepAI account with that email address.'],
+  'social-only': [409, 'That DeepAI account has no password — it signs in with {providers}. Use the browser sign-in button instead.'],
+  'bad-credentials': [401, 'That email and password do not match. Check the password and try again.'],
+  'no-code': [502, 'DeepAI accepted the password but did not return a sign-in code. Try again in a moment.'],
+  unreachable: [502, 'Could not reach DeepAI. Try again in a moment, or log in with an API key.'],
+  signIn: [400, 'That sign-in could not be completed. Try again.'],
+};
+
 const KEY_LOGIN_FAILURES = {
   invalid_key: [400, 'Paste the API key itself — one line, with nothing else around it.'],
   invalid_email: [400, 'That does not look like an email address — it is shown as your account name.'],
@@ -361,6 +386,87 @@ export function adminRouter(db, runtime) {
 
     res.setHeader('set-cookie', completed.cookie);
     return res.json({ ok: true, username: completed.username, created: completed.created });
+  });
+
+  /**
+   * Sign in with a DeepAI email and password, handled here.
+   *
+   * The browser page DeepAI serves is only a means to an end: its own three requests
+   * are enough, and doing them here means no loopback redirect, no rewritten HTML
+   * and no list of requests to pass through. The password is used once and never
+   * logged or stored.
+   *
+   * A sign-in attempt must already be waiting: the state it was started with is what
+   * DeepAI echoes back in the redirect, and requiring it keeps this endpoint from
+   * being a password oracle for anyone who has not started a sign-in.
+   */
+  router.post('/login/password', async (req, res) => {
+    const browser = browserOf(req);
+    const flow = runtime.pendingLogins?.get(browser)?.flow;
+    if (flow === undefined) {
+      return res.status(410).json({
+        ok: false,
+        error: 'This sign-in has expired. Press “Log in with DeepAI” and try again.',
+        code: 'no_pending_login',
+      });
+    }
+
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+      const [status, message] = PASSWORD_LOGIN_FAILURES.invalid_email;
+      return res.status(status).json({ ok: false, error: message, code: 'invalid_email' });
+    }
+    if (password === '' || password.length > 1024 || password.includes('\u0000')) {
+      const [status, message] = PASSWORD_LOGIN_FAILURES.invalid_password;
+      return res.status(status).json({ ok: false, error: message, code: 'invalid_password' });
+    }
+
+    let result;
+    try {
+      result = await signInWithPassword({
+        email,
+        password,
+        state: flow.state,
+        port: flow.port,
+        apiOrigin: runtime.authApiOrigin,
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (error) {
+      runtime.log?.(`password sign-in failed: ${error?.message ?? error}`);
+      result = { ok: false, reason: 'unreachable' };
+    }
+
+    if (result.ok !== true) {
+      runtime.log?.(`password sign-in refused: ${result.reason}`);
+      const [status, message] = PASSWORD_LOGIN_FAILURES[result.reason]
+        ?? [400, 'DeepAI did not accept that sign-in.'];
+      const providers = result.providers !== undefined && result.providers.length > 0
+        ? result.providers.join(' or ')
+        : 'Google or Apple';
+      return res.status(status).json({
+        ok: false,
+        error: result.reason === 'social-only' ? message.replace('{providers}', providers) : message,
+        code: result.reason,
+      });
+    }
+
+    // The code is redeemed through the flow, so its attempt accounting — and the
+    // single-use check on the state — stays in one place.
+    const submitted = await flow.submit(result.code, flow.state);
+    if (submitted.ok !== true) {
+      runtime.pendingLogins.delete(browser);
+      const [status, message] = PASSWORD_LOGIN_FAILURES.signIn
+        ?? [400, 'DeepAI did not accept that sign-in.'];
+      return res.status(status).json({ ok: false, error: message, code: 'sign_in_failed' });
+    }
+
+    runtime.pendingLogins.delete(browser);
+    const completed = completeLogin(db, runtime, submitted.account, {
+      secure: runtime.trustProxy === true,
+    });
+    res.setHeader('set-cookie', completed.cookie);
+    return res.json({ ok: true, username: completed.username });
   });
 
   router.post('/cancel-login', (req, res) => {

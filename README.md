@@ -39,7 +39,7 @@ export OPENAI_API_KEY=sk-…
 | `HOST` | `127.0.0.1` | Listen address. Set `0.0.0.0` to expose on the network |
 | `DATABASE` | `./data/deepai.db` | SQLite file |
 | `TRUST_PROXY` | unset | Set `1` behind a TLS proxy: trust `X-Forwarded-*` and set `Secure` cookies |
-| `AUTH_PROXY` | `1` | Relay DeepAI's sign-in through the gateway so the browser never needs loopback — see [Signing in from another machine](#signing-in-from-another-machine). Set `0` to disable; the sign-in password then never passes through the gateway |
+| `AUTH_PROXY` | `0` | Relay DeepAI's sign-in through the gateway so the browser never needs loopback — see [Signing in from another machine](#signing-in-from-another-machine). Set `0` to disable; the sign-in password then never passes through the gateway |
 | `PUBLIC_URL` | unset | The address visitors use, e.g. `https://gw.example.com`. Reported to the dashboard as your origin; it cannot change where DeepAI sends the browser (see [Signing in from another machine](#signing-in-from-another-machine)) |
 | `LOG_REQUESTS` | `1` | Set `0` to silence per-request logging |
 | `PRICING_CACHE` | `./data/pricing.json` | Where the fetched price table is cached |
@@ -109,9 +109,40 @@ binds `127.0.0.1:0`, hands over the ephemeral port, and expects the browser to
 come back to loopback. `PUBLIC_URL` therefore changes what the dashboard *reports*
 as your origin, never where DeepAI sends the browser.
 
-### 1. Let the gateway relay the sign-in (default)
+### 1. Email and password, handled by the gateway (default)
 
-`AUTH_PROXY` is on by default. The dashboard sends the browser to **this gateway**
+The dashboard has its own email and password form. The gateway performs DeepAI's own
+three requests itself:
+
+1. `POST /get_user_login_type` — does the account exist, and can it use a password?
+2. `POST /daily-time-sync/login/` with `username` and `password`. A rejection is a
+   plain `400 {"non_field_errors": […]}`, which is a verdict rather than a failure.
+3. `GET /deepai_code/desktop_auth/` **with the session cookies just issued** — the
+   reply is the same redirect to loopback a browser would have followed, and the
+   sign-in code is in its `Location`.
+
+Doing it here is what removes the whole problem: no loopback redirect for the browser
+to reach, no page to rewrite, and no list of requests to pass through. The password is
+sent once, used once, and kept nowhere.
+
+The failures are distinguishable, because they need different fixes:
+
+| What happened | What the visitor is told |
+| --- | --- |
+| `user_exists: false` | there is no DeepAI account with that email |
+| `login_with_password: false` | the account has no password — it signs in with Google or Apple, **named** |
+| `400` from the login | that email and password do not match |
+| no code in the redirect | DeepAI accepted the password but returned nothing usable |
+
+A sign-in attempt must already be waiting, so this cannot be used as a password oracle
+by someone who has not started one, and its attempts are bounded by the flow's own
+limit. Both `POST /api/login/password` and the API-key route are in the endpoints
+table below.
+
+### 2. Relay DeepAI's page (opt-in, `AUTH_PROXY=1`)
+
+Off by default, because route 1 does not need it. Turn it on for the *browser* flow —
+the one that also covers Google and Apple accounts, as far as a relay can. The dashboard sends the browser to **this gateway**
 rather than to DeepAI, the gateway relays the sign-in page and its API calls, and
 DeepAI's final redirect — the one to `http://127.0.0.1:<port>/auth-callback` that a
 browser elsewhere can never open — is **rewritten back onto this origin**. Nothing to
@@ -144,9 +175,9 @@ Two limits are worth knowing before you rely on it:
   DeepAI's live page is part of the test suite's manual verification, not its offline
   run.
 
-### 2. Without the relay: the browser must reach loopback
+### 3. Without the relay: the browser must reach loopback
 
-With `AUTH_PROXY=0` the browser has to run where `http://127.0.0.1:<port>` resolves to
+For the browser flow the browser has to run where `http://127.0.0.1:<port>` resolves to
 this gateway. There are two ways to arrange that:
 
 **a. Give the dead address a working host.** After signing in
@@ -460,6 +491,7 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | `GET` | `/login` | Browser sign-in; redirects to DeepAI (`?json=1` returns the URL and the callback address) |
 | `GET` | `/auth-callback` · `/callback` | Where DeepAI sends the browser back. The host is DeepAI's — always loopback — so see [Signing in from another machine](#signing-in-from-another-machine) |
 | `POST` | `/api/login/complete` | Finish that sign-in from the dashboard by pasting the address the browser was sent to |
+| `POST` | `/api/login/password` | Sign in with a DeepAI email and password; the gateway performs DeepAI's own requests |
 | `POST` | `/api/login/key` | Sign in directly with a DeepAI API key — no callback and no password |
 | `GET` | `/deepai_code/desktop_auth/` and the paths its page calls (`/daily-time-sync/…`, `/get_user_login_type`, `/static/…`) | The relay: allowlisted, fixed-upstream, and only when `AUTH_PROXY` is on |
 | `GET` | `/logout` | Sign out, then redirect to `/` |
