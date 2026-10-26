@@ -463,7 +463,7 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | `POST` | `/api/account/forget` | Remove the account, its keys and its DeepAI credential |
 | `POST` | `/api/account/refresh` | Re-read the Credits balance |
 | `GET` `POST` | `/api/keys` | List / create |
-| `PATCH` `DELETE` | `/api/keys/:id` | Edit / delete |
+| `PATCH` | `/api/keys/:id` | Edit a key's name, limits, expiry or allowed models |
 | `POST` | `/api/keys/:id/revoke` | Revoke a key: it is deleted |
 | `GET` | `/api/usage/summary` | Today / month / all-time totals, daily series, money saved |
 | `GET` | `/api/usage/export` | Download the history (`?format=csv\|json`, `?range=`, `?keyId=`) |
