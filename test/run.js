@@ -2983,6 +2983,7 @@ await checkAsync('the gateway can sign in with a DeepAI password itself', async 
           pk: 1,
           username: 'kontomilosz350',
           email: 'verified@example.com',
+          // A placeholder, never a real key: this file is published.
           userprofile: { api_key: '00000000-0000-4000-8000-000000000000' },
         });
       }
