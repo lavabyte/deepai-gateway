@@ -14,3 +14,6 @@ data/
 
 # Local database backups taken before schema migrations.
 backups/
+
+# Captured network traces: they contain credentials and session cookies.
+*.har

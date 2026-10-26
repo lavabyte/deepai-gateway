@@ -1315,6 +1315,23 @@ check('usage rows survive reopening the same database file', async () => {
 
 /* ------------------------------------------------------------- hidden fields */
 
+check('the command block is not overridden by the inline snippet rule', async () => {
+  /*
+   * Both selectors have one class of specificity, so the later rule wins. `.snippet`
+   * sets `display: flex`; a `.snippet--block` placed before it lost its
+   * `display: block` and the copyable command rendered inline. Order is the whole
+   * fix, so order is what this pins.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const css = readFileSync(join(new URL('..', import.meta.url).pathname, 'public', 'app.css'), 'utf8');
+  const base = css.indexOf('.snippet {');
+  const variant = css.indexOf('.snippet--block {');
+  assert.ok(base !== -1 && variant !== -1, 'both snippet rules must exist');
+  assert.ok(variant > base, 'the block variant must come after the flex one to win');
+  assert.match(css.slice(variant, variant + 120), /display: block/);
+});
+
 check('the stylesheet makes the hidden attribute win', async () => {
   // Regression: `.field { display: flex }` used to override `[hidden]`, so
   // "hidden" form fields still rendered and still took clicks.

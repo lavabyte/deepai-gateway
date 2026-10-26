@@ -196,6 +196,53 @@ function finishStep({ pending, remote }) {
 }
 
 /**
+ * What a Google or Apple account actually needs.
+ *
+ * Neither can be routed through this gateway, for two independent reasons: their
+ * sign-in is an OAuth redirect whose `redirect_uri` is DeepAI's own host, so the
+ * session is created in the browser and never reaches us — and Google's One Tap is
+ * refused on any origin that is not registered for DeepAI's client id.
+ *
+ * What does work is making the loopback address real on the visitor's own machine.
+ * Then the browser is in exactly the situation DeepAI's desktop app expects: the
+ * page's own host check passes, Google and Apple work natively, and the redirect
+ * arrives here — with no password passing through the gateway at all.
+ */
+function socialHelp() {
+  const origin = state.account?.origin ?? '';
+  const host = origin.replace(/^https?:\/\//, '');
+  const port = (/(?::(\d+))\/auth-callback$/.exec(state.callbackUrl ?? '') ?? [])[1]
+    ?? (host.match(/:(\d+)$/) ?? [])[1]
+    ?? '25912';
+  const name = host.replace(/:\d+$/, '') || 'your-gateway-host';
+  const hostPort = host.includes(':') ? host : `${name}:${port}`;
+
+  return `
+    <section class="note mt-3 step" id="social-help">
+      <div class="step__title">Google and Apple need one command on your computer</div>
+      <p class="step__lead">
+        Their sign-in finishes at an address only your own machine can open
+        (<code>http://127.0.0.1:${esc(port)}</code>), and that address cannot be routed through this
+        gateway — so the sign-in has to end where it was always meant to: on your computer.
+      </p>
+      <p class="step__lead">Run one of these on the computer with the browser:</p>
+      <div class="snippet snippet--block"><code>socat TCP-LISTEN:${esc(port)},fork,reuseaddr TCP:${esc(hostPort)}</code></div>
+      <p class="step__lead step__aside">No socat? Any equivalent will do —
+        <code>ssh -L ${esc(port)}:${esc(hostPort)} user@${esc(name)}</code>.</p>
+      <p class="step__lead">
+        Then open <code>http://127.0.0.1:${esc(port)}</code> and sign in with Google or Apple as usual.
+      </p>
+      <p class="step__lead step__aside">
+        Or skip it: sign in with Google on deepai.org, copy the key from your profile, and paste it
+        in the API-key section below.
+      </p>
+      <div class="row mt-3">
+        <button class="btn btn--ghost" id="login-browser-anyway" type="button">Try DeepAI's page anyway</button>
+      </div>
+    </section>`;
+}
+
+/**
  * The second way in: a pasted API key.
  *
  * A key is the same credential the browser sign-in would have produced, so it
@@ -296,7 +343,15 @@ function needsLogin() {
     </div>`;
 
   $('login-inline')?.addEventListener('click', () => void startLoginFlow());
-  $('login-browser')?.addEventListener('click', () => void startLoginFlow());
+  // Sending a Google or Apple account into the browser flow lands it on a dead
+  // address on a public host, so the helper comes first and the flow is opt-in.
+  $('login-browser')?.addEventListener('click', () => {
+    const host = $('login-browser')?.parentElement;
+    if (host === null || host === undefined) return;
+    host.insertAdjacentHTML('afterend', socialHelp());
+    $('login-browser-anyway')?.addEventListener('click', () => void startLoginFlow());
+    host.remove();
+  });
   $('password-form')?.addEventListener('submit', (event) => {
     event.preventDefault();
     void signInWithPassword();

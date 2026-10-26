@@ -139,10 +139,44 @@ by someone who has not started one, and its attempts are bounded by the flow's o
 limit. Both `POST /api/login/password` and the API-key route are in the endpoints
 table below.
 
+### Google and Apple accounts cannot be routed through the gateway
+
+Not a limitation of the allowlist — two independent blockers, both in DeepAI's own
+page:
+
+- The **"Sign in with Google" button** calls `social_auth()`, which navigates to
+  `app_base_url + /accounts/google/login/?process=login`. That is a redirect-based
+  OAuth flow on `api.deepai.org` with a **static `redirect_uri`**, so Google returns
+  the browser to DeepAI's own host, the session is created there, and the gateway
+  never sees it. Rewriting `redirect_uri` to this host is not an option: Google
+  rejects an unregistered one.
+- **Google One Tap** posts its credential to `app_base_url + /auth/google/one-tap/`,
+  which a relay *would* carry — but Google Identity Services refuses any origin that
+  is not registered against DeepAI's client id, and a gateway's origin is not.
+
+Apple uses the same redirect shape (`/accounts/apple/login/?process=login`).
+
+**What does work is making the loopback real on the visitor's machine.** Then the
+browser is in exactly the situation DeepAI's desktop app expects: the page's own host
+check passes, Google and Apple work natively, and the redirect arrives here — with no
+password passing through the gateway at all. The dashboard shows the command:
+
+```sh
+socat TCP-LISTEN:<port>,fork,reuseaddr TCP:<your-gateway-host>:<port>
+# or, equivalently:
+ssh -L <port>:<your-gateway-host>:<port> user@<your-gateway-host>
+```
+
+…then open `http://127.0.0.1:<port>`. The other route for a social account is to sign
+in at deepai.org, copy the key from the profile, and paste it into the API-key
+section.
+
 ### 2. Relay DeepAI's page (opt-in, `AUTH_PROXY=1`)
 
-Off by default, because route 1 does not need it. Turn it on for the *browser* flow —
-the one that also covers Google and Apple accounts, as far as a relay can. The dashboard sends the browser to **this gateway**
+Off by default, because route 1 does not need it. It serves DeepAI's own sign-in page
+from this origin and rewrites the redirect that ends it — useful for the browser flow
+on a public host when a port forward is not possible. It cannot help with Google or
+Apple, for the reasons above. The dashboard sends the browser to **this gateway**
 rather than to DeepAI, the gateway relays the sign-in page and its API calls, and
 DeepAI's final redirect — the one to `http://127.0.0.1:<port>/auth-callback` that a
 browser elsewhere can never open — is **rewritten back onto this origin**. Nothing to

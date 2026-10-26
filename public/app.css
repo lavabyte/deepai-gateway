@@ -384,6 +384,10 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
   border: 1px solid var(--hairline); border-radius: var(--radius);
   font-family: var(--mono); font-size: 12.5px;
 }
+/* A command the visitor has to copy, so it gets its own block and can wrap. */
+.snippet--block { display: block; padding: 10px 12px; user-select: all; }
+.snippet--block code { white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+
 .snippet code { flex: 1; overflow-x: auto; white-space: pre; }
 .snippet__copy {
   border: 1px solid var(--hairline); background: var(--surface);
