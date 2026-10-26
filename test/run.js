@@ -2199,6 +2199,9 @@ await checkAsync('the sign-in step speaks to the visitor, not to the protocol', 
     assert.match(html, /Paste it below/, `${name} must say where it goes`);
     // The name to show is asked for, because a key cannot answer it.
     assert.match(html, /id="api-key-email" type="email"/, `${name} must ask for the email to display`);
+    // It is a label, not a credential: nothing can verify it, so the copy says so
+    // rather than presenting it as a fact.
+    assert.match(html, /cannot be checked/, `${name} must not imply the name is verified`);
     assert.match(html, />Log In</, `${name} must label the button as asked`);
     assert.match(html, /id="login-with-key"/, `${name} needs a way to submit the key`);
     assert.match(html, /Or log in with a DeepAI API key/, `${name} must name the route plainly`);
@@ -2394,6 +2397,12 @@ await checkAsync('signing in with a pasted API key skips the browser round trip'
     // A key is a credential: it must not reach the log either.
     assert.ok(logs.length > 0, 'the sign-in should be logged');
     assert.ok(!logs.join('\n').includes('sk-good-key'), 'the key must never be logged');
+    // The name is a label the visitor typed, and the log records the derived owner
+    // instead, so one account's chosen name is not exposed to the operator or to
+    // anyone else reading the log.
+    assert.ok(!logs.join('\n').includes('milo@example.com'), 'the chosen name must not be logged');
+    // Nor does it travel to another account's session.
+    assert.ok(!JSON.stringify(secondAccount).includes('milo@example.com'), 'a name must stay with its own account');
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));

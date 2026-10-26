@@ -166,13 +166,28 @@ key that is refused says which kind of refusal it was:
 That middle case is the likeliest failure of all, because `deepai.org` issues a key
 for the public model API and it is not automatically enabled for DeepAI Code.
 
-### Why the email is asked for
+### Why the email is asked for, and why it is not verified
 
-A DeepAI key genuinely does not say who it belongs to. `/deepai_code/theos` and
-`/get_usage_summary` both answer with allowance only, no endpoint reports an
-identity, and the desktop app learns the username from the *sign-in response* rather
-than from the key. So the name to display is asked for alongside the key, and shown
-wherever the account is named.
+A DeepAI key genuinely does not say who it belongs to, and no request can make it:
+
+| Attempt | Result |
+| --- | --- |
+| `GET /deepai_code/theos`, `GET /get_usage_summary` with the key | allowance only, no identity |
+| `GET /daily-time-sync/user/` — the endpoint DeepAI's own sign-in page uses to ask "who am I" — with the key | answers **201**, not 200, which that page reads as "not signed in" |
+| `POST /deepai_code/desktop_auth/exchange/` with a key instead of a code | `400 invalid code` |
+
+So the name to display is asked for alongside the key, and the UI says plainly that
+it cannot be checked rather than presenting it as a fact.
+
+**It is a label, not a credential, and it is scoped to the session that typed it.**
+`/api/account` answers only for the session asking, and the gateway logs the *derived
+owner* rather than the label — both asserted by tests — so a wrong name misinforms
+only the person who typed it. Ownership is still the key's fingerprint, so a typed
+name can never claim another account.
+
+The one route that does not ask is the browser sign-in: DeepAI's exchange response
+carries the real username, so that account is named from fact rather than from a
+field.
 
 **Ownership is still derived from the key, never typed by the visitor.** The name is
 only a label. `api_keys.owner_username` decides who sees and pays for a key, so an

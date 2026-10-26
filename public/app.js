@@ -203,11 +203,15 @@ function finishStep({ pending, remote }) {
  * shortest route on a gateway reached over the network.
  *
  * The email is asked for because a DeepAI key genuinely does not say who it
- * belongs to: `/deepai_code/theos` and `/get_usage_summary` both answer with
- * allowance only, and no endpoint reports an identity. Without it the account can
- * only be shown as the fingerprint that owns it, which is what made the badge read
- * `key-…`. Ownership still comes from the key, never from this field, so the name
- * cannot be used to claim another account.
+ * belongs to, so the name can only come from the visitor. It is a label and not a
+ * credential, which is why it is described as unchecked rather than presented as a
+ * fact: nothing can confirm it. `/deepai_code/theos` and `/get_usage_summary`
+ * answer with allowance only, `/daily-time-sync/user/` refuses a key, and the
+ * exchange needs a code. The one place a real identity appears is the browser
+ * sign-in, which is why that route does not ask.
+ *
+ * Ownership still comes from the key, never from this field, so the name cannot be
+ * used to claim another account — and it is scoped to the session that typed it.
  */
 function keyForm() {
   return `
@@ -227,7 +231,10 @@ function keyForm() {
         <label class="field__label" for="api-key-email">Your DeepAI email</label>
         <input class="input" id="api-key-email" type="email" spellcheck="false" autocomplete="email"
           placeholder="you@example.com">
-        <div class="field__hint">Shown as your account name. Only the key can be used to reach DeepAI.</div>
+        <div class="field__hint" id="api-key-email-hint">
+          Shown as your account name. DeepAI does not say which account a key belongs to, so
+          this cannot be checked — it is yours to get right.
+        </div>
       </div>
       <div class="row mt-3"><button class="btn" id="login-with-key">Log In</button></div>
     </details>`;
