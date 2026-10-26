@@ -1315,6 +1315,66 @@ check('usage rows survive reopening the same database file', async () => {
 
 /* ------------------------------------------------------------- hidden fields */
 
+await checkAsync('the dashboard shell names versioned assets and is never cached', async () => {
+  /*
+   * Shipping new code under the same `/app.js` URL let a browser keep serving the copy
+   * it already had — a rewritten sign-in screen stayed invisible after it had deployed.
+   * The shell is now always revalidated and the assets it names carry a version taken
+   * from their own bytes, so a deploy changes the URL.
+   */
+  const { readFileSync, writeFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const root = new URL('..', import.meta.url).pathname;
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const versionIn = async () => {
+    const response = await fetch(base);
+    const html = await response.text();
+    return {
+      cache: response.headers.get('cache-control'),
+      html,
+      js: /src="(\/app\.js\?v=([0-9a-f]{12}))"/.exec(html),
+      css: /href="(\/app\.css\?v=([0-9a-f]{12}))"/.exec(html),
+    };
+  };
+
+  const appPath = join(root, 'public', 'app.js');
+  const original = readFileSync(appPath, 'utf8');
+  try {
+    const first = await versionIn();
+    assert.equal(first.cache, 'no-store', 'the shell must never be served stale');
+    assert.ok(first.js !== null, 'app.js must be referenced with a version');
+    assert.ok(first.css !== null, 'app.css must be referenced with a version');
+
+    // The versioned URL is real and answers with the current code.
+    const asset = await fetch(`${base}${first.js[1]}`);
+    assert.equal(asset.status, 200);
+    assert.match(asset.headers.get('content-type'), /javascript/);
+    assert.ok((await asset.text()).includes('id="password-form"'), 'the asset must be the new code');
+
+    // A deep link is answered with the same shell, so a client-side route survives.
+    const deep = await fetch(`${base}/keys`);
+    assert.equal(deep.status, 404);
+    assert.equal(deep.headers.get('cache-control'), 'no-store');
+    assert.ok((await deep.text()).includes(first.js[1]), 'the shell is the one with versions');
+
+    // The point of the version: change the bytes and the URL changes with them.
+    writeFileSync(appPath, `${original}\n// version probe\n`);
+    const changed = await versionIn();
+    assert.notEqual(changed.js[2], first.js[2], 'a changed asset must get a new URL');
+    writeFileSync(appPath, original);
+    assert.equal((await versionIn()).js[2], first.js[2], 'and the original version comes back');
+  } finally {
+    writeFileSync(appPath, original);
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 check('the command block is not overridden by the inline snippet rule', async () => {
   /*
    * Both selectors have one class of specificity, so the later rule wins. `.snippet`

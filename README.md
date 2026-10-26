@@ -665,6 +665,18 @@ frame, 1px hairline structure instead of shadows, Inter with JetBrains Mono
 micro-labels, and colour reserved for status. It has light and dark themes that
 follow the OS by default, and a manual toggle.
 
+### Deploys and the browser cache
+
+The dashboard shell (`index.html`) is served `Cache-Control: no-store` and names its
+scripts and styles with a version taken from their own bytes
+(`/app.js?v=<sha256 prefix>`). A deploy therefore changes the URL, so a browser cannot
+keep an old screen after new code ships.
+
+This exists because it happened: a rewritten sign-in screen was deployed and the old
+one stayed visible, because `/app.js` was the same URL and the browser was entitled to
+reuse what it had. If you ever change an asset's URL by hand, keep the pattern — an
+unversioned reference reintroduces the problem.
+
 ### Brand marks
 
 `app-icon-512.png` and `app-icon-512-black.png` are the source artwork: one glyph in

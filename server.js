@@ -11,7 +11,8 @@
  */
 
 import express from 'express';
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { openDatabase } from './src/db.js';
@@ -266,11 +267,35 @@ export function createApp(db, options = {}) {
     res.redirect(302, '/');
   });
 
-  // Only the dashboard is served as HTML. Everything else under the API
-  // prefixes answers with JSON so a client never receives a page it cannot
-  // parse.
+  /*
+   * Static assets, with a content-derived version on the shell's references.
+   *
+   * Deploying new code under the same `/app.js` URL left a browser free to keep
+   * serving the copy it already had — which is how a rewritten sign-in screen stayed
+   * invisible after it had shipped. The shell is always revalidated, and the assets it
+   * names are versioned by their own bytes, so a deploy changes the URL and the
+   * browser has nothing stale to reuse.
+   */
+  const assetVersion = (file) => {
+    try {
+      const digest = createHash('sha256').update(readFileSync(join(HERE, 'public', file))).digest('hex');
+      return `${file}?v=${digest.slice(0, 12)}`;
+    } catch {
+      return file;
+    }
+  };
+  const shell = () => readFileSync(join(HERE, 'public', 'index.html'), 'utf8')
+    .replace('href="/app.css"', `href="/${assetVersion('app.css')}"`)
+    .replace('src="/app.js"', `src="/${assetVersion('app.js')}"`);
+  const sendShell = (res, status = 200) => res
+    .status(status)
+    .type('html')
+    // The shell must never be stale: it is what names the versioned assets.
+    .set('cache-control', 'no-store')
+    .send(shell());
+
   app.use(express.static(join(HERE, 'public'), { index: false, extensions: ['html'] }));
-  app.get('/', (req, res) => res.sendFile(join(HERE, 'public', 'index.html')));
+  app.get('/', (req, res) => sendShell(res));
 
   app.use((req, res) => {
     const wantsJson = req.path === '/v1' || req.path.startsWith('/v1/')
@@ -287,7 +312,7 @@ export function createApp(db, options = {}) {
     }
     // Unknown page: hand back the dashboard shell rather than a bare 404, so
     // client-side routes survive a hard refresh.
-    res.status(404).sendFile(join(HERE, 'public', 'index.html'));
+    sendShell(res, 404);
   });
 
   // eslint-disable-next-line no-unused-vars -- Express needs the arity.
