@@ -2011,6 +2011,113 @@ await checkAsync('the auth screen styles buttons by class and never closes a tab
   assert.ok(!error.includes('Taking you back'), 'no auto-return notice on failure');
 });
 
+await checkAsync('booting the server does not crash and says what it is doing', async () => {
+  /*
+   * The suite mounts `createApp` everywhere, which never runs `start()` — and that is
+   * how a `ReferenceError` in the listen callback reached production: the runtime
+   * object built inside `createApp` is not in scope in `start()`, and nothing here
+   * had ever executed that line. This boots the real thing.
+   */
+  const { start } = await import('../server.js');
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const scratch = mkdtempSync(join(tmpdir(), 'deepai-boot-'));
+
+  const realFetch = globalThis.fetch;
+  const realLog = console.log;
+  const lines = [];
+  // No network during a boot test: the catalog prefetch and the price refresh are
+  // both real calls in production.
+  globalThis.fetch = async () => new Response('{"data":[]}', {
+    status: 200, headers: { 'content-type': 'application/json' },
+  });
+  console.log = (...args) => lines.push(args.join(' '));
+
+  let booted;
+  try {
+    booted = start({
+      port: 0,
+      host: '127.0.0.1',
+      database: ':memory:',
+      pricingCache: join(scratch, 'pricing.json'),
+      logRequests: false,
+      authProxy: true,
+    });
+    // `listen` was already called, so wait for the address rather than the event.
+    await new Promise((resolve) => {
+      const poll = () => (booted.server.address() === null ? setTimeout(poll, 10) : resolve());
+      poll();
+    });
+
+    const said = lines.join('\n');
+    assert.match(said, /listening on http:\/\/127\.0\.0\.1:\d+/, 'the boot banner must be printed');
+    // The relay is a real trust decision, so it is announced at boot.
+    assert.match(said, /sign-in is relayed through this gateway/);
+    assert.match(said, /never stored or logged/);
+    assert.match(said, /Set AUTH_PROXY=0/);
+    // Loopback means there is no workaround to warn about.
+    assert.ok(!said.includes('cannot open it'), 'no loopback warning on a loopback host');
+    assert.ok(!said.includes('not loopback'), 'no exposure note on a loopback host');
+  } finally {
+    console.log = realLog;
+    globalThis.fetch = realFetch;
+    if (booted !== undefined) {
+      await new Promise((resolve) => booted.server.close(resolve));
+      try { booted.db.close(); } catch { /* already closed */ }
+    }
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+await checkAsync('a non-loopback boot warns about what it exposes', async () => {
+  // The other branch, and the one an operator on a public host actually reads.
+  const { start } = await import('../server.js');
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const scratch = mkdtempSync(join(tmpdir(), 'deepai-boot2-'));
+
+  const realFetch = globalThis.fetch;
+  const realLog = console.log;
+  const lines = [];
+  globalThis.fetch = async () => new Response('{"data":[]}', {
+    status: 200, headers: { 'content-type': 'application/json' },
+  });
+  console.log = (...args) => lines.push(args.join(' '));
+
+  let booted;
+  try {
+    // A relay-less gateway still has to explain the loopback problem it now has.
+    booted = start({
+      port: 0,
+      host: '0.0.0.0',
+      database: ':memory:',
+      pricingCache: join(scratch, 'pricing.json'),
+      logRequests: false,
+      authProxy: false,
+    });
+    await new Promise((resolve) => {
+      const poll = () => (booted.server.address() === null ? setTimeout(poll, 10) : resolve());
+      poll();
+    });
+
+    const said = lines.join('\n');
+    assert.match(said, /not loopback/, 'an exposed host must be called out');
+    assert.match(said, /sign-in callback is fixed to http:\/\/127\.0\.0\.1:/);
+    assert.match(said, /cannot open it/);
+    assert.ok(!said.includes('is relayed through this gateway'), 'no relay note when the relay is off');
+  } finally {
+    console.log = realLog;
+    globalThis.fetch = realFetch;
+    if (booted !== undefined) {
+      await new Promise((resolve) => booted.server.close(resolve));
+      try { booted.db.close(); } catch { /* already closed */ }
+    }
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
 /* ------------------------------------------------------ deepai sign-in relay */
 
 /*

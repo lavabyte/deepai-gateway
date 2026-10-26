@@ -340,19 +340,26 @@ export function start(overrides = {}) {
     const port = typeof address === 'object' && address !== null ? address.port : settings.port;
     console.log(`[deepai-gateway] listening on http://${settings.host}:${port}`);
     console.log(`[deepai-gateway] OpenAI base URL: http://${settings.host}:${port}/v1`);
-    if (settings.host !== '127.0.0.1' && settings.host !== 'localhost') {
+    const exposed = settings.host !== '127.0.0.1' && settings.host !== 'localhost';
+    if (exposed) {
       // The dashboard is protected by a cookie, but an operator should still
       // know the panel is reachable from the network.
       console.log('[deepai-gateway] note: HOST is not loopback — the dashboard is reachable from the network');
     }
-    if (runtime.authProxy) {
+
+    /*
+     * `settings`, not the runtime object: this callback belongs to `start()`, where
+     * the runtime built inside `createApp` is not in scope. Reading it here crashed
+     * the process the moment the server began listening.
+     */
+    if (settings.authProxy) {
       // The operator should know what the relay implies, and how to turn it off.
       console.log('[deepai-gateway] note: DeepAI sign-in is relayed through this gateway, so a visitor who signs in');
       console.log('[deepai-gateway]       with their DeepAI password sends it through this process (never stored or logged).');
-      console.log('[deepai-gateway]       Set AUTH_PROXY=0 to disable, and offer the API-key sign-in instead.');
-      // DeepAI builds the sign-in callback host itself and always picks loopback,
-      // so a visitor's browser will not be able to open it unless it runs on this
-      // machine or forwards the port. Say so at boot rather than at first login.
+      console.log('[deepai-gateway]       Set AUTH_PROXY=0 to disable; the API-key sign-in needs no password at all.');
+    } else if (exposed) {
+      // Without the relay, DeepAI's redirect to loopback really is unreachable from
+      // another machine, so say so at boot rather than at the first failed login.
       console.log(`[deepai-gateway] note: the DeepAI sign-in callback is fixed to ${loopbackCallbackUrl(port)}`);
       console.log('[deepai-gateway]       a browser elsewhere cannot open it; finish sign-in by pasting that address into the dashboard');
     }
