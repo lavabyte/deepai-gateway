@@ -127,8 +127,9 @@ will show and is useless once step 2 has been read. The list is split into two s
 the second resuming at 2.
 
 **If the page shows a plain `OK`, the visitor is not logged in.** The API answers `200`
-with the account JSON and `201 OK` without one, so the dashboard calls this out in an
-info note rather than leaving `OK` to be mistaken for success.
+with the account JSON and `201 OK` without one. The dashboard says this in an info note
+between the two steps, in as few words as it takes: *"If you get plain `OK` in step 2,
+make sure you are logged in."*
 
 Two earlier versions of this instruction were worse, and both were taught by trying them:
 

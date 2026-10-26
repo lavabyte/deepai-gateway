@@ -2735,8 +2735,11 @@ await checkAsync('the sign-in card gives one instruction, and it is the one that
 
   // The signed-out case is called out in blue, because `OK` is what they will see.
   assert.match(html, /note--info/, 'the "plain OK" hint is an info note, not an error');
-  assert.match(html, /shows a plain <code>OK<\/code>, you are not logged in/);
-  assert.match(html, /201 OK/, 'and it explains why, so `OK` is not mistaken for success');
+  assert.match(
+    html,
+    /If you get plain <code>OK<\/code> in step 2, make sure you are logged in\./,
+    'the hint names the symptom and the check, in one line',
+  );
 
   // One field, sized for JSON, and the control that submits it.
   assert.match(html, /<textarea class="textarea" id="profile-paste" rows="7"/);

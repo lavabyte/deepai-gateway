@@ -134,9 +134,7 @@ function profilePasteHelp(prefix = '') {
       </ol>
 
       <div class="note note--info mt-3">
-        If that page shows a plain <code>OK</code>, you are not logged in — the API answers
-        <code>200</code> with your account and <code>201 OK</code> without one. Go back to
-        step 1, sign in, then reload step 2.
+        If you get plain <code>OK</code> in step 2, make sure you are logged in.
       </div>
 
       <ol class="step__list mt-3" start="2">
