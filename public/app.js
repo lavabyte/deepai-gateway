@@ -1020,16 +1020,16 @@ function renderLocaleMenu() {
     option.dataset.locale = entry.code;
     option.setAttribute('role', 'option');
     option.setAttribute('aria-selected', String(entry.code === state.locale));
-    // Built as nodes rather than as HTML: the label is a language's own name, and text
-    // assembled this way cannot be mistaken for markup.
+    // The flag is the whole visible label: a menu of flags is narrower than a menu of
+    // flags and names, and the name is still reachable as a tooltip and to a screen
+    // reader. Built as nodes rather than as HTML, so text cannot be mistaken for markup.
     const flag = document.createElement('span');
     flag.className = 'picker__sign';
     flag.setAttribute('aria-hidden', 'true');
     flag.textContent = entry.flag;
-    const label = document.createElement('span');
-    label.className = 'picker__name';
-    label.textContent = entry.label;
-    option.append(flag, label);
+    option.title = entry.label;
+    option.setAttribute('aria-label', entry.label);
+    option.append(flag);
     option.addEventListener('click', () => {
       closeLocaleMenu();
       void setLocale(entry.code);
@@ -1092,10 +1092,12 @@ async function setLocale(code) {
 }
 
 /**
- * Fill the currency menu: the sign and the code, which is what tells ¥ JPY from ¥ CNY.
+ * Fill the currency menu with signs only.
  *
- * The names are not translated - a currency is a code with a sign, and `€ EUR` says the
- * same thing in every language the dashboard speaks.
+ * `¥` alone cannot tell JPY from CNY and `Fr` cannot tell CHF from anything else that
+ * writes francs, so the code travels in the tooltip and the accessibility label instead
+ * of widening the menu. The names are not translated either way: a currency is a code
+ * with a sign, and it says the same thing in every language the dashboard speaks.
  */
 function renderCurrencyMenu() {
   const menu = $('currency-menu');
@@ -1111,10 +1113,9 @@ function renderCurrencyMenu() {
     sign.className = 'picker__sign';
     sign.setAttribute('aria-hidden', 'true');
     sign.textContent = entry.sign;
-    const name = document.createElement('span');
-    name.className = 'picker__name';
-    name.textContent = entry.code;
-    option.append(sign, name);
+    option.title = `${entry.code} ${entry.label}`;
+    option.setAttribute('aria-label', `${entry.code} ${entry.label}`);
+    option.append(sign);
     option.addEventListener('click', () => {
       closeCurrencyMenu();
       void setCurrency(entry.code);

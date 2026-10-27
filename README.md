@@ -317,7 +317,9 @@ another signed-in browser keeps working and signing in again restores the same k
 
 The dashboard speaks **English, Polish, German, Spanish and Hindi**. The switcher sits at the
 right of the top bar, next to the theme toggle, and shows the active language as a flag;
-opening it lists every language by flag and by its own name.
+opening it lists the flags alone. The name is the tooltip and the accessibility label, so a
+flag does not have to be recognised for the menu to be usable, and a menu of flags stays as
+narrow as the flags.
 
 The strings live as JSON in `public/locales/<code>.json`, so a translation is a data
 change and never a code change. `en.json` is the complete set and the fallback: a key
@@ -354,7 +356,9 @@ To add a language: add its entry to `LOCALES` in `public/app.js`, drop its JSON 
 ### Currency
 
 The picker to the right of the language one shows a currency sign: `$`, `€`, `£`, `zł`,
-`₹`, `¥` and six more. It changes how amounts are **shown**, nothing else.
+`₹`, `¥` and six more. Like the language menu it lists the signs alone and carries the code
+and name as a tooltip, which is what keeps `¥` JPY apart from `¥` CNY without widening the
+menu. It changes how amounts are **shown**, nothing else.
 
 **The gateway deals only in US dollars.** That is the unit the OpenRouter price table is
 published in, and there is no currency field anywhere in the API: a row's cost is a number

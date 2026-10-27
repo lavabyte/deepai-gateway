@@ -1985,6 +1985,15 @@ await checkAsync('amounts are converted in the browser, and stay in dollars when
     && options.includes('INR'), 'every currency is offered');
   assert.equal(options.length, vm.runInContext('CURRENCIES.length', picker.sandbox));
 
+  // Like the language menu, an entry is its sign alone; the code is the tooltip, which is
+  // what keeps ¥ JPY apart from ¥ CNY without widening the menu.
+  const entries = picker.nodes.get('currency-menu').children;
+  const euroEntry = entries.find((child) => child.dataset.currency === 'EUR');
+  assert.deepEqual(euroEntry.children.map((child) => child.textContent), ['\u20ac'],
+    'a currency entry is its sign');
+  assert.equal(euroEntry.title, 'EUR Euro', 'with the code and name as a tooltip');
+  assert.equal(euroEntry.getAttribute('aria-label'), 'EUR Euro');
+
   // --- And the server side has no currency at all: one unit, named in the payload.
   const server = readFileSync(join(root, 'src', 'usage.js'), 'utf8')
     + readFileSync(join(root, 'src', 'pricing.js'), 'utf8')
@@ -2393,6 +2402,17 @@ await checkAsync('the language switcher offers every language and remembers the 
   const root = new URL('..', import.meta.url).pathname;
   const app = readFileSync(join(root, 'public', 'app.js'), 'utf8');
   const html = readFileSync(join(root, 'public', 'index.html'), 'utf8');
+  const css = readFileSync(join(root, 'public', 'app.css'), 'utf8');
+
+  /*
+   * The menus are sized to what they hold. Both show one character per entry, so a width
+   * guessed in CSS - `min-width: 168px` was the first attempt - left a column of empty
+   * space beside a flag, and looked wrong next to the button it hangs from.
+   */
+  const menuBlock = /\.picker__menu \{[^}]*\}/.exec(css)?.[0] ?? '';
+  assert.match(menuBlock, /width:\s*fit-content/, 'the menu is as wide as its contents');
+  assert.ok(!/min-width/.test(menuBlock), 'and does not also insist on a minimum');
+  assert.ok(!/\.picker__name/.test(css), 'no rule is left for a label that is gone');
 
   // The markup: a flag button and its menu, after the theme toggle.
   assert.match(html, /id="theme-toggle"[\s\S]*id="locale-button"[\s\S]*id="locale-menu"/,
@@ -2415,7 +2435,7 @@ await checkAsync('the language switcher offers every language and remembers the 
     replaceChildren(...c) { this.children = Array.from(c); },
     querySelector: (sel) => (sel === '[data-locale]' ? (this.children ?? [])[0] ?? null : null),
     querySelectorAll: () => [], setAttribute(k, v) { this[k] = v; },
-    getAttribute: (k) => this[k] ?? null, closest: () => null,
+    getAttribute(k) { return this[k] ?? null; }, closest: () => null,
     focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
   });
   for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
@@ -2478,7 +2498,14 @@ await checkAsync('the language switcher offers every language and remembers the 
     walk([entry]);
     return out;
   };
-  assert.deepEqual(flat(entries[1]), ['🇵🇱', 'Polski'], 'each entry is a flag and its own name');
+  /*
+   * The entry shows only the flag: a menu of flags is narrower than a menu of flags and
+   * names, which is what the picker is for. The name has not gone anywhere - it is the
+   * tooltip and the accessibility label, so the flag does not have to be recognised.
+   */
+  assert.deepEqual(flat(entries[1]), ['🇵🇱'], 'each entry is a flag');
+  assert.equal(entries[1].title, 'Polski', 'and carries its own name as a tooltip');
+  assert.equal(entries[1].getAttribute('aria-label'), 'Polski', 'which a screen reader reads too');
 
   // Switching stores the choice and swaps the strings.
   await vm.runInContext("setLocale('de')", sandbox);
