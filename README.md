@@ -264,7 +264,14 @@ DeepAI could have issued. That is the whole authentication model, so:
 - **`HOST` defaults to `0.0.0.0`**, which makes the dashboard reachable by anyone who can
   reach the port. Set `HOST=127.0.0.1` to keep it local, and put TLS and your own access
   control in front of anything public.
-- **The sign-in route is unauthenticated and unthrottled** - it has to be, since it *is* the
+- **The pasted account JSON is kept in the browser.** Signing in that way means fetching
+that JSON by hand, so the last one is saved to `localStorage` and the field is filled with
+it next time, including after signing out. It contains the account's **API key**, so it is
+readable by any script on this origin and by anyone who opens that browser profile: the
+sign-in card says so, offers **Clear it**, and **Forget this account** removes it. Use
+**Clear it** on a shared machine, and prefer a private window on one you do not control.
+
+**The sign-in route is unauthenticated and unthrottled** - it has to be, since it *is* the
   way in - and a valid-looking paste makes the gateway issue up to three requests to DeepAI.
   Put a rate limiter in front of `/api/login/profile` (and `/callback` when enabled) if the
   gateway is exposed.

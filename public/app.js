@@ -158,10 +158,15 @@ function profilePasteHelp(prefix = '') {
       <div class="field mt-3">
         <label class="field__label" for="${prefix}profile-paste">Content</label>
         <textarea class="textarea" id="${prefix}profile-paste" rows="7" spellcheck="false" autocomplete="off"
-          placeholder='{"pk": ..., "username": "...", "email": "...", "userprofile": {"api_key": "..."}}'></textarea>
+          placeholder='{"pk": ..., "username": "...", "email": "...", "userprofile": {"api_key": "..."}}'>${esc(lastContent())}</textarea>
         <div class="field__hint">
           ${t('signin.contentHint')}
         </div>
+        ${lastContent() === '' ? '' : `
+          <div class="field__hint" id="${prefix}content-saved">
+            ${t('signin.contentSaved')}
+            <button class="linklike" id="${prefix}content-forget" type="button">${t('signin.contentForget')}</button>
+          </div>`}
       </div>
       <div class="row mt-3"><button class="btn btn--primary" id="${prefix}login-with-profile" type="button">${t('common.logIn')}</button></div>
     </section>`;
@@ -180,6 +185,9 @@ async function signInWithProfile() {
     field?.focus();
     return;
   }
+  // Saved before the request, not after: an attempt that DeepAI refuses is exactly the
+  // one worth keeping, so it can be corrected rather than fetched again.
+  rememberContent(text);
 
   const button = $('login-with-profile');
   const label = button?.textContent;
@@ -331,6 +339,13 @@ async function finishBrowserLogin(prefix = '') {
 function wireSignInForms(prefix = '') {
   const id = (name) => $(`${prefix}${name}`);
   id('login-with-profile')?.addEventListener('click', () => void signInWithProfile(prefix));
+  id('content-forget')?.addEventListener('click', () => {
+    rememberContent('');
+    const field = id('profile-paste');
+    if (field !== null) field.value = '';
+    id('content-saved')?.remove();
+    toast(t('signin.contentForgotten'));
+  });
   id('login-browser')?.addEventListener('click', () => void startBrowserLogin(prefix));
   id('login-finish')?.addEventListener('click', () => void finishBrowserLogin(prefix));
 }
@@ -669,6 +684,37 @@ const LOCALES = [
 ];
 
 const LOCALE_KEY = 'deepai-gateway-locale';
+
+/*
+ * The account JSON a visitor pasted last time, kept in this browser so signing back in
+ * does not mean fetching it from DeepAI again.
+ *
+ * It contains the account's API key, so this is a real trade: the key stays readable in
+ * this browser's storage, by any script on this origin and by anyone who opens the
+ * profile. That is why it is offered rather than silent, why it names the key it uses in
+ * one place, and why signing out keeps it while "Forget this account" clears it.
+ */
+const LAST_CONTENT_KEY = 'deepai-gateway-last-content';
+
+/** The content to prefill the sign-in field with, or an empty string. */
+function lastContent() {
+  try {
+    return localStorage.getItem(LAST_CONTENT_KEY) ?? '';
+  } catch {
+    // A browser with storage disabled still has to render the form.
+    return '';
+  }
+}
+
+/** Remember, or forget when given nothing. */
+function rememberContent(text) {
+  try {
+    if (typeof text === 'string' && text.trim() !== '') localStorage.setItem(LAST_CONTENT_KEY, text);
+    else localStorage.removeItem(LAST_CONTENT_KEY);
+  } catch {
+    /* storage unavailable: signing in still works, it just will not be remembered */
+  }
+}
 
 /** The locale entry for a code, or English when the code is unknown. */
 function localeOf(code) {
@@ -1268,6 +1314,9 @@ function wireAccountCard(rerender) {
     if (!confirmed) return;
     try {
       await api('/account/forget', { method: 'POST' });
+      // "Forget this account" is the one action that removes everything, so the key kept
+      // for the next sign-in goes with it.
+      rememberContent('');
       toast(t('account.removed'));
       await loadAccount();
       await render();

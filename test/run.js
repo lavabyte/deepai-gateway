@@ -1858,6 +1858,121 @@ await checkAsync('a streaming failure is still framed as an event stream', async
 
 /* --------------------------------------------------- bugs found in review */
 
+await checkAsync('the pasted content is remembered and can be cleared', async () => {
+  /*
+   * Signing in means fetching the account JSON from DeepAI by hand, so the browser keeps
+   * the last one and fills the field with it. It holds the account's API key, which is why
+   * the form says so out loud, offers to clear it, and why "Forget this account" clears it
+   * too while signing out deliberately does not.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const vm = await import('node:vm');
+  const root = new URL('..', import.meta.url).pathname;
+  const app = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+
+  /** Boot the client against a real (in-memory) localStorage. */
+  const boot = async (stored = new Map()) => {
+    const nodes = new Map();
+    const node = () => {
+      const n = {
+        innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
+        dataset: {}, style: {}, value: '', children: [],
+        classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+        addEventListener() {}, appendChild(c) { n.children.push(c); },
+        append(...c) { n.children.push(...c); }, remove() {},
+        setAttribute(k, v) { n[k] = v; }, getAttribute: (k) => n[k] ?? null,
+        closest: () => null, focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
+      };
+      n.replaceChildren = (...c) => { n.children = Array.from(c); };
+      n.querySelector = () => n.children[0] ?? null;
+      n.querySelectorAll = () => [];
+      return n;
+    };
+    for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
+      'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button',
+      'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
+
+    const sandbox = {
+      document: {
+        getElementById: (id) => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); },
+        createElement: () => node(), querySelector: () => null, querySelectorAll: () => [],
+        addEventListener() {}, documentElement: { lang: '', dataset: {} },
+        visibilityState: 'visible', body: node(),
+      },
+      window: { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }), location: { assign() {} } },
+      location: { search: '', pathname: '/', hash: '', port: '8787', protocol: 'http:' },
+      history: { replaceState() {} },
+      localStorage: {
+        getItem: (k) => (stored.has(k) ? stored.get(k) : null),
+        setItem: (k, v) => stored.set(k, String(v)),
+        removeItem: (k) => stored.delete(k),
+      },
+      navigator: { language: 'en-GB', languages: ['en-GB'] },
+      fetch: async (url) => {
+        if (String(url).includes('/locales/')) return localeResponse();
+        return new Response(
+          JSON.stringify(String(url).includes('/account')
+            ? { ok: true, signedIn: false, username: '', displayName: '', allowance: null, balanceLow: false,
+                keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false } }
+            : { ok: true, models: [] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+      setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
+      console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
+      Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
+    };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    new vm.Script(app, { filename: 'app.js' }).runInContext(sandbox);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    return { sandbox, nodes, stored };
+  };
+
+  const pasted = '{"email":"milo@example.com","userprofile":{"api_key":"sk-secret"}}';
+  const KEY = 'deepai-gateway-last-content';
+
+  // --- A browser that has never signed in: an empty field, and nothing said about saving.
+  const fresh = await boot();
+  const form = vm.runInContext('signInRoutes()', fresh.sandbox);
+  assert.ok(form.includes('id="profile-paste"'), 'the field is there');
+  assert.ok(!form.includes('sk-secret'), 'and it is empty');
+  assert.ok(!form.includes('content-saved'), 'nothing claims to be saved yet');
+
+  // --- Signing in remembers what was pasted, even when the attempt is refused.
+  // `signInRoutes()` returns markup rather than creating nodes, so the field is reached
+  // through the stub's element map, which creates it on demand.
+  vm.runInContext(`$('profile-paste').value = ${JSON.stringify(pasted)};`, fresh.sandbox);
+  fresh.sandbox.fetch = async () => new Response('{"ok":false,"error":"no"}', {
+    status: 401, headers: { 'content-type': 'application/json' },
+  });
+  await vm.runInContext('signInWithProfile()', fresh.sandbox);
+  assert.equal(fresh.stored.get(KEY), pasted, 'a refused attempt is still remembered');
+
+  // --- Reopening the page fills the field and says where it came from.
+  const reopened = await boot(new Map([[KEY, pasted]]));
+  const filled = vm.runInContext('signInRoutes()', reopened.sandbox);
+  // Escaped into the textarea, so the JSON survives as text rather than as markup.
+  assert.ok(filled.includes('&quot;api_key&quot;'), 'the field is prefilled with the saved content');
+  assert.ok(filled.includes('id="content-saved"'), 'and the form says it was saved');
+  const clearLabel = LOCALES.en['signin.contentForget'];
+  assert.ok(filled.includes(clearLabel), 'with a way to remove it');
+
+  // --- Clearing removes it from storage and from the field.
+  vm.runInContext('rememberContent(""); $("profile-paste").value = "";', reopened.sandbox);
+  assert.equal(reopened.stored.has(KEY), false, 'clearing removes the stored copy');
+  assert.equal(vm.runInContext('lastContent()', reopened.sandbox), '', 'and nothing is left to prefill');
+
+  // --- A browser with storage disabled still renders the form.
+  const noStorage = await boot();
+  noStorage.sandbox.localStorage.getItem = () => { throw new Error('blocked'); };
+  noStorage.sandbox.localStorage.setItem = () => { throw new Error('blocked'); };
+  assert.equal(vm.runInContext('lastContent()', noStorage.sandbox), '', 'a blocked read yields nothing');
+  assert.equal(vm.runInContext('rememberContent("x"), lastContent()', noStorage.sandbox), '',
+    'and a blocked write does not throw');
+});
+
 await checkAsync('the text stays inside the characters a keyboard can reach', async () => {
   /*
    * The line, written down so it does not have to be remembered:
