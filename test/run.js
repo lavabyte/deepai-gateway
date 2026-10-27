@@ -1953,12 +1953,29 @@ await checkAsync('amounts are converted in the browser, and stay in dollars when
   assert.equal(vm.runInContext("moneyNote()", dollars.sandbox), '', 'and nothing is said about rates');
 
   // --- A chosen currency converts the server's dollars.
-  const euro = await boot('EUR', { rates: { EUR: 0.9 } });
+  const euro = await boot('EUR', { rates: { EUR: 0.9, PLN: 3.95, CHF: 0.83 } });
   assert.equal(euro.rateCalls().length, 1, 'a non-USD currency fetches today\'s rate once');
   assert.equal(vm.runInContext('money(10)', euro.sandbox), '\u20ac9.00', '10 USD becomes 9 EUR');
   assert.equal(vm.runInContext('money(0.005)', euro.sandbox), '\u20ac0.0045', 'sub-cent stays precise');
   assert.match(vm.runInContext('moneyNote()', euro.sandbox), new RegExp(TODAY),
     'and the view says which day\'s rate was used');
+
+  /*
+   * Where the sign goes is a property of the currency, not of the language. Polish,
+   * Swedish and Czech write the amount first - `21 zl`, never `zl21` - while the others
+   * lead with the sign. A sign that is a word rather than a symbol takes a space.
+   */
+  const shown = (code, amount) => {
+    vm.runInContext(`state.currency = '${code}'`, euro.sandbox);
+    return vm.runInContext(`money(${amount})`, euro.sandbox);
+  };
+  assert.equal(shown('PLN', 10), '39.50 z\u0142', 'a trailing currency follows the amount');
+  assert.equal(shown('CHF', 10), 'Fr 8.30', 'a currency written as a word is spaced');
+  assert.equal(shown('EUR', 10), '\u20ac9.00', 'a leading symbol is not');
+  // The amount itself is written the way the reader's language writes numbers.
+  vm.runInContext('state.locale = "pl"', euro.sandbox);
+  assert.equal(shown('PLN', 10), '39,50 z\u0142',
+    'and the decimal separator comes from the language, not from the server');
 
   // --- A rate from an earlier day is not trusted.
   const stale = await boot('EUR', { date: '2020-01-01', rates: { EUR: 0.9 } });

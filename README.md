@@ -380,6 +380,16 @@ The conversion is the browser's, and so is the rate:
   worse than the one the gateway actually reported.
 - **The ECB rate of which day** is printed under the figures, so a number can be traced.
 
+How a converted amount is written follows the currency and the language, not the order the
+dollar figure happened to be in:
+
+- **Where the sign goes belongs to the currency.** Polish, Swedish and Czech write the
+  amount first and the sign after it, so a Polish reader gets `82,91 zł` and never
+  `zł82,91`; the other nine lead with the sign. A sign that is a word rather than a symbol
+  takes a space (`Fr 17,40`), and `$`, `€`, `₹` do not.
+- **The digits belong to the language.** The decimal separator is the reader's, so the same
+  figure is `82,91 zł` in Polish and `82.91 zł` in English, with that language's grouping.
+
 Credits are not money and are not converted: they are DeepAI's own unit for what its models
 consume, alongside the dollar figures that come from the price table.
 

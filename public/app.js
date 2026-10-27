@@ -85,12 +85,15 @@ const CURRENCIES = [
   { code: 'USD', sign: '$', label: 'US Dollar' },
   { code: 'EUR', sign: '\u20ac', label: 'Euro' },
   { code: 'GBP', sign: '\u00a3', label: 'British Pound' },
-  { code: 'PLN', sign: 'z\u0142', label: 'Polish Zloty' },
+  // `after` is where the sign goes, and it is a property of the currency rather than of
+  // the language: Polish, Swedish and Czech write the amount first and the sign after it,
+  // so a Polish reader gets `21 zl` and not `zl21`. The others lead with the sign.
+  { code: 'PLN', sign: 'z\u0142', label: 'Polish Zloty', after: true },
   { code: 'INR', sign: '\u20b9', label: 'Indian Rupee' },
   { code: 'JPY', sign: '\u00a5', label: 'Japanese Yen' },
   { code: 'CHF', sign: 'Fr', label: 'Swiss Franc' },
-  { code: 'SEK', sign: 'kr', label: 'Swedish Krona' },
-  { code: 'CZK', sign: 'K\u010d', label: 'Czech Koruna' },
+  { code: 'SEK', sign: 'kr', label: 'Swedish Krona', after: true },
+  { code: 'CZK', sign: 'K\u010d', label: 'Czech Koruna', after: true },
   { code: 'CAD', sign: 'C$', label: 'Canadian Dollar' },
   { code: 'AUD', sign: 'A$', label: 'Australian Dollar' },
   { code: 'BRL', sign: 'R$', label: 'Brazilian Real' },
@@ -130,15 +133,25 @@ function rateFor(code) {
  */
 function money(value) {
   const code = state.currency;
+  // The base unit is left exactly as the server reports it. It is not the reader's
+  // currency, it is the one every figure is stored in, and `$12.35` is read everywhere.
   if (code === 'USD') return usd(value);
   const rate = rateFor(code);
   if (rate === undefined) return usd(value);
-  const { sign } = currencyOf(code);
+  const entry = currencyOf(code);
   const amount = (Number(value) || 0) * rate;
-  if (amount === 0) return `${sign}0.00`;
-  if (amount < 0.01) return `${sign}${amount.toFixed(4)}`;
-  if (amount < 1) return `${sign}${amount.toFixed(3)}`;
-  return `${sign}${amount.toFixed(2)}`;
+
+  // Sub-cent amounts keep the extra digits that make them readable at all, and the
+  // decimal separator is the reader's: `11,07` in Polish, `11.07` in English.
+  const digits = amount !== 0 && amount < 0.01 ? 4 : (amount !== 0 && amount < 1 ? 3 : 2);
+  const number = new Intl.NumberFormat(state.locale, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  }).format(amount);
+
+  if (entry.after === true) return `${number} ${entry.sign}`;
+  // A sign that is a letter needs the space a symbol does not: `Fr 21`, not `Fr21`.
+  return /[A-Za-z]/.test(entry.sign) ? `${entry.sign} ${number}` : `${entry.sign}${number}`;
 }
 
 /** Read the stored currency, and the stored rates when they are from today. */
