@@ -681,6 +681,7 @@ const LOCALES = [
   { code: 'pl', flag: '🇵🇱', label: 'Polski' },
   { code: 'de', flag: '🇩🇪', label: 'Deutsch' },
   { code: 'es', flag: '🇪🇸', label: 'Español' },
+  { code: 'hi', flag: '🇮🇳', label: 'हिन्दी' },
 ];
 
 const LOCALE_KEY = 'deepai-gateway-locale';

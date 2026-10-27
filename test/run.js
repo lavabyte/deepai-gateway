@@ -67,7 +67,7 @@ import {
  * translated string would render as its key and the text assertions below would fail for
  * the wrong reason. The real files are served instead.
  */
-const LOCALE_CODES = ['en', 'pl', 'de', 'es'];
+const LOCALE_CODES = ['en', 'pl', 'de', 'es', 'hi'];
 const LOCALE_PATH = (code) => new URL(`../public/locales/${code}.json`, import.meta.url);
 
 /*
@@ -1995,8 +1995,15 @@ await checkAsync('the text stays inside the characters a keyboard can reach', as
 
   const TYPEABLE = new Set([...'~`1234567890!@#$%^&*()-=_+qwertyuiop[]\\{}|asdfghjkl:";\'zxcvbnm,./<>?QWERTYUIOPLKJHGFDSAZXCVBNM']);
   const WHITESPACE = new Set([' ', '\t', '\n', '\r']);
-  // Orthography with no plain equivalent: the marks Spanish opens a sentence with.
-  const LANGUAGE_PUNCTUATION = new Set(['\u00bf', '\u00a1']);
+  // Orthography with no plain equivalent: the marks Spanish opens a sentence with, and
+  // the danda that ends a Hindi sentence in place of a full stop.
+  const LANGUAGE_PUNCTUATION = new Set(['\u00bf', '\u00a1', '\u0964', '\u0965']);
+  /*
+   * A script is letters plus the marks that attach to them. Devanagari writes its vowels as
+   * combining signs, so `\p{L}` alone would report `हिन्दी` as untypeable - they are the
+   * Hindi equivalent of the diacritics AltGr produces.
+   */
+  const isScript = (char) => /[\p{L}\p{M}]/u.test(char);
   const isFlag = (code) => code >= 0x1f1e6 && code <= 0x1f1ff;
 
   const walk = (dir, out = []) => {
@@ -2018,7 +2025,7 @@ await checkAsync('the text stays inside the characters a keyboard can reach', as
       for (const char of line) {
         const code = char.codePointAt(0);
         if (TYPEABLE.has(char) || WHITESPACE.has(char) || code < 0x80) { column += 1; continue; }
-        if (/\p{L}/u.test(char) || LANGUAGE_PUNCTUATION.has(char) || isFlag(code)) { column += 1; continue; }
+        if (isScript(char) || LANGUAGE_PUNCTUATION.has(char) || isFlag(code)) { column += 1; continue; }
         if (offences.length < 20) {
           offences.push(`${file.replace(root, '')}:${index + 1}:${column} ${JSON.stringify(char)} U+${code.toString(16).toUpperCase()}`);
         }
@@ -2312,14 +2319,14 @@ await checkAsync('the language switcher offers every language and remembers the 
   // Copied into host arrays: `LOCALES` lives in the sandbox's realm, and `deepStrictEqual`
   // compares realms as well as contents.
   const options = Array.from(vm.runInContext('LOCALES', sandbox), (entry) => ({ ...entry }));
-  assert.equal(options.length, 4, 'four languages are offered');
-  assert.deepEqual(options.map((o) => o.code), ['en', 'pl', 'de', 'es']);
+  assert.equal(options.length, LOCALE_CODES.length, 'every language on the list is offered');
+  assert.deepEqual(options.map((o) => o.code), LOCALE_CODES, 'and it is the list the files are named after');
 
   // The menu lists all of them: flag and the language's own name, one entry each.
   vm.runInContext('renderLocaleMenu()', sandbox);
   const entries = nodes.get('locale-menu').children;
-  assert.equal(entries.length, 4, 'one entry per language');
-  assert.deepEqual(entries.map((e) => e.dataset.locale), ['en', 'pl', 'de', 'es']);
+  assert.equal(entries.length, LOCALE_CODES.length, 'one entry per language');
+  assert.deepEqual(entries.map((e) => e.dataset.locale), LOCALE_CODES);
   const flat = (entry) => {
     const out = [];
     const walk = (list) => { for (const child of list) { if (child.textContent) out.push(child.textContent); walk(child.children ?? []); } };

@@ -315,7 +315,7 @@ another signed-in browser keeps working and signing in again restores the same k
 
 ### Languages
 
-The dashboard speaks **English, Polish, German and Spanish**. The switcher sits at the
+The dashboard speaks **English, Polish, German, Spanish and Hindi**. The switcher sits at the
 right of the top bar, next to the theme toggle, and shows the active language as a flag;
 opening it lists every language by flag and by its own name.
 
@@ -334,7 +334,14 @@ than as one string, and the form is chosen by `Intl.PluralRules` for the active 
 not by comparing the count. That matters because the rules differ: English has two forms
 and Polish has four, so the same key is `{one, other}` in `en.json` and
 `{one, few, many, other}` in `pl.json`. Without it, Polish shows "1 żądań" instead of
-"1 żądanie". Numbers are formatted per language too, so a German reader sees `1.234`.
+"1 żądanie". Numbers are formatted per language too, so a German reader sees `1.234`. Hindi
+needs no plural objects at all, because its nouns do not change with the count, so those
+keys are plain strings there.
+
+Hindi also brings a character the other four do not use: the danda (`।`) that ends a
+sentence. It is kept for the same reason as the Spanish inverted question mark - there is
+no plain equivalent, and dropping it is a spelling mistake rather than a style choice - and
+the character test allows it by name.
 
 The translations are guarded by a test that checks every language against `en.json` for
 the same key set, no empty values, the same `{placeholders}` and `<tags>` per key, and an
