@@ -147,7 +147,7 @@ export async function* readEvents(response, signal) {
    * Ceiling on one unparsed event.
    *
    * The reader accumulates bytes until it sees a blank line, so a stream that never
-   * terminates an event grows this buffer without limit — measured at roughly twice the
+   * terminates an event grows this buffer without limit - measured at roughly twice the
    * bytes received, because each append re-allocates the string. No real event comes close
    * to this, so exceeding it means the upstream is broken or hostile, and failing the
    * request is better than exhausting the process.

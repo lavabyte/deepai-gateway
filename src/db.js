@@ -158,7 +158,7 @@ function migrateToV1(db) {
 }
 
 /**
- * v2 — ownership and unambiguous model restriction.
+ * v2 - ownership and unambiguous model restriction.
  *
  * - `owner_username` / `owner_key_hash` record which DeepAI account a gateway
  *   key bills to, so usage can be attributed to a person.
@@ -191,7 +191,7 @@ function migrateToV2(db) {
 }
 
 /**
- * v3 — per-user isolation.
+ * v3 - per-user isolation.
  *
  * - `usage.owner_username` carries the owner on the row itself, so usage stays
  *   attributable after the key that produced it is deleted (`key_id` becomes
@@ -219,7 +219,7 @@ function migrateToV3(db) {
 }
 
 /**
- * v4 — real multi-user.
+ * v4 - real multi-user.
  *
  * Before this the gateway had exactly one DeepAI account (`CHECK (id = 1)`) and
  * no dashboard session at all, so "per user" only ever meant "per key": every
@@ -301,7 +301,7 @@ function migrateToV4(db) {
 }
 
 /**
- * v5 — revoking a key now deletes it.
+ * v5 - revoking a key now deletes it.
  *
  * Revoking used to keep the row as a restorable tombstone. That left two ways to
  * end a key (revoke, then a separate remove) describing nearly the same thing,
@@ -320,11 +320,11 @@ function migrateToV5(db) {
 }
 
 /**
- * v6 — track when each account was last used.
+ * v6 - track when each account was last used.
  *
  * A deployment can ask the gateway to forget accounts nobody has used for a while
  * (`FORGET_ACCOUNT_AFTER_DAYS`). "Used" means either a dashboard request through a session
- * or traffic through one of the account's gateway keys — so the column records activity,
+ * or traffic through one of the account's gateway keys - so the column records activity,
  * not the row's last write. `updated_at` could not serve: a background allowance refresh
  * touches it, which would keep an abandoned account alive forever.
  *

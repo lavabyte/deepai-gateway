@@ -5,7 +5,7 @@ DeepAI accounts, mint `sk-` keys with their own limits, and point any OpenAI
 client at `/v1`.
 
 Comes with a dashboard: usage statistics, per-model breakdown, recent requests,
-the model catalog, API-key management — and **real multi-user isolation**, so
+the model catalog, API-key management - and **real multi-user isolation**, so
 several people can share one gateway without seeing each other's keys or traffic.
 
 ## Quick start
@@ -18,7 +18,7 @@ npm install
 npm start
 ```
 
-That is the whole install. `.env` is optional — every value in it has a working default —
+That is the whole install. `.env` is optional - every value in it has a working default -
 but copying it gives you the settings to edit, and `npm start` loads it for you.
 
 To **update** an existing checkout:
@@ -39,21 +39,21 @@ http://<this-host>:8787
 
 It listens on **every interface by default** (`HOST=0.0.0.0`), because a gateway is meant
 to be reached from other machines. There is no dashboard password: access *is* the DeepAI
-account you sign in with. On a public host, put it behind TLS and your own access control —
+account you sign in with. On a public host, put it behind TLS and your own access control -
 see [Signing in](#signing-in) and [Security](#security).
 
 Sign in, create a key on the **API Keys** page, then point any OpenAI client at `/v1`:
 
 ```bash
 curl http://<this-host>:8787/v1/chat/completions \
-  -H "Authorization: Bearer sk-…" \
+  -H "Authorization: Bearer sk-..." \
   -H "content-type: application/json" \
   -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'
 ```
 
 ```bash
 export OPENAI_BASE_URL=http://<this-host>:8787/v1
-export OPENAI_API_KEY=sk-…
+export OPENAI_API_KEY=sk-...
 ```
 
 ## Configuration
@@ -67,8 +67,8 @@ each one; `npm start` reads `.env`, so nothing has to be exported in your shell.
 | `HOST` | `0.0.0.0` | Listen address: every interface. Set `127.0.0.1` for this host only |
 | `DATABASE` | `./data/deepai.db` | SQLite file |
 | `TRUST_PROXY` | unset | Set `1` behind a TLS proxy: trust `X-Forwarded-*` and set `Secure` cookies |
-| `CALLBACK_LOGIN` | `0` | Set `1` to also offer DeepAI's browser sign-in, finishing at `/callback` — see [Signing in with `/callback`](#signing-in-with-callback) |
-| `FORGET_ACCOUNT_AFTER_DAYS` | `0` | Forget accounts nobody has used for this many days — see [Retention](#retention). `0` (the default) forgets nothing |
+| `CALLBACK_LOGIN` | `0` | Set `1` to also offer DeepAI's browser sign-in, finishing at `/callback` - see [Signing in with `/callback`](#signing-in-with-callback) |
+| `FORGET_ACCOUNT_AFTER_DAYS` | `0` | Forget accounts nobody has used for this many days - see [Retention](#retention). `0` (the default) forgets nothing |
 | `LOG_REQUESTS` | `1` | Set `0` to silence per-request logging |
 | `PRICING_CACHE` | `./data/pricing.json` | Where the fetched price table is cached |
 
@@ -80,7 +80,7 @@ One gateway serves **many DeepAI accounts at once**. Each DeepAI login is a row 
 - **Accounts are separate.** Two people signed in on two browsers never see each
   other's keys, usage, auth trail or default model.
 - **Keys belong to the account that made them.** A gateway key stores
-  `owner_username`, and *that* account pays for the key's traffic — not whoever
+  `owner_username`, and *that* account pays for the key's traffic - not whoever
   happens to be logged in when the request arrives.
 - **Sessions are per browser.** Logging out ends only that browser's session. The
   account and its keys stay, so another signed-in browser keeps working and
@@ -95,7 +95,7 @@ Only what genuinely has to be:
 
 | Endpoint | Access |
 | --- | --- |
-| `/healthz` | Public, and returns **only** `{"ok":true}` — a liveness probe must not become a directory of users |
+| `/healthz` | Public, and returns **only** `{"ok":true}` - a liveness probe must not become a directory of users |
 | `/api/pricing` | Public: OpenRouter publishes these rates. The status is projected so upstream error detail stays internal |
 | `/v1/models` | Requires an API key, scoped to what that key may use |
 | `/api/models` | The catalog is public, the usage figures beside it are per account, so an identity is required: **a session cookie or one of your own `sk-` keys** |
@@ -118,8 +118,8 @@ plain-HTTP localhost, where a `Secure` cookie would never be sent.
 why this gateway does not use DeepAI's browser sign-in at all:
 
 - The sign-in request carries only `state` and `port`. DeepAI parses `port` as a plain
-  TCP port — a full URL, a `host:port` pair, `0`, `-1` or an empty value are all rejected
-  with `400 Invalid desktop sign-in request` — so there is no parameter through which a
+  TCP port - a full URL, a `host:port` pair, `0`, `-1` or an empty value are all rejected
+  with `400 Invalid desktop sign-in request` - so there is no parameter through which a
   public origin could be passed.
 - The sign-in page builds nothing client-side either: it polls
   `/daily-time-sync/user/` and reloads *itself*, leaving the redirect to DeepAI's server,
@@ -128,7 +128,7 @@ why this gateway does not use DeepAI's browser sign-in at all:
 This is the RFC 8252 native-app pattern: the official DeepAI Code desktop app binds
 `127.0.0.1:0`, hands over the ephemeral port, and expects the browser to come back to
 loopback. A browser on any other machine cannot open that address, and **no setting
-changes it** — which is why there is no `PUBLIC_URL` and no relay to configure.
+changes it** - which is why there is no `PUBLIC_URL` and no relay to configure.
 
 ### Signing in with `/callback`
 
@@ -155,7 +155,7 @@ The port matters: DeepAI parses it as a plain integer, so the one it is given is
 the browser must reach. Behind a proxy that is the internal port rather than the public one,
 so use the forward from the browser's own machine.
 
-If the last page does not load — the usual case when the address cannot be reached — the
+If the last page does not load - the usual case when the address cannot be reached - the
 card offers a field for pasting that page's address. The address is what authorises the
 completion: it carries the one-shot `code` and the 256-bit `state` this gateway generated,
 so a paste needs no session and nobody can finish somebody else's attempt.
@@ -165,16 +165,16 @@ that path.
 
 ### The default route: copy the account JSON
 
-The visitor signs in at `deepai.org` in their own browser — with a password, or with
-Google or Apple — and then reads the account JSON out of DeepAI's own API:
+The visitor signs in at `deepai.org` in their own browser - with a password, or with
+Google or Apple - and then reads the account JSON out of DeepAI's own API:
 
 1. Go to `https://deepai.org` and log in or register.
 2. Go to `https://api.deepai.org/daily-time-sync/user/`, scroll down and choose the
    **Raw Data** tab. A browser asks for a JSON page and gets the account itself.
 3. Copy the **Content** and paste it into the dashboard.
 
-That JSON carries both the account's `email` and its `userprofile.api_key` — the account
-key the Code lane accepts — so pressing **Log In** signs in with a key DeepAI has already
+That JSON carries both the account's `email` and its `userprofile.api_key` - the account
+key the Code lane accepts - so pressing **Log In** signs in with a key DeepAI has already
 issued, and names the account from DeepAI's own answer rather than from anything typed.
 
 It is the only route that works for a Google or Apple account without a tunnel: the page
@@ -191,7 +191,7 @@ as it takes: *"If you get plain `OK` in step 2, make sure you are logged in."*
 
 Two earlier versions of this instruction were worse, and both were taught by trying them:
 
-- a browser-console command (`console.log(await (await fetch(…)).text())`) returns `'OK'`
+- a browser-console command (`console.log(await (await fetch(...)).text())`) returns `'OK'`
   for anyone not already on DeepAI's own origin, because of the same `201`;
 - the steps once sat behind a click, so the instructions a visitor needed were the ones
   they could not see.
@@ -208,7 +208,7 @@ The key inside the pasted JSON is checked the same way a stored account is
 | What DeepAI said | What the visitor is told |
 | --- | --- |
 | `credits` returns 401 and the public API does not recognise the key either | "DeepAI did not recognise that key" |
-| `credits` returns 401 but the public model API *does* accept it | the key is valid but **not enabled for DeepAI Code** — which is what this gateway uses |
+| `credits` returns 401 but the public model API *does* accept it | the key is valid but **not enabled for DeepAI Code** - which is what this gateway uses |
 | anything else | DeepAI is unreachable; not the visitor's mistake |
 
 That middle case is the likeliest failure of all, because `deepai.org` issues a key for
@@ -221,7 +221,7 @@ reason nothing can produce.
 
 ### Why ownership does not come from the pasted email
 
-The email is taken from DeepAI's own JSON, so it is fact rather than a claim — but it is
+The email is taken from DeepAI's own JSON, so it is fact rather than a claim - but it is
 still only a **label**, and ownership is derived from the key:
 
 `api_keys.owner_username` decides who sees and pays for a key, so an owner the visitor
@@ -237,13 +237,13 @@ its usage across two identities that look unrelated in the dashboard.
 
 ### Why a key alone cannot be asked who it belongs to
 
-No request makes a DeepAI key reveal its account — which is why the JSON route reads the
+No request makes a DeepAI key reveal its account - which is why the JSON route reads the
 email from DeepAI's page rather than trying to derive it:
 
 | Attempt | Result |
 | --- | --- |
 | `GET /deepai_code/theos`, `GET /get_usage_summary` with the key | allowance only, no identity |
-| `GET /daily-time-sync/user/` — the endpoint DeepAI's own sign-in page uses to ask "who am I" — with the key | answers **201**, not 200, which that page reads as "not signed in" |
+| `GET /daily-time-sync/user/` - the endpoint DeepAI's own sign-in page uses to ask "who am I" - with the key | answers **201**, not 200, which that page reads as "not signed in" |
 | `POST /deepai_code/desktop_auth/exchange/` with a key instead of a code | `400 invalid code` |
 
 ## Security
@@ -252,9 +252,9 @@ What protects what, including the parts that are deliberately not protected.
 
 | Asset | How it is protected |
 | --- | --- |
-| Gateway keys (`sk-…`) | Only `sk-` + the first 8 hex characters and a **SHA-256 hash** are stored. The plaintext exists once, in the creation response. A stolen database does not yield a working gateway key. |
+| Gateway keys (`sk-...`) | Only `sk-` + the first 8 hex characters and a **SHA-256 hash** are stored. The plaintext exists once, in the creation response. A stolen database does not yield a working gateway key. |
 | Dashboard session | A 32-byte random token; only its hash is stored. The cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` when `TRUST_PROXY=1`. It slides: it ends after 14 days of *idle* time. |
-| Accounts and usage | Every query is scoped to the session's account. Another account's key id answers `404`, and its usage reads empty — asserted by tests. |
+| Accounts and usage | Every query is scoped to the session's account. Another account's key id answers `404`, and its usage reads empty - asserted by tests. |
 | The DeepAI key | **Stored recoverably**, because it is replayed upstream on every request. The database and its WAL are created owner-only (`0600`), the directory `0700`, and `npm run backup` writes `0600`. On a shared machine, that file *is* the account. |
 | SQL | Every statement is parameterised. The only interpolated fragments are fixed strings. |
 
@@ -264,8 +264,8 @@ DeepAI could have issued. That is the whole authentication model, so:
 - **`HOST` defaults to `0.0.0.0`**, which makes the dashboard reachable by anyone who can
   reach the port. Set `HOST=127.0.0.1` to keep it local, and put TLS and your own access
   control in front of anything public.
-- **The sign-in route is unauthenticated and unthrottled** — it has to be, since it *is* the
-  way in — and a valid-looking paste makes the gateway issue up to three requests to DeepAI.
+- **The sign-in route is unauthenticated and unthrottled** - it has to be, since it *is* the
+  way in - and a valid-looking paste makes the gateway issue up to three requests to DeepAI.
   Put a rate limiter in front of `/api/login/profile` (and `/callback` when enabled) if the
   gateway is exposed.
 - **Per-key limits are a check-then-act**, so a key can exceed its cap by sending concurrent
@@ -278,14 +278,14 @@ Report a security problem by opening an issue, or privately if the repository of
 ### Overview
 
 - **Tokens this month** / **Tokens today** / **All time** / **Cache reads**
-- **Money saved** — what the same traffic would cost on the public APIs these
+- **Money saved** - what the same traffic would cost on the public APIs these
   models mirror, in USD, for today / this month / all time, with a per-model
   breakdown
-- **Token usage by model** — this month, busiest first. Models with no usage
+- **Token usage by model** - this month, busiest first. Models with no usage
   are not listed at all.
-- **Recent requests** — newest first, failures included, with token split,
+- **Recent requests** - newest first, failures included, with token split,
   duration and status.
-- **Account card** — who is signed in, the Credits balance, and a low-balance
+- **Account card** - who is signed in, the Credits balance, and a low-balance
   warning.
 - **14-day sparkline** of daily tokens.
 
@@ -293,7 +293,7 @@ Report a security problem by opening an issue, or privately if the repository of
 
 Every catalog model with tier, context window, max output, reasoning levels,
 input modalities, Credits rate and this month's usage. Free models are marked
-`… Free`; **Premium** models draw on the Credits balance. (The provider calls
+`... Free`; **Premium** models draw on the Credits balance. (The provider calls
 this tier "Premier" internally; the panel always says Premium.)
 
 ### Log in / log out
@@ -323,7 +323,7 @@ There is no language in the URL and nothing is stored on the server: the choice 
 visitor gets Polish without touching anything.
 
 A phrase whose wording depends on a number is stored as an object of plural forms rather
-than as one string, and the form is chosen by `Intl.PluralRules` for the active language —
+than as one string, and the form is chosen by `Intl.PluralRules` for the active language -
 not by comparing the count. That matters because the rules differ: English has two forms
 and Polish has four, so the same key is `{one, other}` in `en.json` and
 `{one, few, many, other}` in `pl.json`. Without it, Polish shows "1 żądań" instead of
@@ -331,7 +331,7 @@ and Polish has four, so the same key is `{one, other}` in `en.json` and
 
 The translations are guarded by a test that checks every language against `en.json` for
 the same key set, no empty values, the same `{placeholders}` and `<tags>` per key, and an
-`other` form on every plural entry — a translation that drops `{source}` renders a
+`other` form on every plural entry - a translation that drops `{source}` renders a
 sentence with a hole in it, which no runtime error would ever report.
 
 To add a language: add its entry to `LOCALES` in `public/app.js`, drop its JSON in
@@ -348,12 +348,12 @@ following the OS live.
 The gateway allows **at most 5 keys**. Create keys with:
 
 - **name**
-- **limit window** — **Unlimited** (default, no cap at all), per hour, per day,
+- **limit window** - **Unlimited** (default, no cap at all), per hour, per day,
   per month, or total (never resets)
-- **token limit** and **request limit** — shown only for a limited window
-- **expiry** — **Never** (default) or a date; the date field only appears when
+- **token limit** and **request limit** - shown only for a limited window
+- **expiry** - **Never** (default) or a date; the date field only appears when
   a date is chosen
-- **allowed models** — free models are preselected, with **Select free**,
+- **allowed models** - free models are preselected, with **Select free**,
   **All models** and **Clear** quick actions. *All models* is an unrestricted
   key that also covers models DeepAI adds later; *Clear* allows nothing.
 
@@ -398,12 +398,12 @@ FORGET_ACCOUNT_AFTER_DAYS=30 npm start
 - a dashboard request through a session, or
 - traffic through one of the account's gateway keys.
 
-`updated_at` could not serve, because the background allowance refresh writes it — an
+`updated_at` could not serve, because the background allowance refresh writes it - an
 abandoned account would have looked busy forever. The timestamp is written at most once an
 hour per account, so activity costs almost nothing.
 
 Forgetting is the same operation as **Forget this account**: the account, its DeepAI
-credential and its gateway keys are removed. **Usage history is kept** — those rows carry
+credential and its gateway keys are removed. **Usage history is kept** - those rows carry
 `key_name`, and they are what a bill or an audit is read from. The sweep runs at startup
 and then once a day, so a gateway that stays up for months still forgets; the log names
 every account it removes and how long it had been idle.
@@ -423,7 +423,7 @@ npm run backup -- --out /mnt/x --keep 50
 **Do not back up with `cp data/deepai.db`.** The database runs in WAL mode, so
 recently committed rows live in `deepai.db-wal` until a checkpoint folds them in;
 copying only the `.db` file silently captures stale state. This is not
-theoretical — it happened during development: a key renamed in the live database
+theoretical - it happened during development: a key renamed in the live database
 still appeared under its old name in such a copy.
 
 The script uses `VACUUM INTO`, which writes a complete, checkpointed copy without
@@ -434,7 +434,7 @@ copy is obvious rather than silent.
 ## Persistence
 
 Everything lives in one SQLite file (`data/deepai.db` by default, override with
-`DATABASE`). Keys, **usage**, auth events and the account survive a restart —
+`DATABASE`). Keys, **usage**, auth events and the account survive a restart -
 including a hard `SIGKILL`, because SQLite's WAL is durable. Verified directly:
 after `kill -9` and a restart, the key count, the usage rows and the savings
 figure all come back unchanged.
@@ -457,16 +457,16 @@ The dashboard's **Export CSV** button uses the same endpoint.
 
 ## How accounts and sessions are stored
 
-- **`accounts`** — one row per DeepAI user: `username`, the DeepAI `api_key`, the
+- **`accounts`** - one row per DeepAI user: `username`, the DeepAI `api_key`, the
   cached Credits allowance, `is_pro`, and `last_seen_at` (the last time the account was
   used, for [retention](#retention)). Username is the identity, so signing in again
   replaces that row's key instead of adding a second row.
-- **`sessions`** — one row per browser session. Only the **SHA-256 hash** of the
+- **`sessions`** - one row per browser session. Only the **SHA-256 hash** of the
   token is stored, so a database dump does not hand out dashboard access. The
   cookie is `HttpOnly` and `SameSite=Lax`; it expires after 14 idle days.
-- **`api_keys`** — as below, plus `owner_username` (which account pays) and
+- **`api_keys`** - as below, plus `owner_username` (which account pays) and
   `owner_key_hash` (the DeepAI key it was created with, kept as a record).
-- **`auth_events`** — append-only login/logout/refresh/denied trail, per account.
+- **`auth_events`** - append-only login/logout/refresh/denied trail, per account.
 
 ## How keys are stored
 
@@ -477,11 +477,11 @@ A key is shown **once**, at creation. The row keeps only:
 | `prefix` | `sk-` + the first 8 hex characters | So the dashboard can show *which* key this is |
 | `key_hash` | SHA-256 of the full key | Lookup at request time |
 
-The plaintext key exists in the creation response and nowhere else — it is never
+The plaintext key exists in the creation response and nowhere else - it is never
 written to the database, never logged, and never returned by a later read. There
 is no "show key again" button because the value is genuinely gone.
 
-Verified against the raw database bytes: a `sk-…` value is absent from the file,
+Verified against the raw database bytes: a `sk-...` value is absent from the file,
 and neither the stored prefix nor the stored hash can be used as a key (both give
 `401`). A stolen database therefore does not hand out working gateway keys.
 
@@ -493,8 +493,8 @@ secret the DeepAI desktop app keeps on disk; protecting that file is what
 protects the account.
 
 Each key also stores its **owner**: the DeepAI username, and a hash of the
-DeepAI key that was signed in when it was created. The owner — not the current
-session — decides which account pays, so a key keeps billing the right account
+DeepAI key that was signed in when it was created. The owner - not the current
+session - decides which account pays, so a key keeps billing the right account
 even while its owner is logged out elsewhere.
 
 Logging out keeps the account and its keys, so their usage stays attributable.
@@ -511,7 +511,7 @@ Only **Forget this account** removes them.
 | `POST` | `/v1/chat/completions` | Streaming and non-streaming, native tools |
 
 `/v1/models` refuses an anonymous request with `401 missing_api_key`, and a
-restricted key only ever sees the models it is allowed to call — so a client
+restricted key only ever sees the models it is allowed to call - so a client
 cannot discover, or attempt, a model its key is not entitled to.
 
 Each entry carries identity, capabilities and pricing, so a client never has to
@@ -545,7 +545,7 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/` | The dashboard |
-| `POST` | `/api/login/profile` | The only way in: the account JSON copied out of the visitor's own browser — see [Signing in](#signing-in) |
+| `POST` | `/api/login/profile` | The only way in: the account JSON copied out of the visitor's own browser - see [Signing in](#signing-in) |
 | `GET` | `/logout` | Sign out, then redirect to `/` |
 | `GET` | `/api/account` | This session's account, allowance, default model, key quota |
 | `GET` | `/api/account/events` | That account's auth trail (login, logout, refresh, denied) |
@@ -580,9 +580,9 @@ the dashboard's **Refresh rates** button forces it on demand.
 
 The bundled snapshot is used **only** until the first successful fetch, so a
 fresh install still shows sensible numbers offline. If a refresh fails, the last
-good table is kept — prices are never blanked by a network problem.
+good table is kept - prices are never blanked by a network problem.
 
-The DeepAI→OpenRouter id mapping is curated, because the catalogues spell the
+The DeepAI->OpenRouter id mapping is curated, because the catalogues spell the
 same models differently (`mimo-2.6-flash` vs `xiaomi/mimo-v2.6-flash`,
 `claude-opus-5-5` vs `anthropic/claude-opus-5.5`). A wrong guess would silently
 price traffic against the wrong model. `deepai-cyber` has no public equivalent,
@@ -601,7 +601,7 @@ Every token class is billed at its own published rate:
 
 Only when a rate is genuinely unpublished does the code fall back to the full
 input rate, which overstates the cost rather than understating it. For
-`claude-opus-5-5`, one million tokens of each class costs **$29.20** — input
+`claude-opus-5-5`, one million tokens of each class costs **$29.20** - input
 $4, cache read $0.20, cache write $5, output $20.
 
 The figures are a reference, not a quote: they assume identical token counts to
@@ -610,7 +610,7 @@ a real API call.
 ## Usage accounting
 
 Every request appends exactly one row, and every dashboard reads from that same
-table — totals, per-model breakdowns and the recent list cannot disagree.
+table - totals, per-model breakdowns and the recent list cannot disagree.
 
 Token counts are stored **disjoint**, matching OpenAI's own convention where
 `prompt_tokens` includes cached input:
@@ -638,7 +638,7 @@ Two details keep it that way:
   by Nagle's algorithm.
 
 Hot-path statements (key lookup, usage insert) are prepared once and reused,
-and the SSE splitter uses `indexOf` rather than a regex — the regex was ~9×
+and the SSE splitter uses `indexOf` rather than a regex - the regex was ~9x
 slower on the same input.
 
 ## Design
@@ -655,11 +655,11 @@ scripts and styles with a version taken from their own bytes
 (`/app.js?v=<sha256 prefix>`). A deploy therefore changes the URL, so a browser cannot
 keep an old screen after new code ships.
 
-If you ever change an asset's URL by hand, keep the pattern — an unversioned
+If you ever change an asset's URL by hand, keep the pattern - an unversioned
 reference reintroduces the problem this solves.
 
-There is a second, related trap worth knowing: there are **two** signed-out screens —
-the log-in screen and the account card on the overview — and they used to carry their
+There is a second, related trap worth knowing: there are **two** signed-out screens -
+the log-in screen and the account card on the overview - and they used to carry their
 own copies of the sign-in markup. Rewriting the form therefore changed only one of them,
 and the overview kept a control that existed nowhere else. They now render the same block
 through one function, and a test renders both and requires the same fields in each, so a
@@ -667,7 +667,7 @@ third screen added later cannot quietly diverge.
 
 ### Copying to the clipboard
 
-`navigator.clipboard` is exposed only in a **secure context** — HTTPS, or localhost. A
+`navigator.clipboard` is exposed only in a **secure context** - HTTPS, or localhost. A
 gateway reached at `http://some-host:port` therefore has no `navigator.clipboard` at all,
 and the modern call fails silently: that is why copying an API key used to do nothing on a
 plain-HTTP deployment. `copy()` falls back to the pre-Clipboard-API technique, which works
@@ -679,7 +679,7 @@ Ctrl/Cmd+C, so a failed copy never leaves a key the visitor cannot take away.
 
 Destructive actions confirm in the app's own modal, never with `window.confirm` or
 `window.alert`. A browser dialog blocks the page, cannot be styled, is drawn by the
-browser rather than by this interface, and on some platforms can be suppressed — which
+browser rather than by this interface, and on some platforms can be suppressed - which
 would drop the guard on the very actions that need one. `confirmAction()` reuses the modal
 the key editor opens, so Escape, the backdrop and focus behave the same, the destructive
 button is styled as such and is never the default, and a test renders it and asserts both
@@ -693,7 +693,7 @@ opposite background, the visible one is chosen per theme:
 
 | Where | How it adapts |
 | --- | --- |
-| Header logo | two `<img>` elements, one shown by `html[data-theme]` in CSS — a logo that waits for JavaScript is a logo that can be missing |
+| Header logo | two `<img>` elements, one shown by `html[data-theme]` in CSS - a logo that waits for JavaScript is a logo that can be missing |
 | Favicon (`public/icon-32.png`, `public/icon-black-32.png`) | set from JavaScript, because a stylesheet cannot reach a favicon; `index.html` decides it before the first paint so the tab never shows the wrong mark |
 | `/favicon.ico` | a 16/32/48 fallback for clients that ask for it by convention |
 
@@ -724,7 +724,7 @@ public/                 dashboard (no framework, no build step)
 public/locales/         UI strings, one JSON per language (en is the fallback)
 ```
 
-Storage is SQLite through Node's built-in `node:sqlite` — no native build step
+Storage is SQLite through Node's built-in `node:sqlite` - no native build step
 and no external database. The only runtime dependency is Express.
 
 ## DeepAI specifics
@@ -736,7 +736,7 @@ and no external database. The only runtime dependency is Express.
 - The model catalog is fetched from `GET /deepai_code/models` and cached for ten
   minutes; an embedded snapshot keeps the gateway usable offline.
 - DeepAI's browser sign-in is **not** used: it always calls back to `127.0.0.1`, which
-  no setting can move. Sign-in is the account JSON copied out of DeepAI's own API page —
+  no setting can move. Sign-in is the account JSON copied out of DeepAI's own API page -
   see [Signing in](#signing-in).
 
 ## Limits
@@ -757,8 +757,8 @@ and no external database. The only runtime dependency is Express.
 npm test
 ```
 
-Runs offline against an in-memory database and a stubbed `fetch` — no account
-and no network needed. Covers the schema and the v1→v5 migrations, key
+Runs offline against an in-memory database and a stubbed `fetch` - no account
+and no network needed. Covers the schema and the v1->v5 migrations, key
 generation, ownership and limits, authentication, **multi-user isolation** (two
 accounts on one gateway, cross-account reads refused, ownerless keys refused,
 per-account settings), **sessions** (resolution, expiry, hashing, cookie
@@ -772,5 +772,5 @@ the Responses transport regression.
 
 A few checks are guards rather than descriptions: the stylesheet may carry no class or
 custom property with no reader, no client code may call `window.confirm`, and the
-sign-in card's command must survive rendering unescaped — each verified by breaking it
+sign-in card's command must survive rendering unescaped - each verified by breaking it
 on purpose and watching the check fail.

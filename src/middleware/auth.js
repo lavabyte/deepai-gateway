@@ -1,7 +1,7 @@
 /**
  * API-key authentication and limit enforcement.
  *
- * A request presents its key as `Authorization: Bearer sk-…` (or `x-api-key`).
+ * A request presents its key as `Authorization: Bearer sk-...` (or `x-api-key`).
  * The middleware resolves it to a row, refuses unusable keys, enforces the
  * request/token limits inside the key's own window, and refuses models the key
  * is not allowed to use.
@@ -49,7 +49,7 @@ export function authenticate(db) {
       return apiError(
         res,
         401,
-        'Missing API key. Pass it as "Authorization: Bearer sk-…".',
+        'Missing API key. Pass it as "Authorization: Bearer sk-...".',
         'missing_api_key',
         'authentication_error',
       );
@@ -98,7 +98,7 @@ export function authenticate(db) {
  * handler would, and checked against the allow-list. Checking the raw field let
  * a restricted key bypass its own restriction: `model` omitted, set to `''`, or
  * sent as a non-string all read as "no model requested", passed the gate, and
- * were then served with the fallback model — which the key was never entitled
+ * were then served with the fallback model - which the key was never entitled
  * to.
  *
  * @param {string} fallback - model used when the request does not name one.
@@ -124,7 +124,7 @@ export function enforceModel(fallback) {
  *
  * The session is already resolved by `attachSession`, so a browser needs nothing
  * extra. A script presenting one of its own `sk-` keys gets the same view, scoped
- * to that key's owner — which is what a client without a cookie needs.
+ * to that key's owner - which is what a client without a cookie needs.
  *
  * The identity is never "everything": if neither credential is present the
  * request is refused, because an unscoped usage query would expose every
@@ -145,7 +145,7 @@ export function allowKeyIdentity(db) {
       return apiError(
         res,
         401,
-        'Provide a session cookie or an API key ("Authorization: Bearer sk-…").',
+        'Provide a session cookie or an API key ("Authorization: Bearer sk-...").',
         'missing_credentials',
         'authentication_error',
       );

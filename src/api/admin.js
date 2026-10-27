@@ -72,14 +72,14 @@ import {
  * These are the reasons the paste parser and the key check can report, and no others.
  * A separate table from any protocol vocabulary because these are read by someone
  * looking at a page, not at a response: each says what happened and what to do next.
- * The `not-for-code` case is the one worth the words — `deepai.org` issues a key for
+ * The `not-for-code` case is the one worth the words - `deepai.org` issues a key for
  * the public model API, and it is not automatically enabled for DeepAI Code, so
  * "wrong key" would send the visitor looking for a mistake they did not make.
  */
 const KEY_LOGIN_FAILURES = {
   empty: [400, 'Paste what your browser console printed first.'],
   'too-long': [400, 'That is far longer than the account details DeepAI sends, so something else must have been pasted.'],
-  'not-json': [400, 'That is not the console output. Copy everything it printed, starting with “{”.'],
+  'not-json': [400, 'That is not the console output. Copy everything it printed, starting with "{".'],
   'no-key': [400, 'That output has no API key in it. Sign in at deepai.org in the same browser, then run the command again.'],
   rejected: [401, 'DeepAI did not recognise that key. Copy it again from your DeepAI profile.'],
   'not-for-code': [
@@ -194,7 +194,7 @@ export function adminRouter(db, runtime) {
 
     // A key DeepAI has already issued for an account keeps that account, so the same
     // key arriving twice does not split one DeepAI account across two owners. Only a
-    // key never seen before gets a derived owner — which is what keeps a name from
+    // key never seen before gets a derived owner - which is what keeps a name from
     // claiming somebody else's account.
     const known = accountForApiKey(db, key);
     const username = known?.username ?? usernameForKey(key);
@@ -210,7 +210,7 @@ export function adminRouter(db, runtime) {
      * The name is displayed in the dashboard, so it is stored as plain text: a control
      * character or a markup fragment is not part of an email address, and anything stored
      * here would be rendered on every visit until the account is forgotten. The dashboard
-     * escapes it as well — this is the half that keeps the value honest in the database.
+     * escapes it as well - this is the half that keeps the value honest in the database.
      */
     if (typeof displayName === 'string') {
       const clean = displayName.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 254);
@@ -231,7 +231,7 @@ export function adminRouter(db, runtime) {
    *
    * The one route that works for a Google or Apple account without a tunnel: their
    * sign-in happens in their browser as usual, and the console command hands back the
-   * account JSON DeepAI itself produced — which carries both the API key and the
+   * account JSON DeepAI itself produced - which carries both the API key and the
    * account's own email. Nothing is typed from memory and nothing has to be trusted
    * but the key, which DeepAI validates.
    */
@@ -407,8 +407,8 @@ export function adminRouter(db, runtime) {
    *
    * One destructive action, not two. The key stops working the instant this
    * returns, its slot is freed, and its name can be reused. Usage already
-   * recorded keeps its history — those rows carry `key_name`, and the foreign key
-   * nulls their `key_id` — so revoking does not erase what the key spent.
+   * recorded keeps its history - those rows carry `key_name`, and the foreign key
+   * nulls their `key_id` - so revoking does not erase what the key spent.
    */
   router.post('/keys/:id/revoke', (req, res) => {
     const row = ownedKey(req, res);
@@ -546,7 +546,7 @@ export function adminRouter(db, runtime) {
    * The catalog itself is public; the usage figures are not, so the identity is
    * required. Either credential works: a dashboard session, or one of the
    * caller's own `sk-` keys (scoped to that key's owner). What is never allowed
-   * is no identity at all — that would mean an unscoped usage query.
+   * is no identity at all - that would mean an unscoped usage query.
    */
   router.get('/models', allowKeyIdentity(db), async (req, res) => {
     try {
@@ -641,7 +641,7 @@ function parseLimits(body, existing = undefined) {
  * Model restriction for a key.
  *
  * `modelsRestricted: false` means every model. `true` means exactly the listed
- * models — including an empty list, which allows nothing. An omitted flag on an
+ * models - including an empty list, which allows nothing. An omitted flag on an
  * existing key keeps its current mode.
  *
  * @returns {{restricted: boolean, models: string[]}|string}

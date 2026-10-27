@@ -1,5 +1,5 @@
 /**
- * deepai-gateway — OpenAI-compatible gateway in front of DeepAI Code.
+ * deepai-gateway - OpenAI-compatible gateway in front of DeepAI Code.
  *
  * Wires the database, the DeepAI accounts, the OpenAI surface and the dashboard
  * API into one Express app, then serves the dashboard from `public/`.
@@ -33,7 +33,7 @@ export function config(env = process.env) {
     port: Number(env.PORT) || 8787,
     // Exposed by default: this runs as a gateway for other clients, so binding it to
     // loopback meant every deployment had to set HOST before anything could reach it.
-    // The dashboard has no password of its own — access is the DeepAI account — so the
+    // The dashboard has no password of its own - access is the DeepAI account - so the
     // README says plainly that this makes the panel reachable from the network.
     host: env.HOST || '0.0.0.0',
     database: env.DATABASE || join(HERE, 'data', 'deepai.db'),
@@ -60,8 +60,8 @@ export function config(env = process.env) {
 /**
  * Parse the retention setting.
  *
- * Only a positive, whole number of days turns the sweep on. Everything else — unset,
- * empty, `0`, negative, fractional or nonsense — means "never forget", which is the safe
+ * Only a positive, whole number of days turns the sweep on. Everything else - unset,
+ * empty, `0`, negative, fractional or nonsense - means "never forget", which is the safe
  * reading for a setting that deletes accounts.
  *
  * @param {string|undefined} value
@@ -102,7 +102,7 @@ export function createApp(db, options = {}) {
       if (req.path.startsWith('/v1/') || req.path.startsWith('/api/')) {
         const started = Date.now();
         res.on('finish', () => {
-          runtime.log(`${req.method} ${req.path} → ${res.statusCode} (${Date.now() - started}ms)`);
+          runtime.log(`${req.method} ${req.path} -> ${res.statusCode} (${Date.now() - started}ms)`);
         });
       }
       next();
@@ -117,7 +117,7 @@ export function createApp(db, options = {}) {
    * DeepAI's browser sign-in, when a deployment asks for it.
    *
    * Mounted before the dashboard router so `/api/login/complete` is served by the module
-   * that owns the pending attempts — the same map the `/callback` page route reads, which
+   * that owns the pending attempts - the same map the `/callback` page route reads, which
    * is why both come from one factory.
    */
   if (runtime.callbackLogin) {
@@ -161,7 +161,7 @@ export function createApp(db, options = {}) {
    * Static assets, with a content-derived version on the shell's references.
    *
    * Deploying new code under the same `/app.js` URL left a browser free to keep
-   * serving the copy it already had — which is how a rewritten sign-in screen stayed
+   * serving the copy it already had - which is how a rewritten sign-in screen stayed
    * invisible after it had shipped. The shell is always revalidated, and the assets it
    * names are versioned by their own bytes, so a deploy changes the URL and the
    * browser has nothing stale to reuse.
@@ -248,7 +248,7 @@ export function start(overrides = {}) {
   console.log(`[deepai-gateway] stored API keys: ${keyCount}`);
   console.log(
     accounts.length === 0
-      ? '[deepai-gateway] no DeepAI accounts yet — open the dashboard to log in'
+      ? '[deepai-gateway] no DeepAI accounts yet - open the dashboard to log in'
       : `[deepai-gateway] ${accounts.length} DeepAI account${accounts.length === 1 ? '' : 's'}: ${accounts.map((a) => a.username).join(', ')}`,
   );
 
@@ -288,7 +288,7 @@ export function start(overrides = {}) {
     if (exposed) {
       // The dashboard is protected by a cookie, but an operator should still
       // know the panel is reachable from the network.
-      console.log('[deepai-gateway] note: HOST is not loopback — the dashboard is reachable from the network');
+      console.log('[deepai-gateway] note: HOST is not loopback - the dashboard is reachable from the network');
     }
     if (settings.callbackLogin) {
       console.log('[deepai-gateway] note: DeepAI browser sign-in is enabled (CALLBACK_LOGIN); it finishes at /callback,');

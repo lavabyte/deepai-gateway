@@ -93,7 +93,7 @@ export function isUsable(row, now = Date.now()) {
  * Whether a key may use a model.
  *
  * An unrestricted key may use everything. A restricted key may use exactly the
- * models in its list — so a restricted key with an empty list can use nothing,
+ * models in its list - so a restricted key with an empty list can use nothing,
  * which is what makes "no models selected" a real choice.
  */
 export function allowsModel(row, modelId) {

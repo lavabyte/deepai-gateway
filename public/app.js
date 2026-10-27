@@ -1,5 +1,5 @@
 /* ==========================================================================
-   DeepAI Gateway — dashboard client
+   DeepAI Gateway - dashboard client
    No framework: small render helpers plus a hash router.
    ========================================================================== */
 
@@ -14,7 +14,7 @@ const view = $('view');
  */
 const numberFormat = () => new Intl.NumberFormat(state.locale);
 
-/** Compact token counts: 1234567 → 1.23M */
+/** Compact token counts: 1234567 -> 1.23M */
 function tokens(value) {
   const n = Number(value) || 0;
   if (n < 1000) return String(n);
@@ -34,7 +34,7 @@ function exact(value) {
  * the whole phrase reads naturally rather than as an English skeleton with a number in it.
  */
 function ago(ms) {
-  if (!ms) return '—';
+  if (!ms) return '-';
   const delta = Date.now() - Number(ms);
   const n = (value) => numberFormat().format(value);
   if (delta < 45_000) return t('time.justNow');
@@ -49,7 +49,7 @@ function ago(ms) {
 
 /** Absolute local date-time. */
 function when(ms) {
-  if (!ms) return '—';
+  if (!ms) return '-';
   return new Date(Number(ms)).toLocaleString(undefined, {
     year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
   });
@@ -64,7 +64,7 @@ function usd(value) {
   return `$${amount.toFixed(2)}`;
 }
 
-/** Duration in ms → "412ms" / "1.8s". */
+/** Duration in ms -> "412ms" / "1.8s". */
 function duration(ms) {
   const n = Number(ms) || 0;
   if (n < 1000) return `${n}ms`;
@@ -119,7 +119,7 @@ function isAuthFailure(error) {
  *
  * DeepAI's own browser sign-in always calls back to `127.0.0.1`, which nothing here can
  * change, and a Google or Apple account has no password to post anywhere. But the account
- * JSON is served to the visitor's own browser, and a browser shows it as a plain page — so
+ * JSON is served to the visitor's own browser, and a browser shows it as a plain page - so
  * they open that address, where they are already signed in, and copy what it says.
  *
  * Two earlier versions of this instruction were worse, and both were taught by trying
@@ -158,7 +158,7 @@ function profilePasteHelp(prefix = '') {
       <div class="field mt-3">
         <label class="field__label" for="${prefix}profile-paste">Content</label>
         <textarea class="textarea" id="${prefix}profile-paste" rows="7" spellcheck="false" autocomplete="off"
-          placeholder='{"pk": …, "username": "…", "email": "…", "userprofile": {"api_key": "…"}}'></textarea>
+          placeholder='{"pk": ..., "username": "...", "email": "...", "userprofile": {"api_key": "..."}}'></textarea>
         <div class="field__hint">
           ${t('signin.contentHint')}
         </div>
@@ -208,7 +208,7 @@ async function signInWithProfile() {
  * The second way in: a pasted API key.
  *
  * A key is the same credential the browser sign-in would have produced, so it
- * needs no callback, no address to copy and no password — which makes it the
+ * needs no callback, no address to copy and no password - which makes it the
  * shortest route on a gateway reached over the network.
  *
  * The email is asked for because a DeepAI key genuinely does not say who it
@@ -220,13 +220,13 @@ async function signInWithProfile() {
  * sign-in, which is why that route does not ask.
  *
  * Ownership still comes from the key, never from this field, so the name cannot be
- * used to claim another account — and it is scoped to the session that typed it.
+ * used to claim another account - and it is scoped to the session that typed it.
  */
 /**
  * The way in.
  *
  * One route only: the account JSON, copied from DeepAI's own API page. The password
- * form and the bare-key form were both removed — the password route cannot work for a
+ * form and the bare-key form were both removed - the password route cannot work for a
  * Google or Apple account, and a bare key cannot supply the email, so keeping three
  * doors meant two of them were the wrong one for most visitors.
  *
@@ -242,7 +242,7 @@ function signInRoutes(prefix = '') {
  * DeepAI's own browser sign-in, when the gateway serves it.
  *
  * Only offered when `CALLBACK_LOGIN` is on. DeepAI fixes the redirect to `127.0.0.1`, so
- * this finishes on a browser that can reach that address as this gateway — the copy says
+ * this finishes on a browser that can reach that address as this gateway - the copy says
  * so, and the paste field is there for when it cannot.
  */
 function browserSignIn(prefix = '') {
@@ -255,7 +255,7 @@ function browserSignIn(prefix = '') {
       <div class="field mt-3">
         <label class="field__label" for="${prefix}browser-paste">${t('browser.pasteLabel')}</label>
         <textarea class="textarea" id="${prefix}browser-paste" rows="2" spellcheck="false"
-          autocomplete="off" placeholder="http://127.0.0.1:8787/callback?code=…&state=…"></textarea>
+          autocomplete="off" placeholder="http://127.0.0.1:8787/callback?code=...&state=..."></textarea>
       </div>
       <div class="row mt-3"><button class="btn" id="${prefix}login-finish" type="button">${t('browser.finish')}</button></div>
     </section>`;
@@ -323,7 +323,7 @@ async function finishBrowserLogin(prefix = '') {
 /**
  * Wire every sign-in control a card may contain.
  *
- * All of them are optional, because a card can show any subset — but the two cards
+ * All of them are optional, because a card can show any subset - but the two cards
  * that can show them must not each carry their own copy of this. They did, and the
  * overview's copy kept the old button while the log-in screen got the new form, so
  * one of them silently served a screen that no longer existed anywhere else.
@@ -389,7 +389,7 @@ function openModal(title, bodyNode, onClose) {
  *
  * `window.confirm` blocks the whole page, cannot be styled, is rendered by the browser
  * rather than as part of this interface, and on some platforms can be suppressed
- * entirely — so a destructive action would either look foreign or lose its guard. This
+ * entirely - so a destructive action would either look foreign or lose its guard. This
  * reuses the modal the key editor already opens, which means Escape, the backdrop and
  * the focus handling all behave the same way.
  *
@@ -489,14 +489,14 @@ function field(label, control, hint) {
 /**
  * Copy text to the clipboard, and say so.
  *
- * `navigator.clipboard` exists only in a **secure context** — HTTPS, or localhost. A
+ * `navigator.clipboard` exists only in a **secure context** - HTTPS, or localhost. A
  * gateway reached at `http://some-host:port` has no `navigator.clipboard` at all, so the
  * modern call throws and nothing is copied; that is a plain `http://` deployment, not an
  * exotic one. The fallback below is the pre-Clipboard-API technique, which works in an
  * insecure context because it drives the browser's own copy command on a selected field.
  *
  * If even that fails, the text is selected so the visitor can press Ctrl/Cmd+C themselves
- * — a failed copy must not leave them with a key they cannot take away.
+ * - a failed copy must not leave them with a key they cannot take away.
  *
  * @param {string} text
  * @param {HTMLElement} [button] - gets brief "Copied" feedback when given.
@@ -580,7 +580,7 @@ const prefersDark = window.matchMedia('(prefers-color-scheme: dark)');
  *
  * Only an explicit choice is stored. Persisting the value on load would freeze
  * the system preference into a permanent override on the first visit, so the
- * dashboard — and the sign-in screen, which reads the same key — would stop
+ * dashboard - and the sign-in screen, which reads the same key - would stop
  * following the OS.
  *
  * @param {'light'|'dark'|'system'} theme
@@ -743,8 +743,8 @@ async function loadLocale(code) {
 /**
  * One counted phrase.
  *
- * A phrase whose wording depends on the number needs both the number — so the language's
- * plural rule can pick a form — and the formatted text, so the digits read the way that
+ * A phrase whose wording depends on the number needs both the number - so the language's
+ * plural rule can pick a form - and the formatted text, so the digits read the way that
  * language writes them. Passing them together keeps every call site to one line.
  *
  * @param {string} key
@@ -768,9 +768,9 @@ function t(key, params) {
   if (typeof value === 'string') return fill(value, params);
 
   /*
-   * A plural entry is an object of forms — `{ one, few, many, other }` — chosen by the
+   * A plural entry is an object of forms - `{ one, few, many, other }` - chosen by the
    * language's own rules rather than by a count comparison, because the rules differ:
-   * Polish has a "few" for 2–4 that English does not, and it also needs "many" for 5+.
+   * Polish has a "few" for 2-4 that English does not, and it also needs "many" for 5+.
    * `Intl.PluralRules` is the browser's own implementation of exactly that.
    *
    * A language may supply only the forms it needs; `other` is the fallback, and English
@@ -792,7 +792,7 @@ function applyStaticText() {
     node.textContent = t(node.dataset.i18n);
   }
   for (const node of document.querySelectorAll('[data-i18n-attr]')) {
-    // `data-i18n-attr="title:key,aria-label:key2"` — attributes a translator must reach.
+    // `data-i18n-attr="title:key,aria-label:key2"` - attributes a translator must reach.
     for (const pair of node.dataset.i18nAttr.split(',')) {
       const [attribute, key] = pair.split(':').map((part) => part.trim());
       if (attribute !== '' && key !== undefined) node.setAttribute(attribute, t(key));
@@ -891,7 +891,7 @@ async function setLocale(code) {
 /**
  * What to call the signed-in account.
  *
- * `displayName` is the visitor's own name for the account — the email they gave
+ * `displayName` is the visitor's own name for the account - the email they gave
  * when signing in with a key, or the DeepAI username the sign-in returned. The
  * fallback is the owner id, which is a key fingerprint and only ever shown when
  * nothing better is known.
@@ -1064,8 +1064,8 @@ function requestRows(requests, showKey = true) {
               : ''}
         </span>
       </td>
-      ${showKey ? `<td class="truncate tiny" style="max-width:130px">${esc(item.keyName || '—')}</td>` : ''}
-      <td class="num">${item.totalTokens > 0 ? exact(item.totalTokens) : '—'}</td>
+      ${showKey ? `<td class="truncate tiny" style="max-width:130px">${esc(item.keyName || '-')}</td>` : ''}
+      <td class="num">${item.totalTokens > 0 ? exact(item.totalTokens) : '-'}</td>
       <td class="num tiny muted">${item.inputTokens}/${item.outputTokens}${item.reasoningTokens > 0 ? `<span title="${t('home.reasoningTokens')}"> · r${tokens(item.reasoningTokens)}</span>` : ''}</td>
       <td class="num tiny muted">${esc(duration(item.durationMs))}</td>
       <td>${item.ok
@@ -1113,10 +1113,10 @@ function accountCard() {
         <div class="mt-3">
           <div class="row row--between tiny muted">
             <span>${t('account.credits')}</span>
-            <span class="mono">${esc(allowance.balance)} / ${esc(allowance.granted ?? '—')}</span>
+            <span class="mono">${esc(allowance.balance)} / ${esc(allowance.granted ?? '-')}</span>
           </div>
           ${pct !== undefined ? `<div class="bar mt-2"><div class="bar__fill ${account.balanceLow ? 'bar__fill--warn' : ''}" style="width:${pct}%"></div></div>` : ''}
-          <div class="tiny muted mt-2">${t('account.resets', { when: allowance.refreshAt ? when(Date.parse(allowance.refreshAt)) : '—' })}</div>
+          <div class="tiny muted mt-2">${t('account.resets', { when: allowance.refreshAt ? when(Date.parse(allowance.refreshAt)) : '-' })}</div>
         </div>` : ''}
       <div class="row mt-3 row--wrap">
         <button class="btn btn--secondary btn--sm" id="refresh-allowance">${t('account.refresh')}</button>
@@ -1402,8 +1402,8 @@ async function renderHome() {
   // Snippets need real nodes so their copy buttons work.
   const useIt = $('home-snippets');
   const base = `${location.origin}/v1`;
-  useIt.appendChild(snippet(`OPENAI_BASE_URL=${base}\nOPENAI_API_KEY=sk-…`));
-  useIt.appendChild(snippet(`curl ${base}/chat/completions \\\n  -H "Authorization: Bearer sk-…" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'`));
+  useIt.appendChild(snippet(`OPENAI_BASE_URL=${base}\nOPENAI_API_KEY=sk-...`));
+  useIt.appendChild(snippet(`curl ${base}/chat/completions \\\n  -H "Authorization: Bearer sk-..." \\\n  -H "content-type: application/json" \\\n  -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'`));
 
   wireAccountCard(() => renderHome());
   if (state.account?.signedIn) void loadAuthEvents();
@@ -1454,10 +1454,10 @@ async function renderModels() {
       <td><span class="badge ${model.premier ? 'badge--violet' : 'badge--green'}">${model.premier ? t('common.premium') : t('common.free')}</span></td>
       <td class="num tiny muted">${esc(tokens(model.contextWindow))}</td>
       <td class="num tiny muted">${esc(tokens(model.maxTokens))}</td>
-      <td class="tiny muted">${model.reasoning ? 'none · low · medium · high' : '—'}</td>
+      <td class="tiny muted">${model.reasoning ? 'none · low · medium · high' : '-'}</td>
       <td class="tiny muted">${model.input.includes('image') ? 'text, image' : 'text'}</td>
       <td class="num tiny muted">${model.premier ? esc(model.rateLabel) : t('common.unmetered')}</td>
-      <td class="num tiny">${model.usageMonth ? exact(model.usageMonth.totalTokens) : '<span class="muted">—</span>'}</td>
+      <td class="num tiny">${model.usageMonth ? exact(model.usageMonth.totalTokens) : '<span class="muted">-</span>'}</td>
     </tr>`;
 
   view.innerHTML = `
@@ -1565,9 +1565,9 @@ async function renderKeys() {
     <tr>
       <td>
         <div class="model-row__name">${esc(key.name)}</div>
-        <div class="tiny muted mono">${esc(key.prefix)}…</div>
+        <div class="tiny muted mono">${esc(key.prefix)}...</div>
       </td>
-      <td class="tiny muted">${esc(key.owner || '—')}</td>
+      <td class="tiny muted">${esc(key.owner || '-')}</td>
       <td>${statusBadge(key.status)}</td>
       <td class="tiny muted">${key.expiresAt === null ? t('form.expiryNever') : esc(when(key.expiresAt))}</td>
       <td>${modelCell(key)}</td>
@@ -1624,8 +1624,8 @@ async function renderKeys() {
 
   const base = `${location.origin}/v1`;
   const snippets = $('auth-snippets');
-  snippets.appendChild(snippet(`curl ${base}/chat/completions \\\n  -H "Authorization: Bearer sk-…" \\\n  -H "content-type: application/json" \\\n  -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'`));
-  snippets.appendChild(snippet(`OPENAI_BASE_URL=${base}\nOPENAI_API_KEY=sk-…`));
+  snippets.appendChild(snippet(`curl ${base}/chat/completions \\\n  -H "Authorization: Bearer sk-..." \\\n  -H "content-type: application/json" \\\n  -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'`));
+  snippets.appendChild(snippet(`OPENAI_BASE_URL=${base}\nOPENAI_API_KEY=sk-...`));
 
   $('new-key').addEventListener('click', () => openKeyModal(undefined, renderKeys));
 
@@ -1643,7 +1643,7 @@ async function renderKeys() {
         const confirmed = await confirmAction({
           title: 'Revoke this key?',
           lines: [
-            `“${key.name}” is deleted and stops working immediately.`,
+            `'${key.name}' is deleted and stops working immediately.`,
             'This cannot be undone, and anything using this key will need a new one.',
             'Usage already recorded is kept.',
           ],
@@ -1743,7 +1743,7 @@ function openKeyModal(existing, onDone) {
     pill.type = 'button';
     pill.className = 'pill';
     pill.textContent = model.displayName ?? model.id;
-    pill.title = model.premier ? 'Premium — billed in Credits' : 'Free — unmetered';
+    pill.title = model.premier ? 'Premium - billed in Credits' : 'Free - unmetered';
     pill.dataset.on = String(selected.has(model.id));
     pill.addEventListener('click', () => {
       // Touching any pill means an explicit list, not "every model".
@@ -1931,7 +1931,7 @@ async function render({ refreshAccount = true } = {}) {
 
   /*
    * The catalog needs an identity, so the load at startup is refused for a visitor who is
-   * not signed in yet — and `state.models` stays empty. Signing in without reloading the
+   * not signed in yet - and `state.models` stays empty. Signing in without reloading the
    * page then left the key form with no models to choose from, which is what this fixes.
    * The `length === 0` guard makes it a no-op once the catalog is in hand.
    */

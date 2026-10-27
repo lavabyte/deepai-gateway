@@ -6,7 +6,7 @@
  * the dashboard can never miss a call or count one twice.
  *
  * `/v1/models` requires a key and only advertises the models that key may use,
- * so a client can never see — or try — a model its key is not entitled to.
+ * so a client can never see - or try - a model its key is not entitled to.
  *
  * @module deepai-gateway/api/v1
  */
@@ -108,7 +108,7 @@ async function handleChatCompletion(db, req, res) {
 
   // The key's owner decides which DeepAI account pays for this call. Before
   // multi-user support this read one global row, so every key billed the same
-  // account — and a key whose owner had signed out would silently run on
+  // account - and a key whose owner had signed out would silently run on
   // whoever happened to be signed in.
   const owner = req.gatewayKey.owner_username ?? '';
   const account = readAccount(db, owner);

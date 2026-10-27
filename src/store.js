@@ -2,7 +2,7 @@
  * DeepAI accounts, dashboard sessions and the auth audit trail.
  *
  * The gateway signs in to DeepAI the same way the desktop app does and keeps the
- * resulting `api_key` in SQLite — one row per DeepAI user. A browser proves its
+ * resulting `api_key` in SQLite - one row per DeepAI user. A browser proves its
  * identity with a session cookie whose token hash is stored here, so the
  * dashboard knows *which* account is asking instead of trusting a single global
  * row.
@@ -72,8 +72,8 @@ export function listAccounts(db) {
  * The account a DeepAI key already belongs to, if any.
  *
  * DeepAI mints a fresh key on every sign-in, so one DeepAI account can hold
- * several. Matching on the key is what keeps a key pasted twice — or pasted after
- * a browser sign-in — on a single owner instead of splitting the account in two.
+ * several. Matching on the key is what keeps a key pasted twice - or pasted after
+ * a browser sign-in - on a single owner instead of splitting the account in two.
  *
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {string} apiKey
@@ -196,7 +196,7 @@ export function touchAccount(db, username, now = Date.now()) {
  * Forget accounts nobody has used for `days`.
  *
  * This is the destructive half of the retention setting, so it is explicit about what it
- * removes: the account, its DeepAI credential and its gateway keys — the same as pressing
+ * removes: the account, its DeepAI credential and its gateway keys - the same as pressing
  * "Forget this account". Usage history survives, because those rows carry `key_name` and
  * are what a bill or an audit would be read from.
  *
@@ -277,7 +277,7 @@ export function sessionAccount(db, token, now = Date.now()) {
   /*
    * Touch at most once a minute: this runs on every dashboard request, and the exact value
    * only matters for the idle timeout. The expiry slides with it, so a session ends after
-   * `SESSION_TTL_MS` of *idle* time rather than that long after sign-in — which is what the
+   * `SESSION_TTL_MS` of *idle* time rather than that long after sign-in - which is what the
    * setting and the README both say, and what a user who opens the dashboard daily expects.
    */
   if (now - Number(row.last_seen_at ?? 0) > 60_000) {
@@ -321,7 +321,7 @@ export function tokenFromCookie(header) {
  * An undecodable value is treated as absent, never thrown. Cookie values arrive
  * straight from the network, and `decodeURIComponent` throws on a lone `%` or a
  * malformed escape like `%ZZ`; that throw would happen inside the session
- * middleware, which runs before every route — so one bad cookie would turn every
+ * middleware, which runs before every route - so one bad cookie would turn every
  * response into a 500, including `/healthz`, and the browser would never be told
  * to drop it.
  */

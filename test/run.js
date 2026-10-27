@@ -95,7 +95,7 @@ const results = [];
 function check(name, fn) {
   /*
    * A synchronous check cannot await an async test. The assertions inside still run, but
-   * a failure becomes an unhandled rejection that kills the whole run — so instead of a
+   * a failure becomes an unhandled rejection that kills the whole run - so instead of a
    * reported FAIL the author gets a crash and no results at all. That happened, which is
    * why this is loud rather than silent.
    */
@@ -125,7 +125,7 @@ async function checkAsync(name, fn) {
 /**
  * Create an account plus a session for it and return the request headers that
  * authenticate as that user. The dashboard authenticates with a cookie, so every
- * HTTP check below needs one — exactly like a browser.
+ * HTTP check below needs one - exactly like a browser.
  */
 function sessionFor(database, username, options = {}) {
   const apiKey = options.apiKey ?? `key-${username}`;
@@ -693,7 +693,7 @@ await checkAsync('/v1/models only advertises the models a restricted key may use
     assert.equal(none.data.length, 0);
 
     // The usage figures beside the catalog are per account, so an identity is
-    // required — but never *nothing*, which would scope to every account.
+    // required - but never *nothing*, which would scope to every account.
     assert.equal((await fetch(`${base}/api/models`)).status, 401);
     // A key identity is accepted, and scoped to that key's owner.
     const viaKey = await fetch(`${base}/api/models`, { headers: { authorization: `Bearer ${restricted.plaintext}` } });
@@ -1333,7 +1333,7 @@ await checkAsync('usage rows survive reopening the same database file', async ()
 await checkAsync('the dashboard shell names versioned assets and is never cached', async () => {
   /*
    * Shipping new code under the same `/app.js` URL let a browser keep serving the copy
-   * it already had — a rewritten sign-in screen stayed invisible after it had deployed.
+   * it already had - a rewritten sign-in screen stayed invisible after it had deployed.
    * The shell is now always revalidated and the assets it names carry a version taken
    * from their own bytes, so a deploy changes the URL.
    */
@@ -1397,8 +1397,8 @@ await checkAsync('the stylesheet carries no dead classes or variables', async ()
    * This replaces a check that pinned the order of a rule which no longer exists, and it
    * guards the thing that actually accumulates: after a rewrite, selectors and custom
    * properties are left behind with nothing referencing them. Both audits are
-   * deliberately permissive — a name is only reported when nothing in the client
-   * mentions it at all — so a false report means genuinely dead CSS, not a live rule
+   * deliberately permissive - a name is only reported when nothing in the client
+   * mentions it at all - so a false report means genuinely dead CSS, not a live rule
    * that happens to be built dynamically.
    */
   const { readFileSync } = await import('node:fs');
@@ -1647,7 +1647,7 @@ check('keyQuota refuses to count globally by accident', () => {
   }
 
   // Regression: an omitted owner used to mean "count every account's keys", so
-  // a caller that lost a username silently read a deployment-wide total — and an
+  // a caller that lost a username silently read a deployment-wide total - and an
   // anonymous request leaked how many keys existed across the whole install.
   for (const missing of [undefined, '', null, 0, false]) {
     assert.throws(() => keyQuota(fresh, missing), /needs an owner/, `owner ${String(missing)} must be refused`);
@@ -1698,11 +1698,11 @@ await checkAsync('a cache hit reaches the client in both streaming and not', asy
    * The gateway's own accounting has always split cache reads out, but that is not the
    * question a caller asks: they ask whether *their* client is told. OpenAI reports it as
    * `prompt_tokens_details.cached_tokens`, so a caller can see how much of their prompt
-   * was served from cache — and it has to survive both response shapes, because a client
+   * was served from cache - and it has to survive both response shapes, because a client
    * that streams gets its usage from the final chunk and nothing else.
    *
    * The upstream is stubbed with a real DeepAI usage payload, so this checks the whole
-   * path: normalize upstream → attach to the response → serialize for the caller.
+   * path: normalize upstream -> attach to the response -> serialize for the caller.
    */
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
@@ -1741,8 +1741,8 @@ await checkAsync('a cache hit reaches the client in both streaming and not', asy
 
   try {
     /*
-     * The upstream is always called in streaming mode — `stream_options.include_usage` is
-     * what makes DeepAI report usage at all — so both cases below stub an SSE stream. The
+     * The upstream is always called in streaming mode - `stream_options.include_usage` is
+     * what makes DeepAI report usage at all - so both cases below stub an SSE stream. The
      * difference under test is only what the *caller* asked for.
      */
     globalThis.fetch = async () => sse([
@@ -1862,7 +1862,7 @@ await checkAsync('the defaults a fresh clone gets are the documented ones', asyn
   /*
    * A clone with no `.env` has to work and has to behave the way the README says. The
    * notable default is `HOST`: a gateway exists to be reached from other machines, so it
-   * binds every interface — which is also why the README says plainly that this exposes the
+   * binds every interface - which is also why the README says plainly that this exposes the
    * dashboard, and why `.env.example` explains how to keep it local.
    */
   const { readFileSync } = await import('node:fs');
@@ -1988,7 +1988,7 @@ await checkAsync('every language is complete and agrees on its placeholders', as
   assert.ok(Object.keys(english).length > 100, `expected a full set of strings, saw ${Object.keys(english)?.length}`);
 
   /*
-   * A value is a string, or — for a phrase whose wording depends on the number — an object
+   * A value is a string, or - for a phrase whose wording depends on the number - an object
    * of plural forms. Both are compared as a *set* of placeholders and tags across every
    * form, because Polish legitimately has more forms than English does.
    */
@@ -2032,7 +2032,7 @@ await checkAsync('every language is complete and agrees on its placeholders', as
    *
    * This is not tidiness: an unreferenced key is how a lost edit looks. A conversion that
    * was never applied leaves the English hardcoded in the markup *and* the key unused, and
-   * that pair is what this catches — it found the account badge still rendering a literal
+   * that pair is what this catches - it found the account badge still rendering a literal
    * "Credits" after the conversion had been dropped by a failed script.
    */
   const { join } = await import('node:path');
@@ -2167,7 +2167,7 @@ await checkAsync('the language switcher offers every language and remembers the 
 
   /*
    * Plural selection. English has two forms and Polish has four, chosen by rules rather
-   * than by a count comparison — Polish needs "few" for 2-4 and "many" for 5+, which is
+   * than by a count comparison - Polish needs "few" for 2-4 and "many" for 5+, which is
    * exactly what `Intl.PluralRules` implements. Getting this wrong is invisible in English
    * and glaring in Polish ("1 żądań" instead of "1 żądanie").
    */
@@ -2204,8 +2204,8 @@ await checkAsync('the language switcher offers every language and remembers the 
 
 await checkAsync('a malformed cookie cannot take the whole server down', async () => {
   // Regression: `decodeURIComponent` threw inside the session middleware, which
-  // runs before every route, so one bad cookie made *every* response a 500 —
-  // including /healthz — and the browser was never told to drop it.
+  // runs before every route, so one bad cookie made *every* response a 500 -
+  // including /healthz - and the browser was never told to drop it.
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
   const app = createApp(fresh, { log: () => {}, logRequests: false });
@@ -2256,7 +2256,7 @@ await checkAsync('a newer database is refused rather than stamped downwards', as
 
 await checkAsync('the v5 index is created even with no tombstones to clean', async () => {
   // Regression: the CREATE INDEX sat inside `if (removed.changes > 0)`, so the
-  // common upgrade path — a database that never held a revoked key — ended up
+  // common upgrade path - a database that never held a revoked key - ended up
   // without it, making the schema depend on data rather than on version.
   const { mkdtempSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
@@ -2304,7 +2304,7 @@ await checkAsync('the v5 index is created even with no tombstones to clean', asy
 check('usage survives the key being revoked mid-request', () => {
   // Regression: `key_id` was bound directly, so deleting the key while its
   // completion was still streaming made the usage INSERT fail the foreign key
-  // and the row was lost — even though the request had reached DeepAI.
+  // and the row was lost - even though the request had reached DeepAI.
   const fresh = openDatabase(':memory:');
   saveAccount(fresh, { apiKey: 'k', username: 'u', isPro: false });
   fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
@@ -2337,7 +2337,7 @@ await checkAsync('two accounts on one gateway never see each other', async () =>
   });
 
   try {
-    // Both accounts exist at the same time — this is what multi-user means.
+    // Both accounts exist at the same time - this is what multi-user means.
     assert.equal(listAccounts(fresh).length, 2);
 
     const alice1 = await createKey(asAlice, 'alice-1');
@@ -2539,7 +2539,7 @@ await checkAsync('the auth screen styles its buttons by class, not by element', 
 
 await checkAsync('booting the server does not crash and says what it is doing', async () => {
   /*
-   * The suite mounts `createApp` everywhere, which never runs `start()` — and that is
+   * The suite mounts `createApp` everywhere, which never runs `start()` - and that is
    * how a `ReferenceError` in the listen callback reached production: the runtime
    * object built inside `createApp` is not in scope in `start()`, and nothing here
    * had ever executed that line. This boots the real thing.
@@ -2698,7 +2698,7 @@ await checkAsync('the sign-in card gives one instruction, and it is the one that
    * behind a click, so the instructions a visitor needed were the ones they could not
    * see.
    *
-   * What ships now is a page they open, a tab they click and text they copy — and the
+   * What ships now is a page they open, a tab they click and text they copy - and the
    * `OK` case is called out, because that is what a signed-out visitor will see.
    */
   const { readFileSync } = await import('node:fs');
@@ -2805,7 +2805,7 @@ await checkAsync('both signed-out screens offer the one route', async () => {
   /*
    * There are two: the log-in screen and the account card on the overview. They each
    * carried their own copy of the sign-in markup once, so rewriting the screen changed
-   * only one of them — a deploy that had shipped, showing a screen that did not exist.
+   * only one of them - a deploy that had shipped, showing a screen that did not exist.
    * Both now render the same block through one function, and this holds them to it.
    */
   const { readFileSync } = await import('node:fs');
@@ -3153,7 +3153,7 @@ await checkAsync('a name from the database cannot become markup', async () => {
 await checkAsync('a stream that never ends an event is cut off, not buffered forever', async () => {
   /*
    * The reader accumulates until it sees a blank line. A stream that never sends one grew
-   * the buffer without limit — measured at roughly twice the bytes received, because each
+   * the buffer without limit - measured at roughly twice the bytes received, because each
    * append re-allocates. No real event is 8 MB, so hitting the ceiling means the upstream
    * is broken or hostile, and failing the request beats exhausting the process.
    */
@@ -3238,7 +3238,7 @@ await checkAsync('nothing asks the visitor through a browser dialog', async () =
   /*
    * `window.confirm` and `window.alert` block the page, cannot be styled, are drawn by
    * the browser instead of by this interface, and on some platforms can be suppressed
-   * altogether — which would silently drop the guard on a destructive action. Every
+   * altogether - which would silently drop the guard on a destructive action. Every
    * confirmation is the app's own modal instead.
    */
   const { readFileSync } = await import('node:fs');
@@ -3429,7 +3429,7 @@ await checkAsync('the top bar offers log out and never a second way in', async (
 
 await checkAsync('copying a key works on a plain http:// origin', async () => {
   /*
-   * `navigator.clipboard` exists only in a secure context — HTTPS, or localhost. A gateway
+   * `navigator.clipboard` exists only in a secure context - HTTPS, or localhost. A gateway
    * reached at `http://some-host:port` has no `navigator.clipboard` at all, so the modern
    * call throws and the visitor gets nothing: "copying the API key does not work" is what
    * that looks like from outside. The fallback drives the browser's own copy command on a
@@ -3492,7 +3492,7 @@ await checkAsync('copying a key works on a plain http:// origin', async () => {
       Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
     };
     /*
-     * `navigator` always exists in a browser — what an insecure origin lacks is
+     * `navigator` always exists in a browser - what an insecure origin lacks is
      * `navigator.clipboard`, which is exposed only in a secure context. Modelling it as
      * absent entirely would test an environment that does not occur.
      */
@@ -3537,7 +3537,7 @@ await checkAsync('copying a key works on a plain http:// origin', async () => {
 await checkAsync('the catalog loads once a session exists, without a reload', async () => {
   /*
    * The catalog needs an identity, so the load at startup is refused for a visitor who is
-   * not signed in — and `state.models` stays empty. Signing in without reloading the page
+   * not signed in - and `state.models` stays empty. Signing in without reloading the page
    * then left the key form with no models to choose from. `render()` now fills it in as
    * soon as there is a session.
    */
@@ -3621,7 +3621,7 @@ await checkAsync('the catalog loads once a session exists, without a reload', as
 await checkAsync('every sign-in failure has something useful to say', async () => {
   /*
    * The reasons the paste parser and the key check can report must each have a message,
-   * and no message may name a protocol parameter — the reader is looking at a page, not
+   * and no message may name a protocol parameter - the reader is looking at a page, not
    * at a response.
    *
    * Each producer is taken by name rather than by slicing the module by position:
@@ -3683,8 +3683,8 @@ await checkAsync('every sign-in failure has something useful to say', async () =
 await checkAsync('the pasted console output is read forgivingly', async () => {
   const { parseAccountPaste } = await import('../src/deepai/account.js');
 
-  // What the console prints for `console.log(await (await fetch(…)).text())`, pasted
-  // exactly as it appears — quotes included.
+  // What the console prints for `console.log(await (await fetch(...)).text())`, pasted
+  // exactly as it appears - quotes included.
   const printed = JSON.stringify({
     pk: 9726455,
     username: 'kontomilosz350',
@@ -3718,7 +3718,7 @@ await checkAsync('the pasted console output is read forgivingly', async () => {
   assert.deepEqual(parseAccountPaste('{"pk": 1}'), { ok: false, reason: 'no-key' });
   assert.deepEqual(parseAccountPaste('{"userprofile": {"api_key": ""}}'), { ok: false, reason: 'no-key' });
   // A Response object logged without `.text()` is the mistake this guards against.
-  assert.deepEqual(parseAccountPaste('Response {type: "cors", url: "…"}'), { ok: false, reason: 'not-json' });
+  assert.deepEqual(parseAccountPaste('Response {type: "cors", url: "..."}'), { ok: false, reason: 'not-json' });
   assert.deepEqual(parseAccountPaste(`{"a":"${'x'.repeat(70000)}"}`), { ok: false, reason: 'too-long' });
 });
 
@@ -3814,7 +3814,7 @@ await checkAsync('a pasted key owns itself, so nobody can claim another account'
 await checkAsync('the same DeepAI key never becomes two accounts', async () => {
   /*
    * DeepAI mints a fresh key on every sign-in, so one DeepAI account can hold
-   * several — and a key pasted by hand must land on the account that already owns
+   * several - and a key pasted by hand must land on the account that already owns
    * it rather than starting a second, poorer identity beside it. Without this the
    * dashboard shows a fingerprint owner next to a real username for what is one
    * account, with the keys and usage split between them.
@@ -3874,7 +3874,7 @@ await checkAsync('the same DeepAI key never becomes two accounts', async () => {
 await checkAsync('a refused sign-in explains which kind of refusal it was', async () => {
   /*
    * Every refusal is read by someone who has just pasted something, so each has to say
-   * which part was wrong. The route is `/login/profile` — the only way in — so the input
+   * which part was wrong. The route is `/login/profile` - the only way in - so the input
    * is the account JSON as pasted, and the failures come in two halves: the paste itself
    * (`empty`, `not-json`, `no-key`, `too-long`) and DeepAI's answer about the key inside
    * it (`rejected`, `not-for-code`, `unreachable`).
@@ -3921,7 +3921,7 @@ await checkAsync('a refused sign-in explains which kind of refusal it was', asyn
       [42, 'empty'],
       ['hello', 'not-json'],
       ['{"pk": 1}', 'no-key'],
-      ['Response {type: "cors", url: "…"}', 'not-json'],
+      ['Response {type: "cors", url: "..."}', 'not-json'],
       [`{"a":"${'x'.repeat(70000)}"}`, 'too-long'],
     ]) {
       const bad = await post(pasted);

@@ -5,14 +5,14 @@
  * **Why there is no browser sign-in here.** DeepAI implements RFC 8252 for a
  * native client: the desktop app binds `127.0.0.1:0`, hands DeepAI the ephemeral
  * port, and DeepAI hard-codes the loopback host when it builds the redirect.
- * `port` is parsed as a plain TCP port — a full URL, a `host:port` pair, `0`,
+ * `port` is parsed as a plain TCP port - a full URL, a `host:port` pair, `0`,
  * `-1`, an empty value and a path suffix are each rejected with
- * `400 Invalid desktop sign-in request` — so no parameter exists through which a
+ * `400 Invalid desktop sign-in request` - so no parameter exists through which a
  * public origin could be passed, and a browser on any other machine cannot open
  * the redirect at all.
  *
- * So the gateway does not try. The visitor signs in at `deepai.org` as usual —
- * including with a Google or Apple account, which has no password to give — and
+ * So the gateway does not try. The visitor signs in at `deepai.org` as usual -
+ * including with a Google or Apple account, which has no password to give - and
  * reads the account JSON out of
  * `https://api.deepai.org/daily-time-sync/user/`. That JSON carries both the
  * account's `email` and its `userprofile.api_key`, so nothing has to be typed
@@ -160,7 +160,7 @@ export function parseAccountPaste(input) {
     text = text.slice(1, -1).trim();
   }
   /*
-   * Anything around the object — a log prefix, a trailing `undefined` line — is
+   * Anything around the object - a log prefix, a trailing `undefined` line - is
    * ignored. Every `{` is tried in turn rather than only the first, because a console
    * can print more than one thing and a stray brace before the object would otherwise
    * make the whole paste unreadable. The candidate count is bounded so a pathological

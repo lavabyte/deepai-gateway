@@ -1,5 +1,5 @@
 /* ==========================================================================
-   DeepAI Gateway — Geist design language (Vercel)
+   DeepAI Gateway - Geist design language (Vercel)
    Monochrome frame, hairline structure, chroma reserved for status.
    ========================================================================== */
 
@@ -104,7 +104,7 @@ html { -webkit-text-size-adjust: 100%; }
 
 /* The `hidden` attribute must beat layout rules such as `display: flex` and
    `display: grid`. Without this, a "hidden" element keeps rendering and keeps
-   intercepting clicks — the bug that left hidden form fields on screen and let
+   intercepting clicks - the bug that left hidden form fields on screen and let
    the closed modal swallow clicks. */
 [hidden] { display: none !important; }
 

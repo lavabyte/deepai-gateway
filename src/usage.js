@@ -57,7 +57,7 @@ function insertStatement(db) {
      * `key_id` is resolved with a subquery rather than bound directly. A
      * completion can run for tens of seconds, and the owner may revoke the key
      * from the dashboard while it is in flight; revoking deletes the row, so a
-     * bound id would fail the foreign key and the usage row would be lost — even
+     * bound id would fail the foreign key and the usage row would be lost - even
      * though the request was already billed upstream. A subquery that matches
      * nothing yields NULL, which the foreign key permits, so the row is kept and
      * stays attributable through `key_name` and `owner_username`.
@@ -344,7 +344,7 @@ export function keyUsage(db, keyId, window) {
    * passed the gateway and reached DeepAI: it consumed the owner's upstream
    * capacity and may have been billed for partial work. Counting only successes
    * would let a caller that keeps triggering upstream errors issue unlimited
-   * requests — exactly the abuse the request limit exists to bound. An upstream
+   * requests - exactly the abuse the request limit exists to bound. An upstream
    * outage burning a key's allowance is the honest reading of "this key made N
    * requests", and `ok` is still recorded per row for anyone analysing failures.
    */

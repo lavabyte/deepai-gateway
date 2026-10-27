@@ -3,9 +3,9 @@
  *
  * Two transports, one normalized event stream:
  *
- * - `streamChatCompletion` — `POST /deepai_code/chat/completions`, the OpenAI
+ * - `streamChatCompletion` - `POST /deepai_code/chat/completions`, the OpenAI
  *   dialect the desktop app uses for most models;
- * - `streamResponsesCompletion` — `POST /deepai_code/responses`, used by models
+ * - `streamResponsesCompletion` - `POST /deepai_code/responses`, used by models
  *   that declare `api: "openai-responses"`.
  *
  * Both yield `{type}` events: `text`, `reasoning`, `tool-start`,
@@ -264,7 +264,7 @@ export async function* streamResponsesCompletion(params) {
       const key = keyOf(event);
       const call = calls.get(key) ?? { id: '', name: '', args: '', started: false };
       // `arguments` here is the complete argument string, and the deltas that
-      // preceded it are a prefix of it — so only the unseen suffix is forwarded,
+      // preceded it are a prefix of it - so only the unseen suffix is forwarded,
       // which is what keeps a client's accumulated JSON valid.
       const full = typeof event.arguments === 'string' ? event.arguments : '';
       const extendsPrefix = full.startsWith(call.args);

@@ -4,7 +4,7 @@
  *
  * A plain `cp data/deepai.db` is **not** a safe backup: the database runs in WAL
  * mode, so recently committed rows live in `deepai.db-wal` until a checkpoint
- * folds them in. Copying only the `.db` file silently captures stale state —
+ * folds them in. Copying only the `.db` file silently captures stale state -
  * verified: a key renamed in the live database was still under its old name in
  * such a copy.
  *

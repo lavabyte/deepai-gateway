@@ -3,7 +3,7 @@
  *
  * **Off unless `CALLBACK_LOGIN` is set.** DeepAI implements RFC 8252 for a native client:
  * it always builds `http://127.0.0.1:<port>/callback` as the redirect, and nothing in the
- * request can move that host — `port` is parsed as a plain integer, so a URL, a `host:port`
+ * request can move that host - `port` is parsed as a plain integer, so a URL, a `host:port`
  * pair, `0`, `-1` and an empty value are each rejected with `400 Invalid desktop sign-in
  * request`. The redirect therefore only resolves when the browser reaches that address as
  * this gateway: the browser runs on this host, or the port is forwarded to it.
@@ -12,8 +12,8 @@
  * `https://api.deepai.org/daily-time-sync/user/`, which works from anywhere. This module
  * exists for the deployment where the forward is easy and the paste is not wanted.
  *
- * A pending attempt is keyed by its own `state` — 256 random bits the gateway generates
- * and DeepAI echoes back — rather than by a per-browser cookie. The state IS the capability:
+ * A pending attempt is keyed by its own `state` - 256 random bits the gateway generates
+ * and DeepAI echoes back - rather than by a per-browser cookie. The state IS the capability:
  * no other visitor can name it, so nobody can complete someone else's attempt, and the
  * paste-back path can find its flow from the address alone.
  *
@@ -44,7 +44,7 @@ function loopbackCallbackUrl(port) {
  * whole URL. A bare code is rejected: without the `state` nothing proves the code was
  * minted for this attempt, which is what the parameter exists to prevent.
  *
- * The reasons are specific because they are shown to the visitor as instructions —
+ * The reasons are specific because they are shown to the visitor as instructions -
  * "the address is cut off" is actionable, "invalid input" is not.
  *
  * @param {unknown} input
@@ -60,7 +60,7 @@ export function parseCallbackInput(input) {
 
   let params;
   try {
-    // A base is supplied so a bare `?code=…&state=…` fragment also parses.
+    // A base is supplied so a bare `?code=...&state=...` fragment also parses.
     params = new URL(text, 'http://127.0.0.1').searchParams;
   } catch {
     return { ok: false, reason: 'not-an-address' };
@@ -106,7 +106,7 @@ async function exchangeCode(code) {
  * Read by someone looking at a page that would not load, not at a protocol.
  */
 const FAILURES = {
-  'not-an-address': [400, 'That does not look like an address. Copy the whole address from the page that did not load — including everything after the “?”.'],
+  'not-an-address': [400, 'That does not look like an address. Copy the whole address from the page that did not load - including everything after the "?".'],
   'too-long': [400, 'That is longer than any address DeepAI sends, so something else must have been pasted.'],
   'no-code': [400, 'That address is missing the sign-in code, so it looks cut off. Copy the entire address.'],
   'no-state': [400, 'That address is missing its second half, so it looks cut off. Copy the entire address.'],
@@ -124,7 +124,7 @@ const FAILURES = {
  * @param {string} [options.apiOrigin] - overridable so a test can point at a fixture.
  * @returns {{router: import('express').Router, complete: import('express').RequestHandler}}
  *   `router` serves the pages, `complete` finishes an attempt from a pasted address, and
- *   both share one map of pending attempts — which is why this is a factory rather than
+ *   both share one map of pending attempts - which is why this is a factory rather than
  *   two independent routers.
  */
 export function createCallbackLogin(db, runtime, options = {}) {

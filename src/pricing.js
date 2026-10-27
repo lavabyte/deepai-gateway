@@ -8,7 +8,7 @@
  *
  * Prices are fetched from `GET https://openrouter.ai/api/v1/models`, cached on
  * disk, and refreshed periodically. A bundled snapshot is used only until the
- * first successful fetch — the numbers are never the long-term source of truth.
+ * first successful fetch - the numbers are never the long-term source of truth.
  *
  * Cached input is billed at the model's own cache-read rate when the provider
  * publishes one, and cache writes at the cache-write rate. Only when a rate is
@@ -28,7 +28,7 @@ const OPENROUTER_MODELS = 'https://openrouter.ai/api/v1/models';
 const DEFAULT_TTL_MS = 6 * 60 * 60_000;
 
 /**
- * DeepAI catalog id → OpenRouter model id.
+ * DeepAI catalog id -> OpenRouter model id.
  *
  * This mapping is curated rather than inferred: the two catalogues spell the
  * same models differently (`mimo-2.6-flash` vs `xiaomi/mimo-v2.6-flash`,
@@ -328,10 +328,10 @@ export function isPriced(model) {
  * Cost of one usage row in USD, split by token class.
  *
  * Each class is billed at its own published rate:
- * - `inputTokens` → `input`
- * - `cacheReadTokens` → `cacheRead`, falling back to `input`
- * - `cacheWriteTokens` → `cacheWrite`, falling back to `input`
- * - `outputTokens` → `output`
+ * - `inputTokens` -> `input`
+ * - `cacheReadTokens` -> `cacheRead`, falling back to `input`
+ * - `cacheWriteTokens` -> `cacheWrite`, falling back to `input`
+ * - `outputTokens` -> `output`
  *
  * The fallback deliberately overstates the cost, because a missing cache rate
  * means the provider charges its normal input rate for those tokens.
