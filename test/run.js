@@ -1860,16 +1860,17 @@ await checkAsync('a streaming failure is still framed as an event stream', async
 
 await checkAsync('the text stays inside the characters a keyboard can reach', async () => {
   /*
-   * Two rules that pull in opposite directions, and the line between them:
+   * The line, written down so it does not have to be remembered:
    *
    * Forbidden are the typographic tells of machine-written prose - the em dash, the
-   * ellipsis character, curly quotes around English words, arrows, non-breaking spaces and
-   * the multiplication sign. They are neither typeable nor needed.
+   * ellipsis character, arrows, non-breaking spaces, the multiplication sign - and every
+   * decorative quotation mark: the curly ones, the low-high ones Polish and German use, the
+   * Spanish guillemets, the typographic apostrophe. Quotes are plain in every language.
    *
-   * Allowed are the characters a language actually uses: the diacritics AltGr produces,
-   * and the punctuation of the languages this dashboard speaks - Spanish `<<` `>>` and the
-   * inverted question mark, the low-high quotation marks Polish and German use. Removing
-   * those would be correcting a language, not cleaning it.
+   * Allowed are the characters a language cannot do without: the diacritics AltGr produces,
+   * and the inverted question and exclamation marks Spanish writes at the start of a
+   * sentence. There is no plain equivalent of `¿`, so removing it would be correcting a
+   * language rather than cleaning it.
    *
    * The flag emoji are the one deliberate exception: the language switcher shows a flag.
    */
@@ -1879,8 +1880,8 @@ await checkAsync('the text stays inside the characters a keyboard can reach', as
 
   const TYPEABLE = new Set([...'~`1234567890!@#$%^&*()-=_+qwertyuiop[]\\{}|asdfghjkl:";\'zxcvbnm,./<>?QWERTYUIOPLKJHGFDSAZXCVBNM']);
   const WHITESPACE = new Set([' ', '\t', '\n', '\r']);
-  // Punctuation that belongs to a language, so it stays.
-  const LANGUAGE_PUNCTUATION = new Set(['\u00ab', '\u00bb', '\u00bf', '\u00a1', '\u201e', '\u201c', '\u201d', '\u2018', '\u2019']);
+  // Orthography with no plain equivalent: the marks Spanish opens a sentence with.
+  const LANGUAGE_PUNCTUATION = new Set(['\u00bf', '\u00a1']);
   const isFlag = (code) => code >= 0x1f1e6 && code <= 0x1f1ff;
 
   const walk = (dir, out = []) => {
