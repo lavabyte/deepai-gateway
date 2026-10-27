@@ -2450,7 +2450,16 @@ await checkAsync('the language switcher offers every language and remembers the 
     addEventListener() {}, appendChild(c) { this.children.push(c); },
     append(...c) { this.children.push(...c); }, remove() {},
     replaceChildren(...c) { this.children = Array.from(c); },
-    querySelector: (sel) => (sel === '[data-locale]' ? (this.children ?? [])[0] ?? null : null),
+    /*
+     * A method, not an arrow: an arrow does not bind `this`, so reading `this.children`
+     * inside one throws. That went unnoticed because nothing called the menu toggles,
+     * which are the only code that looks a child up.
+     */
+    querySelector(sel) {
+      const key = sel === '[data-locale]' ? 'locale' : (sel === '[data-currency]' ? 'currency' : undefined);
+      if (key === undefined) return this.children[0] ?? null;
+      return this.children.find((child) => child.dataset[key] !== undefined) ?? null;
+    },
     querySelectorAll: () => [], setAttribute(k, v) { this[k] = v; },
     getAttribute(k) { return this[k] ?? null; }, closest: () => null,
     focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
@@ -2523,6 +2532,30 @@ await checkAsync('the language switcher offers every language and remembers the 
   assert.deepEqual(flat(entries[1]), ['🇵🇱'], 'each entry is a flag');
   assert.equal(entries[1].title, 'Polski', 'and carries its own name as a tooltip');
   assert.equal(entries[1].getAttribute('aria-label'), 'Polski', 'which a screen reader reads too');
+
+  /*
+   * Only one picker is open at a time: they sit in the same corner and two open panels
+   * overlap. The invariant belongs to the toggles, and it was missing from the language
+   * one, so the currency menu stayed open behind it.
+   *
+   * The stub starts every node visible, so the state the markup declares - both menus
+   * `hidden` - is set here first.
+   */
+  nodes.get('locale-menu').hidden = true;
+  nodes.get('currency-menu').hidden = true;
+  vm.runInContext('toggleCurrencyMenu()', sandbox);
+  assert.equal(nodes.get('currency-menu').hidden, false, 'the currency menu opens');
+  vm.runInContext('toggleLocaleMenu()', sandbox);
+  assert.equal(nodes.get('locale-menu').hidden, false, 'opening the language menu works');
+  assert.equal(nodes.get('currency-menu').hidden, true, 'and closes the currency one');
+  // And the other way round, from the state the bug started in.
+  vm.runInContext('toggleCurrencyMenu()', sandbox);
+  assert.equal(nodes.get('currency-menu').hidden, false, 'the currency menu opens again');
+  assert.equal(nodes.get('locale-menu').hidden, true, 'and closes the language one');
+  // Closing the open one does not touch the closed one.
+  vm.runInContext('closeCurrencyMenu()', sandbox);
+  assert.equal(nodes.get('currency-menu').hidden, true, 'closing it leaves the other closed');
+  assert.equal(nodes.get('locale-menu').hidden, true, 'which it already was');
 
   // Switching stores the choice and swaps the strings.
   await vm.runInContext("setLocale('de')", sandbox);

@@ -804,8 +804,6 @@ $('locale-button').addEventListener('click', (event) => {
 });
 $('currency-button').addEventListener('click', (event) => {
   event.stopPropagation();
-  // Only one menu is open at a time: two open panels overlap in the same corner.
-  closeLocaleMenu();
   toggleCurrencyMenu();
 });
 document.addEventListener('click', (event) => {
@@ -1064,6 +1062,10 @@ function toggleLocaleMenu() {
   if (menu === null) return;
   const opening = menu.hidden;
   if (opening) {
+    // Only one picker is open at a time. The invariant lives in the two toggles rather
+    // than in their click handlers, so it holds no matter what opens them - it was
+    // missing here, and the currency menu stayed open behind the language one.
+    closeCurrencyMenu();
     renderLocaleMenu();
     menu.hidden = false;
     $('locale-button')?.setAttribute('aria-expanded', 'true');
@@ -1149,6 +1151,7 @@ function toggleCurrencyMenu() {
   if (menu === null) return;
   const opening = menu.hidden;
   if (opening) {
+    closeLocaleMenu();
     renderCurrencyMenu();
     menu.hidden = false;
     $('currency-button')?.setAttribute('aria-expanded', 'true');
