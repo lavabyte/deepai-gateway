@@ -522,7 +522,7 @@ hardcode them:
   "id": "deepseek-v4.1-flash",
   "name": "DeepSeek V4.1 Flash",
   "display_name": "DeepSeek V4.1 Flash Free",
-  "description": "Free tier · 1,048,576-token context · up to 131,072 output tokens",
+  "description": "Free tier - 1,048,576-token context - up to 131,072 output tokens",
   "tier": "free", "premier": false,
   "reasoning": true,
   "reasoning_levels": ["none", "low", "medium", "high"],
@@ -616,7 +616,7 @@ Token counts are stored **disjoint**, matching OpenAI's own convention where
 `prompt_tokens` includes cached input:
 
 ```
-inputTokens = prompt_tokens − cacheReadTokens − cacheWriteTokens
+inputTokens = prompt_tokens - cacheReadTokens - cacheWriteTokens
 totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens
 ```
 
@@ -710,7 +710,7 @@ src/keys.js             key generation, hashing, limit checks
 src/usage.js            usage recording and every aggregate query
 src/pricing.js          live OpenRouter prices, cache, and the savings estimate
 src/store.js            account + settings persistence
-src/openai.js           OpenAI ⇄ DeepAI conversions
+src/openai.js           OpenAI <-> DeepAI conversions
 src/middleware/auth.js  key authentication and limit enforcement
 src/middleware/session.js  session cookie resolution, per browser
 scripts/backup.js       WAL-safe database backup

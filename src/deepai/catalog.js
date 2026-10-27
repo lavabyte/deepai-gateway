@@ -193,6 +193,6 @@ export function publicModel(model) {
     creditsPerSecond: rates,
     rateLabel: rateLabel(model, 'none'),
     // A ready-made one-liner for pickers and listings.
-    description: `${model.premier ? 'Premier' : 'Free'} tier · ${model.contextWindow.toLocaleString('en-US')}-token context · up to ${model.maxTokens.toLocaleString('en-US')} output tokens`,
+    description: `${model.premier ? 'Premier' : 'Free'} tier - ${model.contextWindow.toLocaleString('en-US')}-token context - up to ${model.maxTokens.toLocaleString('en-US')} output tokens`,
   };
 }

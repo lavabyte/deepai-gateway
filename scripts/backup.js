@@ -110,7 +110,7 @@ const counts = {
 copy.close();
 
 console.log(`backup written: ${target}`);
-console.log(`  schema ${counts.schema} · ${counts.accounts} account(s) · ${counts.keys} key(s) · ${counts.usage} usage row(s) · ${counts.sessions} session(s)`);
+console.log(`  schema ${counts.schema}, ${counts.accounts} account(s), ${counts.keys} key(s), ${counts.usage} usage row(s), ${counts.sessions} session(s)`);
 
 // Trim the oldest backups.
 const files = readdirSync(args.out)

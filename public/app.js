@@ -936,7 +936,7 @@ function renderAccountBadge() {
     badge.className = account.balanceLow ? 'badge badge--amber' : 'badge badge--green';
     const balance = account.allowance?.balance;
     text.textContent = balance
-      ? `${accountName(account)} · ${t('common.creditsAmount', { amount: balance })}`
+      ? `${accountName(account)}, ${t('common.creditsAmount', { amount: balance })}`
       : accountName(account);
   } else {
     badge.className = 'badge badge--red';
@@ -1008,7 +1008,7 @@ function sparkline(daily) {
         const height = Math.max(2, Math.round((day.tokens / max) * 44));
         const isPeak = day === peak && peak.tokens > 0;
         return `<div class="spark__bar" data-peak="${isPeak}" style="height:${height}px"
-          title="${esc(day.label)} · ${counted('home.sparkTokens', day.tokens)} · ${counted('home.sparkRequests', day.requests)}"></div>`;
+          title="${esc(day.label)}: ${counted('home.sparkTokens', day.tokens)}, ${counted('home.sparkRequests', day.requests)}"></div>`;
       }).join('')}
     </div>`;
 }
@@ -1066,7 +1066,7 @@ function requestRows(requests, showKey = true) {
       </td>
       ${showKey ? `<td class="truncate tiny" style="max-width:130px">${esc(item.keyName || '-')}</td>` : ''}
       <td class="num">${item.totalTokens > 0 ? exact(item.totalTokens) : '-'}</td>
-      <td class="num tiny muted">${item.inputTokens}/${item.outputTokens}${item.reasoningTokens > 0 ? `<span title="${t('home.reasoningTokens')}"> · r${tokens(item.reasoningTokens)}</span>` : ''}</td>
+      <td class="num tiny muted">${item.inputTokens}/${item.outputTokens}${item.reasoningTokens > 0 ? `<span title="${t('home.reasoningTokens')}">, r${tokens(item.reasoningTokens)}</span>` : ''}</td>
       <td class="num tiny muted">${esc(duration(item.durationMs))}</td>
       <td>${item.ok
         ? `<span class="badge badge--green"><span class="dot"></span>${item.status}</span>`
@@ -1150,7 +1150,7 @@ async function loadAuthEvents() {
     target.innerHTML = esc(t('account.lastActivity', {
       // The server names its own events; each is labelled here so the trail reads in the
       // visitor's language rather than in the vocabulary of the database.
-      events: events.map((event) => `${t(`authEvent.${event.event}`)} ${ago(event.createdAt)}`).join(' · '),
+      events: events.map((event) => `${t(`authEvent.${event.event}`)} ${ago(event.createdAt)}`).join(', '),
     }));
   } catch {
     target.textContent = '';
@@ -1311,19 +1311,19 @@ async function renderHome() {
           eyebrow: t('metric.tokensThisMonth'),
           value: tokens(month.totalTokens),
           label: t('metric.tokensThisMonthFoot'),
-          foot: `${counted('metric.requestsCount', month.requests)} · ${counted('metric.failedCount', month.failedRequests)}`,
+          foot: `${counted('metric.requestsCount', month.requests)}, ${counted('metric.failedCount', month.failedRequests)}`,
         })}
         ${metricCard({
           eyebrow: t('metric.tokensToday'),
           value: tokens(today.totalTokens),
           label: t('metric.tokensTodayFoot'),
-          foot: `${counted('metric.requestsCount', today.requests)} · ${counted('metric.failedCount', today.failedRequests)}`,
+          foot: `${counted('metric.requestsCount', today.requests)}, ${counted('metric.failedCount', today.failedRequests)}`,
         })}
         ${metricCard({
           eyebrow: t('metric.allTime'),
           value: tokens(all.totalTokens),
           label: t('metric.allTimeFoot'),
-          foot: `${counted('metric.requestsCount', all.requests)} · ${t('metric.averageDuration', { duration: duration(all.avgDurationMs) })}`,
+          foot: `${counted('metric.requestsCount', all.requests)}, ${t('metric.averageDuration', { duration: duration(all.avgDurationMs) })}`,
         })}
         ${metricCard({
           eyebrow: t('metric.cacheReads'),
@@ -1454,7 +1454,7 @@ async function renderModels() {
       <td><span class="badge ${model.premier ? 'badge--violet' : 'badge--green'}">${model.premier ? t('common.premium') : t('common.free')}</span></td>
       <td class="num tiny muted">${esc(tokens(model.contextWindow))}</td>
       <td class="num tiny muted">${esc(tokens(model.maxTokens))}</td>
-      <td class="tiny muted">${model.reasoning ? 'none · low · medium · high' : '-'}</td>
+      <td class="tiny muted">${model.reasoning ? 'none, low, medium, high' : '-'}</td>
       <td class="tiny muted">${model.input.includes('image') ? 'text, image' : 'text'}</td>
       <td class="num tiny muted">${model.premier ? esc(model.rateLabel) : t('common.unmetered')}</td>
       <td class="num tiny">${model.usageMonth ? exact(model.usageMonth.totalTokens) : '<span class="muted">-</span>'}</td>
