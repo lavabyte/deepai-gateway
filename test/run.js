@@ -1858,6 +1858,141 @@ await checkAsync('a streaming failure is still framed as an event stream', async
 
 /* --------------------------------------------------- bugs found in review */
 
+await checkAsync('amounts are converted in the browser, and stay in dollars when they cannot be', async () => {
+  /*
+   * The server deals only in USD: that is the unit the OpenRouter price table is published
+   * in, and storing a converted figure would make the same row mean something different
+   * depending on when it was read. The currency is a display choice, made and priced here,
+   * so the rate has to be fetched by the browser and the view has to survive not getting it.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const vm = await import('node:vm');
+  const root = new URL('..', import.meta.url).pathname;
+  const app = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+
+  const TODAY = new Date().toISOString().slice(0, 10);
+
+  /**
+   * Boot the client with a chosen currency already stored.
+   *
+   * @param {string} currency
+   * @param {{date?: string, rates?: object, fail?: boolean}|undefined} feed
+   */
+  const boot = async (currency, feed) => {
+    const stored = new Map([['deepai-gateway-currency', currency]]);
+    const nodes = new Map();
+    const node = () => {
+      const n = {
+        innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
+        dataset: {}, style: {}, value: '', children: [],
+        classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+        addEventListener() {}, appendChild(c) { n.children.push(c); },
+        append(...c) { n.children.push(...c); }, remove() {},
+        setAttribute(k, v) { n[k] = v; }, getAttribute: (k) => n[k] ?? null,
+        closest: () => null, focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
+      };
+      n.replaceChildren = (...c) => { n.children = Array.from(c); };
+      n.querySelector = () => n.children[0] ?? null;
+      n.querySelectorAll = () => [];
+      return n;
+    };
+    for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
+      'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button',
+      'locale-button', 'locale-menu', 'locale-flag',
+      'currency-button', 'currency-menu', 'currency-sign']) nodes.set(id, node());
+
+    const calls = [];
+    const sandbox = {
+      document: {
+        getElementById: (id) => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); },
+        createElement: () => node(), querySelector: () => null, querySelectorAll: () => [],
+        addEventListener() {}, documentElement: { lang: '', dataset: {} },
+        visibilityState: 'visible', body: node(),
+      },
+      window: { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }), location: { assign() {} } },
+      location: { search: '', pathname: '/', hash: '', port: '8787', protocol: 'http:' },
+      history: { replaceState() {} },
+      localStorage: {
+        getItem: (k) => (stored.has(k) ? stored.get(k) : null),
+        setItem: (k, v) => stored.set(k, String(v)),
+        removeItem: (k) => stored.delete(k),
+      },
+      navigator: { language: 'en-GB', languages: ['en-GB'] },
+      fetch: async (url) => {
+        const target = String(url);
+        calls.push(target);
+        const json = (body, status = 200) => new Response(JSON.stringify(body),
+          { status, headers: { 'content-type': 'application/json' } });
+        if (target.includes('frankfurter')) {
+          if (feed?.fail === true) return new Response('nope', { status: 503 });
+          return json({ amount: 1, base: 'USD', date: feed?.date ?? TODAY, rates: feed?.rates ?? {} });
+        }
+        if (target.includes('/locales/')) return localeResponse();
+        if (target.includes('/account')) {
+          return json({ ok: true, signedIn: false, username: '', displayName: '', allowance: null,
+            balanceLow: false, keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false } });
+        }
+        return json({ ok: true, models: [] });
+      },
+      setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
+      console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
+      Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
+    };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    new vm.Script(app, { filename: 'app.js' }).runInContext(sandbox);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    return { sandbox, nodes, stored, calls, rateCalls: () => calls.filter((c) => c.includes('frankfurter')) };
+  };
+
+  // --- Dollars need no rate, so the feed is never contacted.
+  const dollars = await boot('USD', undefined);
+  assert.deepEqual(dollars.rateCalls(), [], 'USD must not fetch a rate');
+  assert.equal(vm.runInContext('money(10)', dollars.sandbox), '$10.00');
+  assert.equal(vm.runInContext("moneyNote()", dollars.sandbox), '', 'and nothing is said about rates');
+
+  // --- A chosen currency converts the server's dollars.
+  const euro = await boot('EUR', { rates: { EUR: 0.9 } });
+  assert.equal(euro.rateCalls().length, 1, 'a non-USD currency fetches today\'s rate once');
+  assert.equal(vm.runInContext('money(10)', euro.sandbox), '\u20ac9.00', '10 USD becomes 9 EUR');
+  assert.equal(vm.runInContext('money(0.005)', euro.sandbox), '\u20ac0.0045', 'sub-cent stays precise');
+  assert.match(vm.runInContext('moneyNote()', euro.sandbox), new RegExp(TODAY),
+    'and the view says which day\'s rate was used');
+
+  // --- A rate from an earlier day is not trusted.
+  const stale = await boot('EUR', { date: '2020-01-01', rates: { EUR: 0.9 } });
+  assert.equal(vm.runInContext('rateFor("EUR")', stale.sandbox), 0.9,
+    'the fetched rate is used, not a stored one from another day');
+  assert.equal(stale.rateCalls().length, 1, 'because a stale copy is refetched');
+
+  // --- Without a rate the amounts stay in the dollars the server sent, and it says so.
+  const offline = await boot('EUR', { fail: true });
+  assert.equal(vm.runInContext('money(10)', offline.sandbox), '$10.00',
+    'an unpriceable amount stays in the unit the server used');
+  assert.equal(vm.runInContext('ratesUnavailable()', offline.sandbox), true);
+  assert.ok(vm.runInContext('moneyNote()', offline.sandbox).includes(LOCALES.en['currency.unavailable']),
+    'and the view explains why');
+
+  // --- Switching stores the choice, and the menu offers every currency by sign and code.
+  const picker = await boot('USD', { rates: { EUR: 0.9 } });
+  await vm.runInContext("setCurrency('EUR')", picker.sandbox);
+  assert.equal(picker.stored.get('deepai-gateway-currency'), 'EUR', 'the choice is remembered');
+  assert.equal(picker.nodes.get('currency-sign').textContent, '\u20ac', 'the picker shows its sign');
+  vm.runInContext('renderCurrencyMenu()', picker.sandbox);
+  const options = picker.nodes.get('currency-menu').children.map((child) => child.dataset.currency);
+  assert.ok(options.includes('USD') && options.includes('EUR') && options.includes('PLN')
+    && options.includes('INR'), 'every currency is offered');
+  assert.equal(options.length, vm.runInContext('CURRENCIES.length', picker.sandbox));
+
+  // --- And the server side has no currency at all: one unit, named in the payload.
+  const server = readFileSync(join(root, 'src', 'usage.js'), 'utf8')
+    + readFileSync(join(root, 'src', 'pricing.js'), 'utf8')
+    + readFileSync(join(root, 'src', 'api', 'admin.js'), 'utf8');
+  assert.ok(!/\b(EUR|GBP|PLN|INR)\b/.test(server), 'no currency code appears server-side');
+  assert.ok(!/frankfurter/.test(server), 'and the gateway never contacts the rate feed');
+});
+
 await checkAsync('the pasted content is remembered and can be cleared', async () => {
   /*
    * Signing in means fetching the account JSON from DeepAI by hand, so the browser keeps
@@ -1891,7 +2026,7 @@ await checkAsync('the pasted content is remembered and can be cleared', async ()
     };
     for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
       'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button',
-      'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
+      'locale-button', 'locale-menu', 'locale-flag', 'currency-button', 'currency-menu', 'currency-sign']) nodes.set(id, node());
 
     const sandbox = {
       document: {
@@ -1999,6 +2134,12 @@ await checkAsync('the text stays inside the characters a keyboard can reach', as
   // the danda that ends a Hindi sentence in place of a full stop.
   const LANGUAGE_PUNCTUATION = new Set(['\u00bf', '\u00a1', '\u0964', '\u0965']);
   /*
+   * Currency signs, for the same reason: `EUR` has no plain spelling of its sign, and the
+   * picker exists to show one. Each is a currency the rate feed publishes, so the list
+   * cannot drift from the conversions the dashboard offers.
+   */
+  const CURRENCY_SIGNS = new Set(['\u20ac', '\u00a3', '\u00a5', '\u20b9']);
+  /*
    * A script is letters plus the marks that attach to them. Devanagari writes its vowels as
    * combining signs, so `\p{L}` alone would report `हिन्दी` as untypeable - they are the
    * Hindi equivalent of the diacritics AltGr produces.
@@ -2025,7 +2166,7 @@ await checkAsync('the text stays inside the characters a keyboard can reach', as
       for (const char of line) {
         const code = char.codePointAt(0);
         if (TYPEABLE.has(char) || WHITESPACE.has(char) || code < 0x80) { column += 1; continue; }
-        if (isScript(char) || LANGUAGE_PUNCTUATION.has(char) || isFlag(code)) { column += 1; continue; }
+        if (isScript(char) || LANGUAGE_PUNCTUATION.has(char) || CURRENCY_SIGNS.has(char) || isFlag(code)) { column += 1; continue; }
         if (offences.length < 20) {
           offences.push(`${file.replace(root, '')}:${index + 1}:${column} ${JSON.stringify(char)} U+${code.toString(16).toUpperCase()}`);
         }
@@ -2258,6 +2399,10 @@ await checkAsync('the language switcher offers every language and remembers the 
     'the switcher must come after the theme toggle');
   assert.match(html, /id="locale-flag"/, 'it shows the active language as a flag');
   assert.match(html, /id="locale-menu" role="listbox" hidden/, 'the menu starts closed');
+  // The currency picker is the same control, one position to the right of the language one.
+  assert.match(html, /id="locale-menu"[\s\S]*id="currency-button"[\s\S]*id="currency-menu"/,
+    'the currency picker sits to the right of the language picker');
+  assert.match(html, /id="currency-sign"/, 'it shows the active currency as a sign');
 
   const stored = new Map();
   const nodes = new Map();
@@ -2275,7 +2420,7 @@ await checkAsync('the language switcher offers every language and remembers the 
   });
   for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
     'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button',
-    'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
+    'locale-button', 'locale-menu', 'locale-flag', 'currency-button', 'currency-menu', 'currency-sign']) nodes.set(id, node());
 
   const sandbox = {
     document: {
@@ -2898,7 +3043,7 @@ await checkAsync('the sign-in card gives one instruction, and it is the one that
       insertAdjacentHTML() {}, scrollIntoView() {},
     });
     for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-      'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
+      'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag', 'currency-button', 'currency-menu', 'currency-sign']) nodes.set(id, node());
     const sandbox = {
       document: {
         getElementById: (id) => nodes.get(id) ?? null,
@@ -3005,7 +3150,7 @@ await checkAsync('both signed-out screens offer the one route', async () => {
       insertAdjacentHTML() {}, scrollIntoView() {},
     });
     for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-      'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
+      'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag', 'currency-button', 'currency-menu', 'currency-sign']) nodes.set(id, node());
     const sandbox = {
       document: {
         getElementById: (id) => nodes.get(id) ?? null,
@@ -3254,7 +3399,7 @@ await checkAsync('a name from the database cannot become markup', async () => {
   };
   for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
     'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button',
-    'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
+    'locale-button', 'locale-menu', 'locale-flag', 'currency-button', 'currency-menu', 'currency-sign']) nodes.set(id, node());
 
   const account = {
     ok: true, signedIn: true, username: 'key-abc', displayName: markup,
@@ -3456,7 +3601,7 @@ await checkAsync('nothing asks the visitor through a browser dialog', async () =
     focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
   });
   for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-    'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
+    'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag', 'currency-button', 'currency-menu', 'currency-sign']) nodes.set(id, node());
   const sandbox = {
     document: {
       getElementById: (id) => nodes.get(id) ?? null,
@@ -3554,7 +3699,7 @@ await checkAsync('the top bar offers log out and never a second way in', async (
       focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
     });
     for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-      'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
+      'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag', 'currency-button', 'currency-menu', 'currency-sign']) nodes.set(id, node());
     const sandbox = {
       document: {
         getElementById: (id) => nodes.get(id) ?? null,
@@ -3638,7 +3783,7 @@ await checkAsync('copying a key works on a plain http:// origin', async () => {
     });
     const nodes = new Map();
     for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-      'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
+      'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag', 'currency-button', 'currency-menu', 'currency-sign']) nodes.set(id, node());
 
     const range = { selectNodeContents() {}, };
     const selection = { removeAllRanges() {}, addRange(r) { this.range = r; } };
@@ -3739,7 +3884,7 @@ await checkAsync('the catalog loads once a session exists, without a reload', as
     focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
   });
   for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-    'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag']) nodes.set(id, node());
+    'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag', 'currency-button', 'currency-menu', 'currency-sign']) nodes.set(id, node());
 
   const emptyTotals = { totalTokens: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, requests: 0, costUsd: 0 };
   const sandbox = {

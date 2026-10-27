@@ -56,13 +56,21 @@
           <circle cx="8" cy="8" r="3.1"/>
         </svg>
       </button>
-      <div class="lang">
-        <button class="btn btn--ghost btn--sm lang__button" id="locale-button" aria-haspopup="listbox"
+      <div class="picker">
+        <button class="btn btn--ghost btn--sm picker__button" id="locale-button" aria-haspopup="listbox"
           aria-expanded="false" data-i18n-attr="title:common.language,aria-label:common.language"
           title="Language" aria-label="Language">
-          <span class="lang__flag" id="locale-flag" aria-hidden="true">🇬🇧</span>
+          <span class="picker__sign" id="locale-flag" aria-hidden="true">🇬🇧</span>
         </button>
-        <div class="lang__menu" id="locale-menu" role="listbox" hidden></div>
+        <div class="picker__menu" id="locale-menu" role="listbox" hidden></div>
+      </div>
+      <div class="picker">
+        <button class="btn btn--ghost btn--sm picker__button" id="currency-button" aria-haspopup="listbox"
+          aria-expanded="false" data-i18n-attr="title:common.currency,aria-label:common.currency"
+          title="Currency" aria-label="Currency">
+          <span class="picker__sign" id="currency-sign" aria-hidden="true">$</span>
+        </button>
+        <div class="picker__menu" id="currency-menu" role="listbox" hidden></div>
       </div>
     </div>
   </div>

@@ -235,25 +235,25 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
 
 /* --------------------------------------------------------------- language */
 
-.lang { position: relative; }
-.lang__button { padding: 0 6px; font-size: 15px; line-height: 1; }
-.lang__flag { font-size: 15px; line-height: 1; }
-.lang__menu {
+.picker { position: relative; }
+.picker__button { padding: 0 6px; font-size: 15px; line-height: 1; }
+.picker__sign { font-size: 15px; line-height: 1; }
+.picker__menu {
   position: absolute; right: 0; top: calc(100% + 6px); z-index: 60;
   min-width: 168px; padding: 4px;
   background: var(--surface); border: 1px solid var(--hairline);
   border-radius: var(--radius-lg); box-shadow: var(--shadow-pop);
   display: flex; flex-direction: column; gap: 2px;
 }
-.lang__option {
+.picker__option {
   display: flex; align-items: center; gap: 9px;
   padding: 7px 9px; border: 0; border-radius: var(--radius);
   background: transparent; color: var(--ink); cursor: pointer;
   font: 400 13px/1 var(--sans); text-align: left;
 }
-.lang__option:hover { background: var(--bg-inset); }
-.lang__option.is-active { background: var(--badge-blue-bg); color: var(--badge-blue-tx); font-weight: 500; }
-.lang__name { flex: 1; }
+.picker__option:hover { background: var(--bg-inset); }
+.picker__option.is-active { background: var(--badge-blue-bg); color: var(--badge-blue-tx); font-weight: 500; }
+.picker__name { flex: 1; }
 
 .badge {
   display: inline-flex; align-items: center; gap: 6px;

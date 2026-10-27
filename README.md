@@ -351,6 +351,34 @@ sentence with a hole in it, which no runtime error would ever report.
 To add a language: add its entry to `LOCALES` in `public/app.js`, drop its JSON in
 `public/locales/`, and the test will hold it to the same standard as the others.
 
+### Currency
+
+The picker to the right of the language one shows a currency sign: `$`, `€`, `£`, `zł`,
+`₹`, `¥` and six more. It changes how amounts are **shown**, nothing else.
+
+**The gateway deals only in US dollars.** That is the unit the OpenRouter price table is
+published in, and there is no currency field anywhere in the API: a row's cost is a number
+of dollars, and storing a converted figure would make the same row mean something different
+depending on when it was written. The tests hold the server to that - no currency code and
+no rate feed appears in `src/`.
+
+The conversion is the browser's, and so is the rate:
+
+- **Source:** Frankfurter (`api.frankfurter.dev`), which republishes the European Central
+  Bank's reference rates. No key, no account, no quota, and it sends
+  `Access-Control-Allow-Origin: *`, so the fetch goes straight from the page and nothing is
+  proxied through the gateway or logged by it.
+- **Caching:** one set per working day, so today's copy is stored in `localStorage` with its
+  date and reused. A copy from an earlier day is refetched rather than trusted. USD needs no
+  rate and never contacts the feed.
+- **Failure is visible, not silent:** without a rate the figures stay in the US dollars the
+  server sent and the card says so. A converted number the reader cannot check would be
+  worse than the one the gateway actually reported.
+- **The ECB rate of which day** is printed under the figures, so a number can be traced.
+
+Credits are not money and are not converted: they are DeepAI's own unit for what its models
+consume, alongside the dollar figures that come from the price table.
+
 ### Theme
 
 Light and dark, following the OS by default. An explicit choice from the top-bar

@@ -55,13 +55,156 @@ function when(ms) {
   });
 }
 
-/** USD with enough precision for sub-cent amounts. */
+/**
+ * USD with enough precision for sub-cent amounts.
+ *
+ * This is the base: every amount the gateway reports is in USD, because that is what the
+ * price table is published in and mixing units server-side would make the stored numbers
+ * mean different things. Conversion happens here, in the browser.
+ */
 function usd(value) {
   const amount = Number(value) || 0;
   if (amount === 0) return '$0.00';
   if (amount < 0.01) return `$${amount.toFixed(4)}`;
   if (amount < 1) return `$${amount.toFixed(3)}`;
   return `$${amount.toFixed(2)}`;
+}
+
+/*
+ * ------------------------------------------------------------------- currency
+ *
+ * The server only ever deals in USD. This is a display choice made here, and the rates
+ * come from the browser too: Frankfurter publishes the European Central Bank's reference
+ * rates, needs no key, and sends `Access-Control-Allow-Origin: *`, so nothing has to be
+ * proxied through the gateway or accounted for on the server.
+ *
+ * The list is short on purpose. Each entry has to be a currency the rate feed actually
+ * publishes, or the conversion would fail for a choice the dashboard offered.
+ */
+const CURRENCIES = [
+  { code: 'USD', sign: '$', label: 'US Dollar' },
+  { code: 'EUR', sign: '\u20ac', label: 'Euro' },
+  { code: 'GBP', sign: '\u00a3', label: 'British Pound' },
+  { code: 'PLN', sign: 'z\u0142', label: 'Polish Zloty' },
+  { code: 'INR', sign: '\u20b9', label: 'Indian Rupee' },
+  { code: 'JPY', sign: '\u00a5', label: 'Japanese Yen' },
+  { code: 'CHF', sign: 'Fr', label: 'Swiss Franc' },
+  { code: 'SEK', sign: 'kr', label: 'Swedish Krona' },
+  { code: 'CZK', sign: 'K\u010d', label: 'Czech Koruna' },
+  { code: 'CAD', sign: 'C$', label: 'Canadian Dollar' },
+  { code: 'AUD', sign: 'A$', label: 'Australian Dollar' },
+  { code: 'BRL', sign: 'R$', label: 'Brazilian Real' },
+];
+
+const CURRENCY_KEY = 'deepai-gateway-currency';
+
+/*
+ * Where the fetched rates are kept, with the day they describe.
+ *
+ * The feed publishes one set per working day, so a copy from today cannot be stale, and
+ * keeping it means switching currency back and forth costs nothing. A copy from an
+ * earlier day is refetched rather than trusted.
+ */
+const RATES_KEY = 'deepai-gateway-rates';
+
+/** The chosen currency's entry, falling back to USD for an unknown code. */
+function currencyOf(code) {
+  return CURRENCIES.find((entry) => entry.code === code) ?? CURRENCIES[0];
+}
+
+/** Rates are quoted per USD, so the base needs no rate of its own. */
+function rateFor(code) {
+  if (code === 'USD') return 1;
+  const rate = state.rates?.rates?.[code];
+  return typeof rate === 'number' && rate > 0 ? rate : undefined;
+}
+
+/**
+ * An amount the gateway reported, shown in the chosen currency.
+ *
+ * Without a rate the amount stays in USD rather than being shown wrong: a converted
+ * figure the visitor cannot check is worse than the one the server actually sent.
+ *
+ * @param {number} value - USD.
+ * @returns {string}
+ */
+function money(value) {
+  const code = state.currency;
+  if (code === 'USD') return usd(value);
+  const rate = rateFor(code);
+  if (rate === undefined) return usd(value);
+  const { sign } = currencyOf(code);
+  const amount = (Number(value) || 0) * rate;
+  if (amount === 0) return `${sign}0.00`;
+  if (amount < 0.01) return `${sign}${amount.toFixed(4)}`;
+  if (amount < 1) return `${sign}${amount.toFixed(3)}`;
+  return `${sign}${amount.toFixed(2)}`;
+}
+
+/** Read the stored currency, and the stored rates when they are from today. */
+function loadStoredCurrency() {
+  try {
+    state.currency = currencyOf(localStorage.getItem(CURRENCY_KEY) ?? 'USD').code;
+    const stored = JSON.parse(localStorage.getItem(RATES_KEY) ?? 'null');
+    const today = new Date().toISOString().slice(0, 10);
+    if (stored?.date === today && typeof stored.rates === 'object') state.rates = stored;
+  } catch {
+    // Unreadable or corrupt storage just means the defaults.
+  }
+}
+
+/**
+ * Fetch today's rates, once, when the chosen currency needs them.
+ *
+ * @returns {Promise<boolean>} whether rates are available for the chosen currency.
+ */
+async function loadRates() {
+  if (state.currency === 'USD') return true;
+  if (rateFor(state.currency) !== undefined) return true;
+  try {
+    const response = await fetch('https://api.frankfurter.dev/v1/latest?base=USD', {
+      headers: { accept: 'application/json' },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    if (payload === null || typeof payload !== 'object' || typeof payload.rates !== 'object') {
+      throw new Error('unexpected answer');
+    }
+    state.rates = { date: payload.date, rates: payload.rates };
+    try {
+      localStorage.setItem(RATES_KEY, JSON.stringify(state.rates));
+    } catch {
+      /* storage full or blocked: the rates still work for this page */
+    }
+    return rateFor(state.currency) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether the chosen currency is being shown without a rate, so the view can say so. */
+function ratesUnavailable() {
+  return state.currency !== 'USD' && rateFor(state.currency) === undefined;
+}
+
+/**
+ * Where the money on this page came from, as a line under the figures.
+ *
+ * Amounts are converted in the browser from the USD the server reported, so the reader can
+ * see which day's rate was used - and, when there is none, that the figures are the
+ * server's own rather than a conversion this page could not make.
+ *
+ * @returns {string} markup, or nothing when the amounts are already in USD.
+ */
+function moneyNote() {
+  if (state.currency === 'USD') return '';
+  if (ratesUnavailable()) {
+    return `<div class="card__sub">${esc(t('currency.unavailable'))}</div>`;
+  }
+  return `<div class="card__sub">${esc(t('currency.rateNote', {
+    code: state.currency,
+    when: state.rates?.date ?? '',
+  }))}</div>`;
 }
 
 /** Duration in ms -> "412ms" / "1.8s". */
@@ -646,11 +789,21 @@ $('locale-button').addEventListener('click', (event) => {
   event.stopPropagation();
   toggleLocaleMenu();
 });
+$('currency-button').addEventListener('click', (event) => {
+  event.stopPropagation();
+  // Only one menu is open at a time: two open panels overlap in the same corner.
+  closeLocaleMenu();
+  toggleCurrencyMenu();
+});
 document.addEventListener('click', (event) => {
-  if ($('locale-menu')?.hidden === false && !event.target.closest?.('.lang')) closeLocaleMenu();
+  const target = event.target;
+  if ($('locale-menu')?.hidden === false && !target.closest?.('.picker')) closeLocaleMenu();
+  if ($('currency-menu')?.hidden === false && !target.closest?.('.picker')) closeCurrencyMenu();
 });
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && $('locale-menu')?.hidden === false) closeLocaleMenu();
+  if (event.key !== 'Escape') return;
+  if ($('locale-menu')?.hidden === false) closeLocaleMenu();
+  if ($('currency-menu')?.hidden === false) closeCurrencyMenu();
 });
 $('theme-toggle').addEventListener('click', () => {
   applyTheme(effectiveTheme() === 'dark' ? 'light' : 'dark');
@@ -665,6 +818,9 @@ const state = {
   // The active language and its loaded strings. See the i18n section below.
   locale: 'en',
   strings: {},
+  // The currency amounts are shown in, and the rates needed to show it. See below.
+  currency: 'USD',
+  rates: undefined,
 };
 
 /* --------------------------------------------------------------------- i18n */
@@ -860,18 +1016,18 @@ function renderLocaleMenu() {
   menu.replaceChildren(...LOCALES.map((entry) => {
     const option = document.createElement('button');
     option.type = 'button';
-    option.className = 'lang__option';
+    option.className = 'picker__option';
     option.dataset.locale = entry.code;
     option.setAttribute('role', 'option');
     option.setAttribute('aria-selected', String(entry.code === state.locale));
     // Built as nodes rather than as HTML: the label is a language's own name, and text
     // assembled this way cannot be mistaken for markup.
     const flag = document.createElement('span');
-    flag.className = 'lang__flag';
+    flag.className = 'picker__sign';
     flag.setAttribute('aria-hidden', 'true');
     flag.textContent = entry.flag;
     const label = document.createElement('span');
-    label.className = 'lang__name';
+    label.className = 'picker__name';
     label.textContent = entry.label;
     option.append(flag, label);
     option.addEventListener('click', () => {
@@ -932,6 +1088,98 @@ async function setLocale(code) {
   applyStaticText();
   renderLocaleButton();
   renderAccountBadge();
+  await render({ refreshAccount: false });
+}
+
+/**
+ * Fill the currency menu: the sign and the code, which is what tells ¥ JPY from ¥ CNY.
+ *
+ * The names are not translated - a currency is a code with a sign, and `€ EUR` says the
+ * same thing in every language the dashboard speaks.
+ */
+function renderCurrencyMenu() {
+  const menu = $('currency-menu');
+  if (menu === null) return;
+  menu.replaceChildren(...CURRENCIES.map((entry) => {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'picker__option';
+    option.dataset.currency = entry.code;
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', String(entry.code === state.currency));
+    const sign = document.createElement('span');
+    sign.className = 'picker__sign';
+    sign.setAttribute('aria-hidden', 'true');
+    sign.textContent = entry.sign;
+    const name = document.createElement('span');
+    name.className = 'picker__name';
+    name.textContent = entry.code;
+    option.append(sign, name);
+    option.addEventListener('click', () => {
+      closeCurrencyMenu();
+      void setCurrency(entry.code);
+    });
+    return option;
+  }));
+}
+
+function closeCurrencyMenu() {
+  const menu = $('currency-menu');
+  if (menu === null) return;
+  menu.hidden = true;
+  $('currency-button')?.setAttribute('aria-expanded', 'false');
+}
+
+function toggleCurrencyMenu() {
+  const menu = $('currency-menu');
+  if (menu === null) return;
+  const opening = menu.hidden;
+  if (opening) {
+    renderCurrencyMenu();
+    menu.hidden = false;
+    $('currency-button')?.setAttribute('aria-expanded', 'true');
+    menu.querySelector('[data-currency]')?.focus();
+  } else {
+    closeCurrencyMenu();
+  }
+}
+
+/** The sign the picker shows for the active currency. */
+function renderCurrencyButton() {
+  const entry = currencyOf(state.currency);
+  const sign = $('currency-sign');
+  if (sign !== null) sign.textContent = entry.sign;
+  const button = $('currency-button');
+  if (button !== null) button.setAttribute('title', `${entry.label} (${entry.code})`);
+  for (const option of document.querySelectorAll('[data-currency]')) {
+    option.classList.toggle('is-active', option.dataset.currency === state.currency);
+  }
+}
+
+/**
+ * Switch currency.
+ *
+ * The rates are fetched before the view is redrawn, so an amount is never painted in one
+ * currency and then corrected in another. If they cannot be fetched, the dashboard says so
+ * and keeps showing the USD figures the server sent.
+ *
+ * @param {string} code
+ */
+async function setCurrency(code) {
+  const entry = currencyOf(code);
+  if (entry.code === state.currency) {
+    closeCurrencyMenu();
+    return;
+  }
+  state.currency = entry.code;
+  try {
+    localStorage.setItem(CURRENCY_KEY, entry.code);
+  } catch {
+    /* the choice just will not survive a reload */
+  }
+  renderCurrencyButton();
+  const ready = await loadRates();
+  if (!ready && entry.code !== 'USD') toast(t('currency.unavailable'), 'error');
   await render({ refreshAccount: false });
 }
 
@@ -1225,7 +1473,7 @@ function savingsCard(savings) {
       <tr>
         <td class="truncate" style="max-width:200px">${esc(entry.model)}</td>
         <td class="num">${tokens(entry.tokens)}</td>
-        <td class="num">${entry.priced ? esc(usd(entry.usd)) : `<span class="muted" title="${t('pricing.noEquivalent')}">n/a</span>`}</td>
+        <td class="num">${entry.priced ? esc(money(entry.usd)) : `<span class="muted" title="${t('pricing.noEquivalent')}">n/a</span>`}</td>
       </tr>`)
     .join('');
 
@@ -1235,28 +1483,29 @@ function savingsCard(savings) {
         <div>
           <div class="card__title">${t('home.moneySaved')}</div>
           <div class="card__sub">${t('home.moneySavedSub')}</div>
+          ${moneyNote()}
         </div>
         <div class="row" style="gap:8px">
           <span class="badge ${live ? 'badge--green' : 'badge--amber'}"
                 title="${esc(live ? t('pricing.live') : t('pricing.bundled', { source: pricing.source ?? 'bundled' }))}">
             <span class="dot"></span>${live ? t('pricing.liveRates') : t('pricing.cachedRates')}
           </span>
-          <span class="badge badge--gray">${esc(t('home.monthThisMonth', { amount: usd(month.usd) }))}</span>
+          <span class="badge badge--gray">${esc(t('home.monthThisMonth', { amount: money(month.usd) }))}</span>
         </div>
       </div>
 
       <div class="grid grid--3 mt-3">
         <div>
           <div class="eyebrow">${t('metric.today')}</div>
-          <div class="metric__value" style="font-size:22px">${esc(usd(today.usd))}</div>
+          <div class="metric__value" style="font-size:22px">${esc(money(today.usd))}</div>
         </div>
         <div>
           <div class="eyebrow">${t('metric.thisMonth')}</div>
-          <div class="metric__value" style="font-size:22px">${esc(usd(month.usd))}</div>
+          <div class="metric__value" style="font-size:22px">${esc(money(month.usd))}</div>
         </div>
         <div>
           <div class="eyebrow">${t('metric.allTime')}</div>
-          <div class="metric__value" style="font-size:22px">${esc(usd(all.usd))}</div>
+          <div class="metric__value" style="font-size:22px">${esc(money(all.usd))}</div>
         </div>
       </div>
 
@@ -2020,7 +2269,10 @@ document.addEventListener('visibilitychange', () => {
   await loadLocale(detectLocale());
   applyStaticText();
   renderLocaleButton();
-  await Promise.all([loadAccount(), loadModels().catch(() => [])]);
+  // The currency is a display choice, so it is settled before anything shows an amount.
+  loadStoredCurrency();
+  renderCurrencyButton();
+  await Promise.all([loadAccount(), loadModels().catch(() => []), loadRates()]);
   // DeepAI's callback redirects here with ?logged-in=1; confirm it once.
   if (new URLSearchParams(location.search).has('logged-in')) {
     if (state.account?.signedIn === true) toast(t('signin.loggedInToast'));
