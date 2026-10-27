@@ -142,6 +142,9 @@ export function adminRouter(db, runtime) {
       allowance: view?.allowance ?? null,
       signedInSince: view?.signedInSince ?? null,
       sessionExpiresAt: view?.sessionExpiresAt ?? null,
+      // Whether this gateway also serves DeepAI's browser sign-in, so the dashboard only
+      // offers a route that exists.
+      callbackLogin: runtime.callbackLogin === true,
       defaultModel: account === undefined
         ? 'glm-5.3-flash'
         : getSetting(db, account.username, 'default_model', 'glm-5.3-flash'),

@@ -234,7 +234,90 @@ async function signInWithProfile() {
  * @returns {string} markup containing the pasted-JSON form.
  */
 function signInRoutes(prefix = '') {
-  return `<div class="mt-3">${profilePasteHelp(prefix)}</div>`;
+  return `<div class="mt-3">${profilePasteHelp(prefix)}</div>`
+    + (state.account?.callbackLogin === true ? browserSignIn(prefix) : '');
+}
+
+/**
+ * DeepAI's own browser sign-in, when the gateway serves it.
+ *
+ * Only offered when `CALLBACK_LOGIN` is on. DeepAI fixes the redirect to `127.0.0.1`, so
+ * this finishes on a browser that can reach that address as this gateway — the copy says
+ * so, and the paste field is there for when it cannot.
+ */
+function browserSignIn(prefix = '') {
+  return `
+    <section class="step mt-3" id="${prefix}browser-step">
+      <div class="step__title">${t('browser.title')}</div>
+      <p class="step__lead">${t('browser.lead')}</p>
+      <p class="step__lead">${t('browser.callbackHint', { url: loopbackCallback() })}</p>
+      <div class="row mt-3"><button class="btn btn--secondary" id="${prefix}login-browser" type="button">${t('browser.start')}</button></div>
+      <div class="field mt-3">
+        <label class="field__label" for="${prefix}browser-paste">${t('browser.pasteLabel')}</label>
+        <textarea class="textarea" id="${prefix}browser-paste" rows="2" spellcheck="false"
+          autocomplete="off" placeholder="http://127.0.0.1:8787/callback?code=…&state=…"></textarea>
+      </div>
+      <div class="row mt-3"><button class="btn" id="${prefix}login-finish" type="button">${t('browser.finish')}</button></div>
+    </section>`;
+}
+
+/** The loopback address DeepAI will send the browser to, for the copy. */
+function loopbackCallback() {
+  const port = location.port !== '' ? location.port : (location.protocol === 'https:' ? '443' : '80');
+  return `http://127.0.0.1:${port}/callback`;
+}
+
+/** Start the browser sign-in: ask the gateway for the URL, then go there. */
+async function startBrowserLogin(prefix = '') {
+  const button = $(`${prefix}login-browser`);
+  const label = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = t('signin.signingIn');
+  }
+  try {
+    // A plain fetch, not `api()`: this is the page route, not an `/api` one.
+    const response = await fetch('/login?json=1', { headers: { accept: 'application/json' } });
+    if (!response.ok) throw new Error(t('error.http', { status: response.status }));
+    const payload = await response.json();
+    window.location.assign(payload.url);
+  } catch (error) {
+    toast(String(error.message ?? error), 'error');
+    if (button) {
+      button.disabled = false;
+      button.textContent = label ?? t('browser.start');
+    }
+  }
+}
+
+/** Finish a browser sign-in from the address the browser could not open. */
+async function finishBrowserLogin(prefix = '') {
+  const field = $(`${prefix}browser-paste`);
+  const text = field?.value ?? '';
+  if (text.trim() === '') {
+    toast(t('signin.runCommand'), 'error');
+    field?.focus();
+    return;
+  }
+  const button = $(`${prefix}login-finish`);
+  const label = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = t('signin.signingIn');
+  }
+  try {
+    await api('/login/complete', { method: 'POST', body: { url: text } });
+    if (field) field.value = '';
+    toast(t('signin.loggedIn'));
+    await loadAccount();
+    await render();
+  } catch (error) {
+    toast(String(error.message ?? error), 'error');
+    if (button) {
+      button.disabled = false;
+      button.textContent = label ?? t('browser.finish');
+    }
+  }
 }
 
 /**
@@ -248,6 +331,8 @@ function signInRoutes(prefix = '') {
 function wireSignInForms(prefix = '') {
   const id = (name) => $(`${prefix}${name}`);
   id('login-with-profile')?.addEventListener('click', () => void signInWithProfile(prefix));
+  id('login-browser')?.addEventListener('click', () => void startBrowserLogin(prefix));
+  id('login-finish')?.addEventListener('click', () => void finishBrowserLogin(prefix));
 }
 
 /**

@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { openDatabase } from './src/db.js';
 import { adminRouter } from './src/api/admin.js';
+import { createCallbackLogin } from './src/deepai/callback-login.js';
 import { initPricing, pricingStatus, startPricingRefresh } from './src/pricing.js';
 import { v1Router } from './src/api/v1.js';
 import { prefetchCatalog } from './src/deepai/catalog.js';
@@ -30,7 +31,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export function config(env = process.env) {
   return {
     port: Number(env.PORT) || 8787,
-    host: env.HOST || '127.0.0.1',
+    // Exposed by default: this runs as a gateway for other clients, so binding it to
+    // loopback meant every deployment had to set HOST before anything could reach it.
+    // The dashboard has no password of its own — access is the DeepAI account — so the
+    // README says plainly that this makes the panel reachable from the network.
+    host: env.HOST || '0.0.0.0',
     database: env.DATABASE || join(HERE, 'data', 'deepai.db'),
     pricingCache: env.PRICING_CACHE || join(HERE, 'data', 'pricing.json'),
     logRequests: env.LOG_REQUESTS !== '0',
@@ -42,6 +47,13 @@ export function config(env = process.env) {
      * negative or unparsable value is treated as off rather than as "everything".
      */
     forgetAccountAfterDays: forgetAfterDays(env.FORGET_ACCOUNT_AFTER_DAYS),
+    /*
+     * DeepAI's own browser sign-in, finishing at `/callback`. Off by default: DeepAI
+     * hard-codes `127.0.0.1` as the redirect host, so it only completes when the browser
+     * reaches that address as this gateway. The paste-the-JSON route works from anywhere,
+     * which is why it is the default.
+     */
+    callbackLogin: env.CALLBACK_LOGIN === '1' || env.CALLBACK_LOGIN === 'true',
   };
 }
 
@@ -67,6 +79,8 @@ export function createApp(db, options = {}) {
   const runtime = {
     log: options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`)),
     trustProxy: options.trustProxy === true,
+    // Read by the dashboard so it only offers the route when the gateway serves it.
+    callbackLogin: options.callbackLogin === true,
   };
 
   const app = express();
@@ -98,6 +112,19 @@ export function createApp(db, options = {}) {
   // Resolve the browser's session before any route runs, so `/api` handlers can
   // ask "which account is this" rather than "is anyone logged in".
   app.use(attachSession(db));
+
+  /*
+   * DeepAI's browser sign-in, when a deployment asks for it.
+   *
+   * Mounted before the dashboard router so `/api/login/complete` is served by the module
+   * that owns the pending attempts — the same map the `/callback` page route reads, which
+   * is why both come from one factory.
+   */
+  if (runtime.callbackLogin) {
+    const callback = createCallbackLogin(db, runtime);
+    app.use(callback.router);
+    app.post('/api/login/complete', callback.complete);
+  }
 
   app.use('/v1', v1Router(db));
   app.use('/api', adminRouter(db, runtime));
@@ -262,6 +289,11 @@ export function start(overrides = {}) {
       // The dashboard is protected by a cookie, but an operator should still
       // know the panel is reachable from the network.
       console.log('[deepai-gateway] note: HOST is not loopback — the dashboard is reachable from the network');
+    }
+    if (settings.callbackLogin) {
+      console.log('[deepai-gateway] note: DeepAI browser sign-in is enabled (CALLBACK_LOGIN); it finishes at /callback,');
+      console.log(`[deepai-gateway]       which DeepAI fixes to ${`http://127.0.0.1:${port}/callback`}`);
+      console.log('[deepai-gateway]       and only opens on a browser that can reach it, e.g. through a port forward');
     }
     // A setting that deletes accounts is worth stating out loud at every boot.
     if (settings.forgetAccountAfterDays > 0) {

@@ -1858,6 +1858,42 @@ await checkAsync('a streaming failure is still framed as an event stream', async
 
 /* --------------------------------------------------- bugs found in review */
 
+await checkAsync('the defaults a fresh clone gets are the documented ones', async () => {
+  /*
+   * A clone with no `.env` has to work and has to behave the way the README says. The
+   * notable default is `HOST`: a gateway exists to be reached from other machines, so it
+   * binds every interface — which is also why the README says plainly that this exposes the
+   * dashboard, and why `.env.example` explains how to keep it local.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { config } = await import('../server.js');
+  const root = new URL('..', import.meta.url).pathname;
+
+  const defaults = config({});
+  assert.equal(defaults.host, '0.0.0.0', 'a fresh clone must be reachable from the network');
+  assert.equal(defaults.port, 8787);
+  assert.equal(defaults.callbackLogin, false, 'browser sign-in is opt-in');
+  assert.equal(defaults.forgetAccountAfterDays, 0, 'retention is opt-in');
+  assert.equal(defaults.logRequests, true);
+
+  // Every setting the code reads is offered in `.env.example`, and nothing else is: an
+  // example that drifts is worse than none, because it looks authoritative.
+  const example = readFileSync(join(root, '.env.example'), 'utf8');
+  const server = readFileSync(join(root, 'server.js'), 'utf8');
+  const read = new Set([...server.matchAll(/env\.([A-Z][A-Z0-9_]*)/g)].map((m) => m[1]));
+  const offered = new Set([...example.matchAll(/^#?([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]));
+
+  assert.deepEqual([...read].filter((name) => !offered.has(name)).sort(), [],
+    'settings the code reads but the example omits');
+  assert.deepEqual([...offered].filter((name) => !read.has(name)).sort(), [],
+    'settings the example offers that nothing reads');
+
+  // And it must be committable, or the clone instructions cannot be followed.
+  const ignore = readFileSync(join(root, '.gitignore'), 'utf8');
+  assert.ok(!/^\.env\.example$/m.test(ignore), '.env.example must not be ignored');
+});
+
 await checkAsync('inactive accounts are forgotten only when a deployment asks for it', async () => {
   /*
    * This is the one setting that deletes data on its own, so the tests are about what it
@@ -2844,6 +2880,166 @@ await checkAsync('both signed-out screens offer the one route', async () => {
   // The replaced controls must be gone from the source, not merely unreachable.
   for (const gone of ['id="password-form"', 'id="api-key"', 'id="signin"', 'passwordForm(', 'keyForm(']) {
     assert.ok(!source.includes(gone), `${gone} must not remain in the source`);
+  }
+});
+
+await checkAsync('a pasted callback address yields its code and state, or says what is missing', async () => {
+  /*
+   * This is the input a visitor produces when the redirect could not open: whatever their
+   * address bar holds, copied by hand. The reasons are shown as instructions, so each one
+   * names the part that is wrong rather than saying "invalid".
+   */
+  const { parseCallbackInput } = await import('../src/deepai/callback-login.js');
+
+  const state = 'a'.repeat(64);
+  assert.deepEqual(
+    parseCallbackInput(`http://127.0.0.1:25912/callback?code=abc&state=${state}`),
+    { ok: true, code: 'abc', state },
+  );
+  // A quoted link, as a chat client or terminal hands it back.
+  assert.deepEqual(
+    parseCallbackInput(`  <"http://127.0.0.1:1/callback?code=c&state=${state}">  `),
+    { ok: true, code: 'c', state },
+  );
+  // A bare query fragment, with no host at all.
+  assert.deepEqual(
+    parseCallbackInput(`?code=c&state=${state}`),
+    { ok: true, code: 'c', state },
+  );
+  // A different host is fine: only the two parameters are read.
+  assert.deepEqual(
+    parseCallbackInput(`https://gw.example.test:25912/auth-callback?code=c&state=${state}&extra=1#frag`),
+    { ok: true, code: 'c', state },
+  );
+
+  // A bare code is refused: without the state nothing proves which attempt it belongs to.
+  assert.deepEqual(parseCallbackInput('abc123'), { ok: false, reason: 'not-an-address' });
+  assert.deepEqual(parseCallbackInput(''), { ok: false, reason: 'not-an-address' });
+  assert.deepEqual(parseCallbackInput(undefined), { ok: false, reason: 'not-an-address' });
+  assert.deepEqual(parseCallbackInput(42), { ok: false, reason: 'not-an-address' });
+  // A cut-off paste says which half is missing.
+  assert.deepEqual(parseCallbackInput('http://127.0.0.1:1/callback?code=c'),
+    { ok: false, reason: 'no-state' });
+  assert.deepEqual(parseCallbackInput(`http://127.0.0.1:1/callback?state=${state}`),
+    { ok: false, reason: 'no-code' });
+  assert.deepEqual(parseCallbackInput(`http://127.0.0.1:1/callback?code=&state=${state}`),
+    { ok: false, reason: 'no-code' });
+  // And an implausible length is rejected rather than parsed.
+  assert.deepEqual(parseCallbackInput(`?code=${'x'.repeat(9000)}&state=${state}`),
+    { ok: false, reason: 'too-long' });
+});
+
+await checkAsync('browser sign-in exists only when a deployment asks for it', async () => {
+  /*
+   * DeepAI fixes the redirect to `127.0.0.1`, so this route only completes on a browser
+   * that can reach that address as the gateway. It is therefore opt-in, and off by default:
+   * an unconfigured gateway must not advertise or serve it.
+   */
+  const { openDatabase } = await import('../src/db.js');
+  const { createApp } = await import('../server.js');
+
+  // --- Off by default.
+  const off = openDatabase(':memory:');
+  const offApp = createApp(off, { log: () => {}, logRequests: false });
+  const offServer = offApp.listen(0, '127.0.0.1');
+  await new Promise((resolve) => offServer.once('listening', resolve));
+  const offBase = `http://127.0.0.1:${offServer.address().port}`;
+  try {
+    const login = await fetch(`${offBase}/login?json=1`, { redirect: 'manual' });
+    assert.notEqual(login.status, 200, 'the sign-in route must not be served');
+    const callback = await fetch(`${offBase}/callback?code=x&state=y`, { redirect: 'manual' });
+    assert.notEqual(callback.status, 200, 'nor the callback');
+    const complete = await fetch(`${offBase}/api/login/complete`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"url":"http://127.0.0.1:1/callback?code=a&state=b"}',
+    });
+    assert.equal(complete.status, 404, 'nor the completion endpoint');
+  } finally {
+    await new Promise((resolve) => offServer.close(resolve));
+  }
+
+  // --- On, with a stubbed DeepAI.
+  const on = openDatabase(':memory:');
+  const app = createApp(on, { log: () => {}, logRequests: false, callbackLogin: true });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const port = server.address().port;
+  const base = `http://127.0.0.1:${port}`;
+
+  const realFetch = globalThis.fetch;
+  const http = (...args) => realFetch(...args);
+  let exchanges = 0;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('/desktop_auth/exchange/')) {
+      exchanges += 1;
+      return new Response(JSON.stringify({ api_key: 'sk-from-callback', username: 'callback-user', is_pro: false }),
+        { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (String(url).includes('api.deepai.org')) {
+      return new Response('{"enabled":true,"balance":"1.0","granted":"1.0"}',
+        { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    // The dashboard is told, so it only offers a route that exists.
+    const account = await (await http(`${base}/api/account`)).json();
+    assert.equal(account.callbackLogin, true, 'the dashboard must know the route is served');
+
+    // Starting returns the DeepAI URL and the address it will come back to.
+    const started = await (await http(`${base}/login?json=1`)).json();
+    assert.equal(started.ok, true);
+    assert.match(started.url, /^https:\/\/api\.deepai\.org\/deepai_code\/desktop_auth\//);
+    const startedUrl = new URL(started.url);
+    const state = startedUrl.searchParams.get('state');
+    assert.match(state, /^[0-9a-f]{64}$/, 'the state is 256 random bits');
+    // DeepAI accepts only a plain integer port.
+    assert.match(startedUrl.searchParams.get('port'), /^\d+$/);
+    assert.equal(started.path, '/callback');
+
+    // A wrong state is refused without creating anything.
+    const wrong = await http(`${base}/callback?code=x&state=${'0'.repeat(64)}`, { redirect: 'manual' });
+    assert.equal(wrong.status, 400, 'an unknown state is refused');
+    assert.equal(exchanges, 0, 'and nothing is exchanged');
+
+    // The real callback completes and sets a session.
+    const done = await http(`${base}/callback?code=one-shot&state=${state}`, { redirect: 'manual' });
+    assert.equal(done.status, 302, 'a completed sign-in goes back to the dashboard');
+    assert.equal(exchanges, 1);
+    const cookie = String(done.headers.get('set-cookie') ?? '').split(';')[0];
+    assert.match(cookie, /deepai_gateway_session=/, 'and hands the browser its session');
+
+    const me = await (await http(`${base}/api/account`, { headers: { cookie } })).json();
+    assert.equal(me.signedIn, true, 'the session works');
+    assert.equal(me.username, 'callback-user', 'named from DeepAI\'s own answer');
+
+    // The code is one-shot: the same address cannot be redeemed twice.
+    const again = await http(`${base}/callback?code=one-shot&state=${state}`, { redirect: 'manual' });
+    assert.equal(again.status, 400, 'a spent attempt is refused');
+    assert.equal(exchanges, 1, 'and is not exchanged again');
+
+    // --- The paste-back path, for a browser that could not open the redirect.
+    const second = await (await http(`${base}/login?json=1`)).json();
+    const secondState = new URL(second.url).searchParams.get('state');
+    const pasted = await http(`${base}/api/login/complete`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url: `http://127.0.0.1:${port}/callback?code=pasted&state=${secondState}` }),
+    });
+    assert.equal(pasted.status, 200, 'a pasted address finishes the sign-in');
+    assert.equal((await pasted.json()).ok, true);
+    assert.equal(exchanges, 2);
+
+    // A paste with no state cannot authorise anything.
+    const bare = await http(`${base}/api/login/complete`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url: 'http://127.0.0.1/callback?code=only-a-code' }),
+    });
+    assert.equal(bare.status, 400);
+    assert.equal((await bare.json()).code, 'no-state');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 

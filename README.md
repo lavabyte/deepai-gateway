@@ -11,35 +11,64 @@ several people can share one gateway without seeing each other's keys or traffic
 ## Quick start
 
 ```bash
+git clone https://github.com/lavabyte/deepai-gateway.git
+cd deepai-gateway
+cp .env.example .env
 npm install
 npm start
 ```
 
-Open <http://127.0.0.1:8787>, log in with DeepAI, create a key, then:
+That is the whole install. `.env` is optional — every value in it has a working default —
+but copying it gives you the settings to edit, and `npm start` loads it for you.
+
+To **update** an existing checkout:
 
 ```bash
-curl http://127.0.0.1:8787/v1/chat/completions \
+git pull
+npm install
+```
+
+`npm install` after a pull is worth running every time: if a dependency changed, this is
+what picks it up.
+
+Then open the dashboard:
+
+```
+http://<this-host>:8787
+```
+
+It listens on **every interface by default** (`HOST=0.0.0.0`), because a gateway is meant
+to be reached from other machines. There is no dashboard password: access *is* the DeepAI
+account you sign in with. On a public host, put it behind TLS and your own access control —
+see [Signing in](#signing-in) and [Security](#security).
+
+Sign in, create a key on the **API Keys** page, then point any OpenAI client at `/v1`:
+
+```bash
+curl http://<this-host>:8787/v1/chat/completions \
   -H "Authorization: Bearer sk-…" \
   -H "content-type: application/json" \
   -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-Any OpenAI SDK works:
-
 ```bash
-export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
+export OPENAI_BASE_URL=http://<this-host>:8787/v1
 export OPENAI_API_KEY=sk-…
 ```
 
 ## Configuration
 
+Everything is optional. `.env.example` lists the same settings with the reasoning beside
+each one; `npm start` reads `.env`, so nothing has to be exported in your shell.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PORT` | `8787` | Listen port |
-| `HOST` | `127.0.0.1` | Listen address. Set `0.0.0.0` to expose on the network |
+| `HOST` | `0.0.0.0` | Listen address: every interface. Set `127.0.0.1` for this host only |
 | `DATABASE` | `./data/deepai.db` | SQLite file |
 | `TRUST_PROXY` | unset | Set `1` behind a TLS proxy: trust `X-Forwarded-*` and set `Secure` cookies |
-| `FORGET_ACCOUNT_AFTER_DAYS` | `0` | Forget accounts nobody has used for this many days — see [Retention](#retention). `0` (the default) forgets nothing, so this has to be set deliberately |
+| `CALLBACK_LOGIN` | `0` | Set `1` to also offer DeepAI's browser sign-in, finishing at `/callback` — see [Signing in with `/callback`](#signing-in-with-callback) |
+| `FORGET_ACCOUNT_AFTER_DAYS` | `0` | Forget accounts nobody has used for this many days — see [Retention](#retention). `0` (the default) forgets nothing |
 | `LOG_REQUESTS` | `1` | Set `0` to silence per-request logging |
 | `PRICING_CACHE` | `./data/pricing.json` | Where the fetched price table is cached |
 
@@ -101,7 +130,40 @@ This is the RFC 8252 native-app pattern: the official DeepAI Code desktop app bi
 loopback. A browser on any other machine cannot open that address, and **no setting
 changes it** — which is why there is no `PUBLIC_URL` and no relay to configure.
 
-### The one route: copy the account JSON
+### Signing in with `/callback`
+
+Off unless `CALLBACK_LOGIN` is set, because DeepAI fixes the redirect host to `127.0.0.1`:
+
+```bash
+CALLBACK_LOGIN=1 npm start
+```
+
+The dashboard then offers **Use DeepAI's sign-in page**, which navigates to DeepAI as usual
+and comes back to `/callback` on this gateway. It completes only where that address reaches
+the gateway, which in practice means:
+
+- the browser runs on the gateway's own host, or
+- the port is forwarded to it, so `127.0.0.1:<port>` in the browser is this gateway:
+
+  ```sh
+  ssh -L 25912:127.0.0.1:8787 you@gateway-host
+  ```
+
+  then browse to `http://127.0.0.1:25912` and sign in.
+
+The port matters: DeepAI parses it as a plain integer, so the one it is given is the port
+the browser must reach. Behind a proxy that is the internal port rather than the public one,
+so use the forward from the browser's own machine.
+
+If the last page does not load — the usual case when the address cannot be reached — the
+card offers a field for pasting that page's address. The address is what authorises the
+completion: it carries the one-shot `code` and the 256-bit `state` this gateway generated,
+so a paste needs no session and nobody can finish somebody else's attempt.
+
+`/auth-callback` is served as an alias of `/callback`, because earlier builds advertised
+that path.
+
+### The default route: copy the account JSON
 
 The visitor signs in at `deepai.org` in their own browser — with a password, or with
 Google or Apple — and then reads the account JSON out of DeepAI's own API:
@@ -183,6 +245,33 @@ email from DeepAI's page rather than trying to derive it:
 | `GET /deepai_code/theos`, `GET /get_usage_summary` with the key | allowance only, no identity |
 | `GET /daily-time-sync/user/` — the endpoint DeepAI's own sign-in page uses to ask "who am I" — with the key | answers **201**, not 200, which that page reads as "not signed in" |
 | `POST /deepai_code/desktop_auth/exchange/` with a key instead of a code | `400 invalid code` |
+
+## Security
+
+What protects what, including the parts that are deliberately not protected.
+
+| Asset | How it is protected |
+| --- | --- |
+| Gateway keys (`sk-…`) | Only `sk-` + the first 8 hex characters and a **SHA-256 hash** are stored. The plaintext exists once, in the creation response. A stolen database does not yield a working gateway key. |
+| Dashboard session | A 32-byte random token; only its hash is stored. The cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` when `TRUST_PROXY=1`. It slides: it ends after 14 days of *idle* time. |
+| Accounts and usage | Every query is scoped to the session's account. Another account's key id answers `404`, and its usage reads empty — asserted by tests. |
+| The DeepAI key | **Stored recoverably**, because it is replayed upstream on every request. The database and its WAL are created owner-only (`0600`), the directory `0700`, and `npm run backup` writes `0600`. On a shared machine, that file *is* the account. |
+| SQL | Every statement is parameterised. The only interpolated fragments are fixed strings. |
+
+**There is no dashboard password.** Access *is* the DeepAI account, proven by a key only
+DeepAI could have issued. That is the whole authentication model, so:
+
+- **`HOST` defaults to `0.0.0.0`**, which makes the dashboard reachable by anyone who can
+  reach the port. Set `HOST=127.0.0.1` to keep it local, and put TLS and your own access
+  control in front of anything public.
+- **The sign-in route is unauthenticated and unthrottled** — it has to be, since it *is* the
+  way in — and a valid-looking paste makes the gateway issue up to three requests to DeepAI.
+  Put a rate limiter in front of `/api/login/profile` (and `/callback` when enabled) if the
+  gateway is exposed.
+- **Per-key limits are a check-then-act**, so a key can exceed its cap by sending concurrent
+  requests. Treat a key's limit as a guard against accidents, not against an adversary.
+
+Report a security problem by opening an issue, or privately if the repository offers it.
 
 ## Dashboard
 
@@ -598,7 +687,7 @@ answers are present.
 
 ### Brand marks
 
-`app-icon-512.png` and `app-icon-512-black.png` are the source artwork: one glyph in
+`assets/app-icon-512.png` and `assets/app-icon-512-black.png` are the source artwork: one glyph in
 white and black, on a transparent background. Because each disappears against the
 opposite background, the visible one is chosen per theme:
 
