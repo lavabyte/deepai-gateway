@@ -1858,6 +1858,61 @@ await checkAsync('a streaming failure is still framed as an event stream', async
 
 /* --------------------------------------------------- bugs found in review */
 
+await checkAsync('the text stays inside the characters a keyboard can reach', async () => {
+  /*
+   * Two rules that pull in opposite directions, and the line between them:
+   *
+   * Forbidden are the typographic tells of machine-written prose - the em dash, the
+   * ellipsis character, curly quotes around English words, arrows, non-breaking spaces and
+   * the multiplication sign. They are neither typeable nor needed.
+   *
+   * Allowed are the characters a language actually uses: the diacritics AltGr produces,
+   * and the punctuation of the languages this dashboard speaks - Spanish `<<` `>>` and the
+   * inverted question mark, the low-high quotation marks Polish and German use. Removing
+   * those would be correcting a language, not cleaning it.
+   *
+   * The flag emoji are the one deliberate exception: the language switcher shows a flag.
+   */
+  const { readFileSync, readdirSync, statSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const root = new URL('..', import.meta.url).pathname;
+
+  const TYPEABLE = new Set([...'~`1234567890!@#$%^&*()-=_+qwertyuiop[]\\{}|asdfghjkl:";\'zxcvbnm,./<>?QWERTYUIOPLKJHGFDSAZXCVBNM']);
+  const WHITESPACE = new Set([' ', '\t', '\n', '\r']);
+  // Punctuation that belongs to a language, so it stays.
+  const LANGUAGE_PUNCTUATION = new Set(['\u00ab', '\u00bb', '\u00bf', '\u00a1', '\u201e', '\u201c', '\u201d', '\u2018', '\u2019']);
+  const isFlag = (code) => code >= 0x1f1e6 && code <= 0x1f1ff;
+
+  const walk = (dir, out = []) => {
+    for (const entry of readdirSync(dir)) {
+      if (['node_modules', '.git', 'data', 'backups', 'assets'].includes(entry)) continue;
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) walk(full, out);
+      else if (!/\.(png|ico|jpg|jpeg|gif|webp)$/i.test(full)) out.push(full);
+    }
+    return out;
+  };
+
+  const offences = [];
+  for (const file of walk(root)) {
+    const text = readFileSync(file, 'utf8');
+    const lines = text.split('\n');
+    lines.forEach((line, index) => {
+      let column = 0;
+      for (const char of line) {
+        const code = char.codePointAt(0);
+        if (TYPEABLE.has(char) || WHITESPACE.has(char) || code < 0x80) { column += 1; continue; }
+        if (/\p{L}/u.test(char) || LANGUAGE_PUNCTUATION.has(char) || isFlag(code)) { column += 1; continue; }
+        if (offences.length < 20) {
+          offences.push(`${file.replace(root, '')}:${index + 1}:${column} ${JSON.stringify(char)} U+${code.toString(16).toUpperCase()}`);
+        }
+      }
+    });
+  }
+
+  assert.deepEqual(offences, [], 'characters outside the typeable set');
+});
+
 await checkAsync('the defaults a fresh clone gets are the documented ones', async () => {
   /*
    * A clone with no `.env` has to work and has to behave the way the README says. The
