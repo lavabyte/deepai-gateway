@@ -114,8 +114,30 @@ plain-HTTP localhost, where a `Secure` cookie would never be sent.
 
 ## Signing in
 
+The dashboard offers one field: **the account's API key**, from
+<https://deepai.org/dashboard/profile>. Paste it, press the button, and you are in.
+
+The key is the credential DeepAI validates, so nothing else is asked for. That is also why
+there is no name or email anywhere in the interface: a DeepAI key does not say who it
+belongs to, and an address a visitor types is a claim rather than evidence. The account is
+its key's fingerprint, so the same key always resolves to the same owner and no name can
+claim another's.
+
+**A key from that page is not automatically enabled for DeepAI Code.** If DeepAI refuses it
+for the Code lane the dashboard says so specifically, and the account JSON route below is
+the one that works then.
+
+### Signing in with the account JSON
+
+Behind *Other way: paste the account JSON* on the sign-in card, and the route to use when
+the profile key is not enabled for Code - or when the account was created with Google or
+Apple. It is the same key, taken from the account JSON DeepAI produces for a signed-in
+browser at <https://api.deepai.org/daily-time-sync/user/>. Only the key is read out of it.
+
+### Why the browser sign-in is off
+
 **DeepAI chooses the sign-in callback host, and it always chooses `127.0.0.1`.** That is
-why this gateway does not use DeepAI's browser sign-in at all:
+why this gateway does not use DeepAI's browser sign-in by default:
 
 - The sign-in request carries only `state` and `port`. DeepAI parses `port` as a plain
   TCP port - a full URL, a `host:port` pair, `0`, `-1` or an empty value are all rejected
@@ -163,7 +185,7 @@ so a paste needs no session and nobody can finish somebody else's attempt.
 `/auth-callback` is served as an alias of `/callback`, because earlier builds advertised
 that path.
 
-### The default route: copy the account JSON
+### Where the JSON route's steps come from
 
 The visitor signs in at `deepai.org` in their own browser - with a password, or with
 Google or Apple - and then reads the account JSON out of DeepAI's own API:
@@ -175,11 +197,13 @@ Google or Apple - and then reads the account JSON out of DeepAI's own API:
 
 That JSON carries both the account's `email` and its `userprofile.api_key` - the account
 key the Code lane accepts - so pressing **Log In** signs in with a key DeepAI has already
-issued, and names the account from DeepAI's own answer rather than from anything typed.
+issued. **Only the key is read out of it.** The email is not stored, not returned and not
+shown: it is a claim about ownership, and ownership comes from the key.
 
-It is the only route that works for a Google or Apple account without a tunnel: the page
-is rendered for a session the visitor already has, so nothing is typed from memory and
-nothing has to be trusted but the key, which DeepAI validates.
+It is the route that works for a Google or Apple account without a tunnel, and the one for
+a profile key DeepAI has not enabled for Code: the page is rendered for a session the
+visitor already has, so nothing is typed from memory and nothing has to be trusted but the
+key, which DeepAI validates.
 
 The hint about `OK` sits **between steps 1 and 2**, because it warns about what step 2
 will show and is useless once step 2 has been read. The list is split into two so it can,
@@ -264,12 +288,13 @@ DeepAI could have issued. That is the whole authentication model, so:
 - **`HOST` defaults to `0.0.0.0`**, which makes the dashboard reachable by anyone who can
   reach the port. Set `HOST=127.0.0.1` to keep it local, and put TLS and your own access
   control in front of anything public.
-- **The pasted account JSON is kept in the browser.** Signing in that way means fetching
-that JSON by hand, so the last one is saved to `localStorage` and the field is filled with
-it next time, including after signing out. It contains the account's **API key**, so it is
-readable by any script on this origin and by anyone who opens that browser profile: the
-sign-in card says so, offers **Clear it**, and **Forget this account** removes it. Use
-**Clear it** on a shared machine, and prefer a private window on one you do not control.
+- **The pasted key is kept in the browser.** Signing in means finding the account's key, so
+the last one is saved to `localStorage` and the field is filled with it next time, including
+after signing out. It is the account's **API key**, so it is readable by any script on this
+origin and by anyone who opens that browser profile: the sign-in card says so, offers
+**Clear it**, and **Forget this account** removes it. Use **Clear it** on a shared machine,
+and prefer a private window on one you do not control. A JSON blob left in that slot by an
+older version is ignored rather than offered as a key.
 
 **The sign-in route is unauthenticated and unthrottled** - it has to be, since it *is* the
   way in - and a valid-looking paste makes the gateway issue up to three requests to DeepAI.
@@ -601,7 +626,8 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/` | The dashboard |
-| `POST` | `/api/login/profile` | The only way in: the account JSON copied out of the visitor's own browser - see [Signing in](#signing-in) |
+| `POST` | `/api/login/key` | The way in: the account's API key - see [Signing in](#signing-in) |
+| `POST` | `/api/login/profile` | The fallback: the account JSON copied out of the visitor's own browser |
 | `GET` | `/logout` | Sign out, then redirect to `/` |
 | `GET` | `/api/account` | This session's account, allowance, default model, key quota |
 | `GET` | `/api/account/events` | That account's auth trail (login, logout, refresh, denied) |
@@ -791,9 +817,9 @@ and no external database. The only runtime dependency is Express.
   `/deepai_code/responses` and converted automatically.
 - The model catalog is fetched from `GET /deepai_code/models` and cached for ten
   minutes; an embedded snapshot keeps the gateway usable offline.
-- DeepAI's browser sign-in is **not** used: it always calls back to `127.0.0.1`, which
-  no setting can move. Sign-in is the account JSON copied out of DeepAI's own API page -
-  see [Signing in](#signing-in).
+- DeepAI's browser sign-in is **not** used by default: it always calls back to `127.0.0.1`,
+  which no setting can move. Sign-in is the account's API key, or the account JSON copied
+  out of DeepAI's own API page as a fallback - see [Signing in](#signing-in).
 
 ## Limits
 
@@ -801,7 +827,7 @@ and no external database. The only runtime dependency is Express.
 - At most 5 gateway keys per account.
 - The dashboard has no password of its own: authentication *is* the DeepAI account,
   proven by a key only DeepAI could have issued. Anyone who can reach the port and
-  paste their own account JSON gets their own account, isolated from the others.
+  paste their own key gets their own account, isolated from the others.
 - The Responses route has no stop-sequence field, so `stop` is dropped for
   `gpt-6-astra`.
 - Premier models require Credits balance on the DeepAI account; free models are

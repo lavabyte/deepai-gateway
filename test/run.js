@@ -739,8 +739,14 @@ await checkAsync('/ serves the dashboard shell and nothing else is browser-navig
       const gone = await fetch(`${base}${path}`, { redirect: 'manual' });
       assert.ok(gone.status !== 200, `${path} must no longer serve a sign-in page`);
     }
-    // The JSON endpoints behind it are gone too, and answer JSON rather than HTML.
-    for (const path of ['/api/login', '/api/login/key', '/api/login/password', '/api/login/complete', '/api/cancel-login']) {
+    /*
+     * The browser flow's JSON endpoints are gone too, and answer JSON rather than HTML.
+     *
+     * `/api/login/key` is deliberately not on this list any more: signing in with the
+     * account's own key is the route the dashboard offers first, so it is served rather
+     * than removed.
+     */
+    for (const path of ['/api/login', '/api/login/password', '/api/login/complete', '/api/cancel-login']) {
       const gone = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
       assert.equal(gone.status, 404, `${path} must be gone`);
     }
@@ -2019,12 +2025,15 @@ await checkAsync('amounts are converted in the browser, and stay in dollars when
   assert.ok(!/frankfurter/.test(server), 'and the gateway never contacts the rate feed');
 });
 
-await checkAsync('the pasted content is remembered and can be cleared', async () => {
+await checkAsync('the key is remembered and can be cleared', async () => {
   /*
-   * Signing in means fetching the account JSON from DeepAI by hand, so the browser keeps
-   * the last one and fills the field with it. It holds the account's API key, which is why
-   * the form says so out loud, offers to clear it, and why "Forget this account" clears it
-   * too while signing out deliberately does not.
+   * Signing in means finding the account's API key and pasting it, so the browser keeps the
+   * last one and fills the field with it next time. The key is the account's credential,
+   * which is why the form says where it is kept, offers to clear it, and why "Forget this
+   * account" clears it too while signing out deliberately does not.
+   *
+   * The slot used to hold the account JSON the fallback pastes, so a stored blob has to be
+   * ignored here rather than offered as if it were a key.
    */
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
@@ -2074,7 +2083,7 @@ await checkAsync('the pasted content is remembered and can be cleared', async ()
         if (String(url).includes('/locales/')) return localeResponse();
         return new Response(
           JSON.stringify(String(url).includes('/account')
-            ? { ok: true, signedIn: false, username: '', displayName: '', allowance: null, balanceLow: false,
+            ? { ok: true, signedIn: false, username: '', allowance: null, balanceLow: false,
                 keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false } }
             : { ok: true, models: [] }),
           { status: 200, headers: { 'content-type': 'application/json' } },
@@ -2091,46 +2100,52 @@ await checkAsync('the pasted content is remembered and can be cleared', async ()
     return { sandbox, nodes, stored };
   };
 
-  const pasted = '{"email":"milo@example.com","userprofile":{"api_key":"sk-secret"}}';
   const KEY = 'deepai-gateway-last-content';
+  const saved = 'sk-a-real-looking-key';
 
-  // --- A browser that has never signed in: an empty field, and nothing said about saving.
+  // --- A browser that has never signed in: an empty field, nothing said about saving.
   const fresh = await boot();
   const form = vm.runInContext('signInRoutes()', fresh.sandbox);
-  assert.ok(form.includes('id="profile-paste"'), 'the field is there');
-  assert.ok(!form.includes('sk-secret'), 'and it is empty');
+  assert.ok(form.includes('id="key-paste"'), 'the key field is there');
+  assert.ok(!form.includes(saved), 'and it is empty');
   assert.ok(!form.includes('content-saved'), 'nothing claims to be saved yet');
 
-  // --- Signing in remembers what was pasted, even when the attempt is refused.
-  // `signInRoutes()` returns markup rather than creating nodes, so the field is reached
-  // through the stub's element map, which creates it on demand.
-  vm.runInContext(`$('profile-paste').value = ${JSON.stringify(pasted)};`, fresh.sandbox);
-  fresh.sandbox.fetch = async () => new Response('{"ok":false,"error":"no"}', {
-    status: 401, headers: { 'content-type': 'application/json' },
-  });
-  await vm.runInContext('signInWithProfile()', fresh.sandbox);
-  assert.equal(fresh.stored.get(KEY), pasted, 'a refused attempt is still remembered');
+  // --- Signing in remembers the key, even when DeepAI refuses it.
+  vm.runInContext(`$('key-paste').value = ${JSON.stringify(saved)};`, fresh.sandbox);
+  fresh.sandbox.fetch = async (url) => (String(url).includes('/login/key')
+    ? new Response('{"ok":false,"error":"no"}', { status: 401, headers: { 'content-type': 'application/json' } })
+    : new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } }));
+  await vm.runInContext('signInWithKey()', fresh.sandbox);
+  assert.equal(fresh.stored.get(KEY), saved, 'a refused key is still remembered');
 
   // --- Reopening the page fills the field and says where it came from.
-  const reopened = await boot(new Map([[KEY, pasted]]));
+  const reopened = await boot(new Map([[KEY, saved]]));
   const filled = vm.runInContext('signInRoutes()', reopened.sandbox);
-  // Escaped into the textarea, so the JSON survives as text rather than as markup.
-  assert.ok(filled.includes('&quot;api_key&quot;'), 'the field is prefilled with the saved content');
+  assert.ok(filled.includes(`value="${saved}"`), 'the field is prefilled with the saved key');
   assert.ok(filled.includes('id="content-saved"'), 'and the form says it was saved');
-  const clearLabel = LOCALES.en['signin.contentForget'];
-  assert.ok(filled.includes(clearLabel), 'with a way to remove it');
+  assert.ok(filled.includes(LOCALES.en['signin.contentForget']), 'with a way to remove it');
+
+  // --- A stored account JSON belongs to the other route and is not offered as a key.
+  const blob = await boot(new Map([[KEY, '{"userprofile":{"api_key":"sk-inside"}}']]));
+  const offered = vm.runInContext('signInRoutes()', blob.sandbox);
+  // Read from the key input alone: the fallback card's placeholder mentions `userprofile`
+  // on purpose, so looking at the whole card would find the word and prove nothing.
+  const keyInput = /<input[^>]*id="key-paste"[^>]*>/.exec(offered)?.[0] ?? '';
+  assert.match(keyInput, /value=""/, 'the key field is offered empty');
+  assert.ok(!keyInput.includes('userprofile'), 'a saved JSON blob is not shown as a key');
+  assert.equal(vm.runInContext('lastKey()', blob.sandbox), '', 'and nothing is prefilled');
 
   // --- Clearing removes it from storage and from the field.
-  vm.runInContext('rememberContent(""); $("profile-paste").value = "";', reopened.sandbox);
+  vm.runInContext('rememberContent(""); $("key-paste").value = "";', reopened.sandbox);
   assert.equal(reopened.stored.has(KEY), false, 'clearing removes the stored copy');
-  assert.equal(vm.runInContext('lastContent()', reopened.sandbox), '', 'and nothing is left to prefill');
+  assert.equal(vm.runInContext('lastKey()', reopened.sandbox), '', 'and nothing is left to prefill');
 
   // --- A browser with storage disabled still renders the form.
   const noStorage = await boot();
   noStorage.sandbox.localStorage.getItem = () => { throw new Error('blocked'); };
   noStorage.sandbox.localStorage.setItem = () => { throw new Error('blocked'); };
-  assert.equal(vm.runInContext('lastContent()', noStorage.sandbox), '', 'a blocked read yields nothing');
-  assert.equal(vm.runInContext('rememberContent("x"), lastContent()', noStorage.sandbox), '',
+  assert.equal(vm.runInContext('lastKey()', noStorage.sandbox), '', 'a blocked read yields nothing');
+  assert.equal(vm.runInContext('rememberContent("x"), lastKey()', noStorage.sandbox), '',
     'and a blocked write does not throw');
 });
 
@@ -3090,16 +3105,15 @@ await checkAsync('the project presents one consistent identity', async () => {
  * `POST /api/login/complete`. These checks pin both halves of that.
  */
 
-await checkAsync('the sign-in card gives one instruction, and it is the one that works', async () => {
+await checkAsync('the sign-in card puts the key first and keeps the JSON behind a disclosure', async () => {
   /*
-   * Two earlier versions of this instruction were wrong, and both were taught by trying
-   * them: a console command returns `'OK'` unless the console is on DeepAI's own origin,
-   * because the API answers `201 OK` to an unauthenticated request; and the steps sat
-   * behind a click, so the instructions a visitor needed were the ones they could not
-   * see.
+   * The key field is the whole sign-in: the credential DeepAI validates, one line to paste,
+   * nothing to look up. The account JSON is still here because a key DeepAI has not enabled
+   * for DeepAI Code will be refused, and the JSON from the Code lane is what works then -
+   * so it sits behind a disclosure rather than being removed.
    *
-   * What ships now is a page they open, a tab they click and text they copy - and the
-   * `OK` case is called out, because that is what a signed-out visitor will see.
+   * The JSON instructions are unchanged, down to the blue note between the two steps and
+   * the exact sentence about `OK`: that wording was arrived at by using it.
    */
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
@@ -3134,10 +3148,7 @@ await checkAsync('the sign-in card gives one instruction, and it is the one that
       navigator: { language: 'en-GB', languages: ['en-GB'] },
       fetch: async (url) => {
         if (String(url).includes('/locales/')) return localeResponse();
-        return new Response(
-          JSON.stringify(String(url).includes('/account') ? account : { ok: true, models: [] }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
+        return new Response(JSON.stringify(account), { status: 200, headers: { 'content-type': 'application/json' } });
       },
       setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
       console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
@@ -3151,54 +3162,64 @@ await checkAsync('the sign-in card gives one instruction, and it is the one that
   };
 
   const signedOut = {
-    ok: true, signedIn: false, username: '', displayName: '',
+    ok: true, signedIn: false, username: '',
     allowance: null, balanceLow: false,
     keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false },
   };
   const html = await render(signedOut);
 
-  // The three steps, in order, with the two addresses as real links.
-  const step = (n) => new RegExp(`<li>[\\s\\S]{0,400}?</li>`, 'g');
-  assert.match(html, /Go to <a href="https:\/\/deepai\.org"[^>]*>https:\/\/deepai\.org<\/a>\s*and log in or register/,
+  // --- The key route is the visible one, and it is not behind anything.
+  assert.match(html, /<a href="https:\/\/deepai\.org\/dashboard\/profile"[^>]*>https:\/\/deepai\.org\/dashboard\/profile<\/a>/,
+    'step 1 links the profile page the key is on');
+  assert.match(html, /Get your api key from[\s\S]{0,200}?dashboard\/profile[\s\S]{0,80}?<\/li>\s*<li>Paste it below:<\/li>/,
+    'and step 2 says to paste it below');
+  assert.match(html, /<input class="input input--key" id="key-paste" type="text"/,
+    'the field is a single line');
+  assert.match(html, /id="login-with-key"/, 'with the control that submits it');
+
+  const detailsAt = html.indexOf('<details');
+  const keyAt = html.indexOf('id="key-paste"');
+  assert.ok(detailsAt !== -1, 'the fallback is a disclosure');
+  assert.ok(keyAt !== -1 && keyAt < detailsAt,
+    'the key field comes before it, so it is the route that is read first');
+
+  // --- The JSON route: same wording as before, now inside the disclosure.
+  const fallback = html.slice(detailsAt, html.indexOf('</details>', detailsAt));
+  assert.match(fallback, /id="profile-paste"/, 'the JSON form is inside the disclosure');
+  assert.match(fallback, /Go to <a href="https:\/\/deepai\.org"[^>]*>https:\/\/deepai\.org<\/a>\s*and log in or register/,
     'step 1 sends them to DeepAI and says what to do there');
-  assert.match(html, /<a href="https:\/\/api\.deepai\.org\/daily-time-sync\/user\/"[^>]*>https:\/\/api\.deepai\.org\/daily-time-sync\/user\/<\/a>/,
+  assert.match(fallback, /<a href="https:\/\/api\.deepai\.org\/daily-time-sync\/user\/"[^>]*>https:\/\/api\.deepai\.org\/daily-time-sync\/user\/<\/a>/,
     'step 2 links the API page itself');
-  assert.match(html, /<strong>Raw Data<\/strong> tab/, 'step 2 names the tab to click');
-  assert.match(html, /Copy the <strong>Content<\/strong> and paste it below/, 'step 3 says what to copy');
+  assert.match(fallback, /<strong>Raw Data<\/strong> tab/, 'step 2 names the tab to click');
+  assert.match(fallback, /Copy the <strong>Content<\/strong> and paste it below/, 'step 3 says what to copy');
 
   /*
    * The hint belongs between the two steps it concerns: it warns about what step 2 will
-   * show, so it is useless after step 2 has already been read. Asserted by position in
-   * the rendered markup, since that is the only thing that decides what is read first.
+   * show, so it is useless after step 2 has been read. Asserted by position in the
+   * rendered markup, since that is the only thing that decides what is read first.
    */
-  const hintAt = html.indexOf('note--info');
-  const step2At = html.indexOf('daily-time-sync/user/');
+  const hintAt = fallback.indexOf('note--info');
+  const step2At = fallback.indexOf('daily-time-sync/user/');
   assert.ok(hintAt !== -1, 'the "plain OK" hint is present');
   assert.ok(hintAt < step2At, 'the hint must come before step 2');
-  assert.ok(html.indexOf('log in or register') < hintAt, 'and after step 1');
+  assert.ok(fallback.indexOf('log in or register') < hintAt, 'and after step 1');
   // The split list has to keep counting from 2, or the steps read 1, 1, 2.
-  assert.match(html, /<ol class="step__list mt-3" start="2">/, 'the second list resumes at 2');
+  assert.match(fallback, /<ol class="step__list mt-3" start="2">/, 'the second list resumes at 2');
 
   // The signed-out case is called out in blue, because `OK` is what they will see.
-  assert.match(html, /note--info/, 'the "plain OK" hint is an info note, not an error');
+  assert.match(fallback, /note--info/, 'the "plain OK" hint is an info note, not an error');
   assert.match(
-    html,
+    fallback,
     /If you get plain <code>OK<\/code> in step 2, make sure you are logged in\./,
     'the hint names the symptom and the check, in one line',
   );
 
-  // One field, sized for JSON, and the control that submits it.
-  assert.match(html, /<textarea class="textarea" id="profile-paste" rows="7"/);
-  assert.match(html, /id="login-with-profile"/);
-
-  // The removed routes must be gone from the screen entirely.
-  for (const gone of ['id="password-form"', 'id="api-key"', 'id="login-tabs"', 'password']) {
+  // --- Neither route, and no removed one, may be missing or resurrected.
+  assert.match(fallback, /<textarea class="textarea" id="profile-paste" rows="7"/);
+  assert.match(fallback, /id="login-with-profile"/);
+  for (const gone of ['id="password-form"', 'id="api-key"', 'id="login-tabs"', 'console.log', 'allow pasting']) {
     assert.ok(!html.includes(gone), `the removed route must not remain: ${gone}`);
   }
-  // And no command to run in a console, which is the version that printed 'OK'.
-  assert.ok(!html.includes('console.log'), 'no console command: it returns OK off-origin');
-  assert.ok(!html.includes('allow pasting'), 'and no paste warning to go with it');
-  assert.ok(!html.includes('${'), 'no unrendered template expression');
 });
 
 await checkAsync('both signed-out screens offer the one route', async () => {
@@ -3443,13 +3464,16 @@ await checkAsync('browser sign-in exists only when a deployment asks for it', as
   }
 });
 
-await checkAsync('a name from the database cannot become markup', async () => {
+await checkAsync('no name from the database can reach the page', async () => {
   /*
-   * The display name comes from the DeepAI JSON a visitor pastes, is stored, and is shown
-   * on the account card. It was interpolated into `innerHTML` unescaped, so a name
-   * containing markup executed on every visit to the overview until the account was
-   * forgotten. Two halves are checked: the dashboard escapes it, and the server stores it
-   * as plain text so the database never holds a fragment.
+   * The display name used to be shown twice - in the top bar and on the account card - and
+   * it came from the email in the pasted account JSON. That was a stored injection sink
+   * when the escaping was wrong, and a claim about ownership when it was not: nothing
+   * confirms an address a visitor typed.
+   *
+   * The field is gone now, at both ends. The server does not read it out of the paste and
+   * does not return it; the card has no place to put it. This checks both halves, because
+   * either one alone would leave the other free to bring it back.
    */
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
@@ -3478,10 +3502,12 @@ await checkAsync('a name from the database cannot become markup', async () => {
     'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button',
     'locale-button', 'locale-menu', 'locale-flag', 'currency-button', 'currency-menu', 'currency-sign']) nodes.set(id, node());
 
+  // A payload with every name-shaped field populated with markup, in case one is read.
   const account = {
-    ok: true, signedIn: true, username: 'key-abc', displayName: markup,
-    allowance: null, balanceLow: false,
+    ok: true, signedIn: true, username: 'key-abc', displayName: markup, name: markup, email: markup,
+    allowance: { balance: '4.5', granted: '5.0' }, balanceLow: false,
     keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false },
+    isPro: true,
   };
   const sandbox = {
     document: {
@@ -3509,11 +3535,22 @@ await checkAsync('a name from the database cannot become markup', async () => {
   new vm.Script(app, { filename: 'app.js' }).runInContext(sandbox);
   await new Promise((resolve) => setTimeout(resolve, 60));
 
+  // The card renders no name, even when the payload offers three of them.
   const card = vm.runInContext('accountCard()', sandbox);
-  assert.ok(!card.includes('<img src=x'), 'the name must not survive as a tag');
-  assert.ok(card.includes('&lt;img'), 'it is shown as text, escaped');
+  assert.ok(!card.includes('<img src=x'), 'nothing from the payload becomes a tag');
+  assert.ok(!card.includes('&lt;img'), 'and nothing is echoed as escaped text either');
+  assert.ok(!card.includes(markup), 'the name is not shown at all');
+  assert.ok(card.includes('Pro'), 'though the Pro marker still is');
+  assert.ok(!/Logged in as/i.test(card), 'the line that carried the name is gone');
 
-  // And the server stores it as text, so the database never holds the fragment either.
+  // The top bar shows the balance and nothing beside it.
+  vm.runInContext('renderAccountBadge()', sandbox);
+  const badge = nodes.get('account-badge-text').textContent;
+  assert.ok(badge.includes('4.5'), 'the badge shows the balance');
+  assert.ok(!badge.includes('<') && !badge.includes('key-abc'),
+    'and neither markup nor the owner fingerprint');
+
+  // The server does not read the email out of the paste, so it cannot return it either.
   const { openDatabase } = await import('../src/db.js');
   const { getSetting } = await import('../src/store.js');
   const fresh = openDatabase(':memory:');
@@ -3534,16 +3571,22 @@ await checkAsync('a name from the database cannot become markup', async () => {
     const response = await realFetch(`${base}/api/login/profile`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text: JSON.stringify({ email: `a@b.co${'\u0007'}`, userprofile: { api_key: 'sk-xss' } }) }),
+      body: JSON.stringify({ text: JSON.stringify({ email: `person@example.test${'\u0007'}`, userprofile: { api_key: 'sk-noname' } }) }),
     });
     assert.equal(response.status, 200);
-    const stored = getSetting(fresh, 'key-' + 'x', 'display_name', undefined);
-    // The derived owner's name must contain no control character.
+    const cookie = String(response.headers.get('set-cookie') ?? '').split(';')[0];
+    const payload = await realFetch(`${base}/api/account`, { headers: { cookie } }).then((r) => r.json());
+    for (const field of ['displayName', 'email', 'name']) {
+      assert.equal(payload[field], undefined, `the account payload must not carry ${field}`);
+    }
+    assert.ok(!JSON.stringify(payload).includes('person@example.test'),
+      'the pasted address appears nowhere in what the dashboard is told');
+
+    // And nothing name-shaped was written to the database either.
     const owners = fresh.prepare('SELECT username FROM accounts').all();
     assert.equal(owners.length, 1);
-    const name = getSetting(fresh, owners[0].username, 'display_name', '');
-    assert.ok(!/[\u0000-\u001f\u007f]/.test(name), 'a control character must not be stored');
-    void stored;
+    assert.equal(getSetting(fresh, owners[0].username, 'display_name', undefined), undefined,
+      'no display_name setting is written');
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));
@@ -4124,9 +4167,13 @@ await checkAsync('the pasted console output is read forgivingly', async () => {
 
 await checkAsync('an account with no password signs in by pasting its console output', async () => {
   /*
-   * The route for Google and Apple: their sign-in happens in the visitor's browser, and
-   * the account JSON DeepAI produced for that browser is read back out with one command.
-   * It carries both the key and the account's own email, so nothing is typed from memory.
+   * The fallback route, and the one for a Google or Apple account whose profile key DeepAI
+   * has not enabled for Code: their sign-in happens in their browser, and the account JSON
+   * DeepAI produced for that browser is read back out with one command.
+   *
+   * Only the key is taken from it. The email it also carries is not stored, not returned
+   * and not shown - the account is the key's fingerprint, and a pasted address is a claim
+   * about ownership rather than evidence of it.
    */
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
@@ -4169,7 +4216,7 @@ await checkAsync('an account with no password signs in by pasting its console ou
     }
     assert.equal(listAccounts(fresh).length, 0);
 
-    // The real paste: key and email both come out of it.
+    // The real paste: the key comes out of it, and nothing else does.
     const done = await post({
       text: JSON.stringify({
         pk: 9726455,
@@ -4186,9 +4233,10 @@ await checkAsync('an account with no password signs in by pasting its console ou
     const cookie = String(done.headers.get('set-cookie') ?? '').split(';')[0];
     const account = await http(`${base}/api/account`, { headers: { cookie } }).then((r) => r.json());
     assert.equal(account.signedIn, true);
-    // The name is the account's own, taken from what DeepAI returned for that browser.
-    assert.equal(account.displayName, 'kontomilosz350@gmail.com');
     assert.equal(account.allowance?.balance, '9.0');
+    // The email in the paste is ignored: no field carries it, under any name.
+    assert.equal(account.displayName, undefined, 'the account has no name to show');
+    assert.ok(!doneText.includes('kontomilosz350'), 'and the address is not echoed back either');
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));
@@ -4262,9 +4310,101 @@ await checkAsync('the same DeepAI key never becomes two accounts', async () => {
 
     const cookie = String(res.headers.get('set-cookie') ?? '').split(';')[0];
     const account = await http(`${base}/api/account`, { headers: { cookie } }).then((r) => r.json());
-    // The owner stays the real username, and the shown name is the email.
+    // The owner stays the real username, and no name is attached to it: two different
+    // emails pasted with one key cannot label the same account two ways.
     assert.equal(account.username, 'kontomilosz350');
-    assert.equal(account.displayName, 'milo@example.com');
+    assert.equal(account.displayName, undefined);
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('the account key alone is a complete sign-in', async () => {
+  /*
+   * The shortest route, and the one the dashboard offers first: `deepai.org/dashboard/profile`
+   * shows a key, the key is what DeepAI validates, and nothing else is asked for - no email,
+   * no name, no JSON.
+   *
+   * The failure worth separating is `not-for-code`: DeepAI issues keys for its model API that
+   * are not enabled for DeepAI Code, and that visitor needs to be told which of the two they
+   * have rather than that their key is wrong.
+   */
+  const { usernameForKey } = await import('../src/deepai/account.js');
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const realFetch = globalThis.fetch;
+  const http = (...args) => realFetch(...args);
+
+  // DeepAI's two lanes: the Code lane decides, and the model API answers separately.
+  let codeLane = 'accept';
+  globalThis.fetch = async (url, options) => {
+    const target = String(url);
+    const key = options?.headers?.['Api-Key'];
+    const json = (body, status = 200) => new Response(JSON.stringify(body),
+      { status, headers: { 'content-type': 'application/json' } });
+    if (target.endsWith('/deepai_code/theos')) {
+      if (codeLane === 'accept' && key === 'sk-code-enabled') {
+        return json({ enabled: true, balance: '7.5', granted: '10.0', refresh_at: null });
+      }
+      return json({ err: 'Invalid Authentication' }, 401);
+    }
+    if (target.endsWith('/get_usage_summary')) {
+      return json({ is_authenticated: key === 'sk-model-api-only' });
+    }
+    return json({});
+  };
+
+  const post = (body) => http(`${base}/api/login/key`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+
+  try {
+    // Nothing to sign in with.
+    for (const body of [{}, { key: '' }, { key: '   ' }]) {
+      const empty = await post(body);
+      assert.equal(empty.status, 400, `${JSON.stringify(body)} must be refused`);
+      assert.equal((await empty.json()).code, 'empty');
+    }
+    assert.equal(listAccounts(fresh).length, 0, 'and no account is created');
+
+    // A key for the model API but not for Code: the one case that needs its own advice.
+    const foreign = await post({ key: 'sk-model-api-only' });
+    assert.equal(foreign.status, 403);
+    assert.equal((await foreign.json()).code, 'not-for-code');
+
+    // A key DeepAI does not know at all.
+    const wrong = await post({ key: 'sk-nothing-like-a-key' });
+    assert.equal(wrong.status, 401);
+    assert.equal((await wrong.json()).code, 'rejected');
+
+    // The real thing.
+    const done = await post({ key: 'sk-code-enabled' });
+    const doneText = await done.text();
+    assert.equal(done.status, 200, doneText);
+    const body = JSON.parse(doneText);
+    assert.equal(body.username, usernameForKey('sk-code-enabled'), 'the owner is the key fingerprint');
+    assert.ok(!doneText.includes('sk-code-enabled'), 'and the key is never echoed back');
+
+    const cookie = String(done.headers.get('set-cookie') ?? '').split(';')[0];
+    assert.match(cookie, /deepai_gateway_session=/, 'a session is minted');
+    const account = await http(`${base}/api/account`, { headers: { cookie } }).then((r) => r.json());
+    assert.equal(account.signedIn, true);
+    assert.equal(account.allowance?.balance, '7.5', 'the allowance read during sign-in is kept');
+    // Nothing about a name: there was no field to fill and nowhere to put one.
+    assert.equal(account.displayName, undefined);
+
+    // Whitespace around a pasted key is not part of it.
+    const padded = await post({ key: '  sk-code-enabled  ' });
+    assert.equal(padded.status, 200, 'a key with stray spaces still signs in');
+
+    // Signing in twice with one key is one account.
+    assert.equal(listAccounts(fresh).length, 1, 'one key is one account');
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));

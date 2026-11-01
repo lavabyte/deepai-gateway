@@ -314,6 +314,40 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
   background-position: calc(100% - 14px) 14px, calc(100% - 9px) 14px;
   background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
 }
+/*
+ * A button that reads as a link, for the small in-sentence actions - "Clear it" beside the
+ * field it clears. It had no rule of its own, so it rendered as a default browser button:
+ * grey, boxed, and nothing like the hint it sits inside.
+ */
+.linklike {
+  padding: 0; border: 0; background: none;
+  font: inherit; color: var(--link); cursor: pointer;
+  text-decoration: underline; text-underline-offset: 2px;
+}
+.linklike:hover { color: var(--ink); }
+.linklike:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 2px; }
+
+/* An API key is read character by character, so it is set in the mono face. */
+.input--key { font-family: var(--mono); letter-spacing: .01em; }
+
+/*
+ * The route kept behind a disclosure: the account JSON form is the fallback for a key
+ * DeepAI has not enabled for Code, so it should be out of the way without being hidden.
+ */
+.fallback > summary {
+  display: flex; align-items: center; gap: 7px;
+  padding: 4px 0; cursor: pointer; list-style: none;
+  font-size: 12.5px; color: var(--text-2);
+}
+.fallback > summary::-webkit-details-marker { display: none; }
+.fallback > summary::before {
+  content: '+'; width: 14px; text-align: center;
+  font: 500 13px/1 var(--mono); color: var(--text-3);
+}
+.fallback[open] > summary::before { content: '-'; }
+.fallback > summary:hover { color: var(--ink); }
+.fallback > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 2px; }
+
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field__label { font-size: 12px; font-weight: 500; color: var(--text-2); }
 .field__hint { font-size: 11.5px; color: var(--text-3); }

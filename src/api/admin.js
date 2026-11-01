@@ -134,10 +134,6 @@ export function adminRouter(db, runtime) {
     res.json({
       signedIn: account !== undefined,
       username: view?.username ?? '',
-      // The name to show: the email given at key sign-in, or the DeepAI username
-      // the browser sign-in returned. Never the owner fingerprint unless there is
-      // nothing else.
-      displayName: account === undefined ? '' : getSetting(db, account.username, 'display_name', ''),
       isPro: view?.isPro ?? false,
       allowance: view?.allowance ?? null,
       signedInSince: view?.signedInSince ?? null,
@@ -165,15 +161,15 @@ export function adminRouter(db, runtime) {
   /**
    * Turn a DeepAI key into a session.
    *
-   * The key arrives inside the account JSON its owner copied out of their browser, so
-   * DeepAI has already issued it; this validates it, resolves the owner and mints the
-   * cookie.
+   * The key is the credential DeepAI validates, so DeepAI has already issued it; this
+   * checks it, resolves the owner and mints the cookie. Nothing else is collected: the
+   * account is the key's fingerprint, and no name or email is stored or shown.
    *
    * @param {import('express').Response} res
-   * @param {{key: string, displayName?: string}} input
+   * @param {{key: string}} input
    * @returns {Promise<void>} always sends the response.
    */
-  const signInWithKey = async (res, { key, displayName }) => {
+  const signInWithKey = async (res, { key }) => {
     let check;
     try {
       check = await checkPastedKey(key, AbortSignal.timeout(20_000));
@@ -204,19 +200,6 @@ export function adminRouter(db, runtime) {
       isPro: check.isPro,
     }, { secure: runtime.trustProxy === true });
 
-    // The name to show, kept as a setting so `accounts.username` stays the derived
-    // owner it has to be.
-    /*
-     * The name is displayed in the dashboard, so it is stored as plain text: a control
-     * character or a markup fragment is not part of an email address, and anything stored
-     * here would be rendered on every visit until the account is forgotten. The dashboard
-     * escapes it as well - this is the half that keeps the value honest in the database.
-     */
-    if (typeof displayName === 'string') {
-      const clean = displayName.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 254);
-      if (clean !== '') setSetting(db, username, 'display_name', clean);
-    }
-
     // Persist the allowance just read, so the badge shows a balance immediately
     // rather than waiting for the background refresh.
     saveAllowance(db, username, check.allowance);
@@ -227,13 +210,31 @@ export function adminRouter(db, runtime) {
   };
 
   /**
+   * Sign in with the account's API key alone.
+   *
+   * The key is the credential DeepAI validates, so nothing else is needed: no email, no
+   * name, no JSON. `deepai.org/dashboard/profile` shows it. A key that DeepAI issues for
+   * its model API but has not enabled for DeepAI Code is refused with `not-for-code`, which
+   * is the one failure worth separating from a wrong key.
+   */
+  router.post('/login/key', async (req, res) => {
+    const key = typeof req.body?.key === 'string' ? req.body.key.trim() : '';
+    if (key === '') {
+      return res.status(400).json({ ok: false, error: KEY_LOGIN_FAILURES.empty[1], code: 'empty' });
+    }
+    if (key.length > 4096) {
+      return res.status(400).json({ ok: false, error: KEY_LOGIN_FAILURES['too-long'][1], code: 'too-long' });
+    }
+    return signInWithKey(res, { key });
+  });
+
+  /**
    * Sign in with the account details copied out of the visitor's own browser.
    *
-   * The one route that works for a Google or Apple account without a tunnel: their
-   * sign-in happens in their browser as usual, and the console command hands back the
-   * account JSON DeepAI itself produced - which carries both the API key and the
-   * account's own email. Nothing is typed from memory and nothing has to be trusted
-   * but the key, which DeepAI validates.
+   * The fallback for an account whose profile key DeepAI has not enabled for DeepAI Code,
+   * and the one route that works for a Google or Apple account without a tunnel: their
+   * sign-in happens in their browser as usual, and the page hands back the account JSON
+   * DeepAI itself produced, which carries the key the Code lane accepts.
    */
   router.post('/login/profile', async (req, res) => {
     const text = typeof req.body?.text === 'string' ? req.body.text : '';
@@ -243,7 +244,7 @@ export function adminRouter(db, runtime) {
       runtime.log?.(`profile sign-in refused: ${parsed.reason}`);
       return res.status(status).json({ ok: false, error: message, code: parsed.reason });
     }
-    return signInWithKey(res, { key: parsed.apiKey, displayName: parsed.email });
+    return signInWithKey(res, { key: parsed.apiKey });
   });
 
   /**

@@ -284,6 +284,90 @@ function isAuthFailure(error) {
  * and a link the visitor had to click to reveal these steps meant the instructions they
  * needed were the ones they could not see.
  */
+function keyPasteHelp(prefix = '') {
+  return `
+    <section class="step" id="${prefix}key-step">
+      <ol class="step__list">
+        <li>
+          ${t('key.step1')}
+          <a href="https://deepai.org/dashboard/profile" target="_blank" rel="noreferrer noopener">https://deepai.org/dashboard/profile</a>
+        </li>
+        <li>${t('key.step2')}</li>
+      </ol>
+
+      <div class="field mt-3">
+        <input class="input input--key" id="${prefix}key-paste" type="text" spellcheck="false"
+          autocomplete="off" autocapitalize="off" placeholder="sk-..." value="${esc(lastKey())}">
+        <div class="field__hint">${t('key.hint')}</div>
+        ${lastKey() === '' ? '' : `
+          <div class="field__hint" id="${prefix}content-saved">
+            ${t('signin.contentSaved')}
+            <button class="linklike" id="${prefix}content-forget" type="button">${t('signin.contentForget')}</button>
+          </div>`}
+      </div>
+      <div class="row mt-3">
+        <button class="btn btn--primary" id="${prefix}login-with-key" type="button">${t('common.logIn')}</button>
+      </div>
+    </section>`;
+}
+
+/**
+ * The remembered key, for prefilling the field.
+ *
+ * The same slot used to hold the account JSON the fallback card pastes, and a saved blob
+ * would be offered as if it were a key and fail for no visible reason. Anything that looks
+ * like that JSON is ignored rather than shown.
+ *
+ * @returns {string}
+ */
+function lastKey() {
+  const saved = lastContent();
+  return saved.trimStart().startsWith('{') ? '' : saved;
+}
+
+/**
+ * Sign in with the account's API key.
+ *
+ * The key is the credential DeepAI validates, so this is the whole sign-in: no JSON, no
+ * email, nothing to look up. The field is cleared once the key has been accepted.
+ */
+async function signInWithKey() {
+  const field = $('key-paste');
+  const key = field?.value?.trim() ?? '';
+  if (key === '') {
+    toast(t('key.pasteFirst'), 'error');
+    field?.focus();
+    return;
+  }
+  // Saved before the request: a key DeepAI refuses for the Code lane is still the key this
+  // visitor has, and retyping it is the last thing they should have to do.
+  rememberContent(key);
+
+  const button = $('login-with-key');
+  const label = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = t('signin.signingIn');
+  }
+  try {
+    await api('/login/key', { method: 'POST', body: { key } });
+    // Cleared from the page: it is stored on the server, and leaving it in the DOM leaves
+    // it in reach of anything that reads the document.
+    if (field) field.value = '';
+    toast(t('signin.loggedIn'));
+    await loadAccount();
+    await render();
+  } catch (error) {
+    toast(String(error.message ?? error), 'error');
+    if (button) {
+      button.disabled = false;
+      button.textContent = label ?? t('common.logIn');
+    }
+    field?.focus();
+    field?.select();
+  }
+}
+
 function profilePasteHelp(prefix = '') {
   return `
     <section class="step" id="${prefix}profile-step">
@@ -314,15 +398,10 @@ function profilePasteHelp(prefix = '') {
       <div class="field mt-3">
         <label class="field__label" for="${prefix}profile-paste">Content</label>
         <textarea class="textarea" id="${prefix}profile-paste" rows="7" spellcheck="false" autocomplete="off"
-          placeholder='{"pk": ..., "username": "...", "email": "...", "userprofile": {"api_key": "..."}}'>${esc(lastContent())}</textarea>
+          placeholder='{"pk": ..., "username": "...", "email": "...", "userprofile": {"api_key": "..."}}'></textarea>
         <div class="field__hint">
           ${t('signin.contentHint')}
         </div>
-        ${lastContent() === '' ? '' : `
-          <div class="field__hint" id="${prefix}content-saved">
-            ${t('signin.contentSaved')}
-            <button class="linklike" id="${prefix}content-forget" type="button">${t('signin.contentForget')}</button>
-          </div>`}
       </div>
       <div class="row mt-3"><button class="btn btn--primary" id="${prefix}login-with-profile" type="button">${t('common.logIn')}</button></div>
     </section>`;
@@ -398,7 +477,11 @@ async function signInWithProfile() {
  * @returns {string} markup containing the pasted-JSON form.
  */
 function signInRoutes(prefix = '') {
-  return `<div class="mt-3">${profilePasteHelp(prefix)}</div>`
+  return `<div class="mt-3">${keyPasteHelp(prefix)}</div>`
+    + `<details class="fallback mt-3">
+        <summary>${t('signin.otherWay')}</summary>
+        <div class="mt-3">${profilePasteHelp(prefix)}</div>
+      </details>`
     + (state.account?.callbackLogin === true ? browserSignIn(prefix) : '');
 }
 
@@ -494,6 +577,14 @@ async function finishBrowserLogin(prefix = '') {
  */
 function wireSignInForms(prefix = '') {
   const id = (name) => $(`${prefix}${name}`);
+  id('login-with-key')?.addEventListener('click', () => void signInWithKey(prefix));
+  // Enter in a one-line field signs in, which is what a one-line field invites.
+  id('key-paste')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void signInWithKey();
+    }
+  });
   id('login-with-profile')?.addEventListener('click', () => void signInWithProfile(prefix));
   id('content-forget')?.addEventListener('click', () => {
     rememberContent('');
@@ -1201,24 +1292,6 @@ async function setCurrency(code) {
 }
 
 /**
- * What to call the signed-in account.
- *
- * `displayName` is the visitor's own name for the account - the email they gave
- * when signing in with a key, or the DeepAI username the sign-in returned. The
- * fallback is the owner id, which is a key fingerprint and only ever shown when
- * nothing better is known.
- *
- * @param {object|undefined} account
- * @returns {string}
- */
-function accountName(account) {
-  const display = typeof account?.displayName === 'string' ? account.displayName.trim() : '';
-  if (display !== '') return display;
-  const username = typeof account?.username === 'string' ? account.username.trim() : '';
-  return username !== '' ? username : 'DeepAI user';
-}
-
-/**
  * Render the account pill and the single auth button in the top bar.
  *
  * One control, two states: "Log in" while logged out, a filled red
@@ -1246,10 +1319,12 @@ function renderAccountBadge() {
   button.hidden = !account.signedIn;
   if (account.signedIn) {
     badge.className = account.balanceLow ? 'badge badge--amber' : 'badge badge--green';
+    // The balance and nothing else. The account is identified by the key it was signed in
+    // with, which the visitor already knows, so a name here only repeated what they typed.
     const balance = account.allowance?.balance;
     text.textContent = balance
-      ? `${accountName(account)}, ${t('common.creditsAmount', { amount: balance })}`
-      : accountName(account);
+      ? t('common.creditsAmount', { amount: balance })
+      : t('account.credits');
   } else {
     badge.className = 'badge badge--red';
     text.textContent = t('common.loggedOut');
@@ -1417,7 +1492,7 @@ function accountCard() {
       <div class="row row--between">
         <div>
           <div class="card__title">${t('account.title')}</div>
-          <div class="card__sub">${t('account.loggedInAs', { name: esc(accountName(account)) })}${account.isPro ? t('account.pro') : ''}</div>
+          ${account.isPro ? `<div class="card__sub">${t('account.pro')}</div>` : ''}
         </div>
         <span class="badge ${account.balanceLow ? 'badge--amber' : 'badge--green'}"><span class="dot"></span>${account.balanceLow ? t('account.lowBalance') : t('account.active')}</span>
       </div>
@@ -1567,11 +1642,10 @@ function wireAccountCard(rerender) {
 
   // Removing the account is destructive, so it gets its own confirm step.
   $('forget-account')?.addEventListener('click', async () => {
-    const username = accountName(state.account);
     const confirmed = await confirmAction({
       title: t('account.removeTitle'),
       lines: [
-        t('account.removeLine1', { name: username }),
+        t('account.removeLine1'),
         t('account.removeLine2'),
         t('account.removeLine3'),
       ],
