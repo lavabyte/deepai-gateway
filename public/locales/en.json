@@ -121,7 +121,7 @@
   "home.title": "Overview",
   "home.useIt": "Use it",
   "home.useItSub": "Point any OpenAI client at this gateway.",
-  "key.hint": "The key is kept on this server and sent to DeepAI to serve your requests.",
+  "key.hint": "It looks like xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx. The key is kept on this server and sent to DeepAI to serve your requests.",
   "key.pasteFirst": "Paste your API key first.",
   "key.step1": "Get your api key from",
   "key.step2": "Paste it below:",

@@ -121,7 +121,7 @@
   "home.title": "Resumen",
   "home.useIt": "Úsalo",
   "home.useItSub": "Apunta cualquier cliente de OpenAI a este gateway.",
-  "key.hint": "La clave se guarda en este servidor y se envía a DeepAI para atender tus solicitudes.",
+  "key.hint": "Tiene esta forma: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx. La clave se guarda en este servidor y se envía a DeepAI para atender tus solicitudes.",
   "key.pasteFirst": "Pega primero tu clave de API.",
   "key.step1": "Obtén tu clave de API en",
   "key.step2": "Pégala abajo:",

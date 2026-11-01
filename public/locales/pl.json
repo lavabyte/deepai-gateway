@@ -125,7 +125,7 @@
   "home.title": "Przegląd",
   "home.useIt": "Jak używać",
   "home.useItSub": "Skieruj dowolnego klienta OpenAI na tę bramę.",
-  "key.hint": "Klucz jest przechowywany na tym serwerze i wysyłany do DeepAI, aby obsługiwać Twoje żądania.",
+  "key.hint": "Wygląda tak: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx. Klucz jest przechowywany na tym serwerze i wysyłany do DeepAI, aby obsługiwać Twoje żądania.",
   "key.pasteFirst": "Najpierw wklej swój klucz API.",
   "key.step1": "Skopiuj swój klucz API z",
   "key.step2": "Wklej go poniżej:",

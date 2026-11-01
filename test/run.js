@@ -123,6 +123,21 @@ async function checkAsync(name, fn) {
 }
 
 /**
+ * A DeepAI account key.
+ *
+ * These are UUIDs, not the `sk-` form this gateway mints for its own API, and the two are
+ * easy to confuse - the mistake was made once already, in the sign-in field's placeholder.
+ * Spelling the shape once here keeps every sign-in fixture from teaching the wrong one.
+ *
+ * Only the shape matters: nothing validates it, because DeepAI is the authority on which
+ * keys exist.
+ *
+ * @param {number} n - any integer; the same one gives the same key.
+ * @returns {string}
+ */
+const deepaiKey = (n) => `${String(n).padStart(8, '0')}-0000-4000-8000-000000000000`;
+
+/**
  * Create an account plus a session for it and return the request headers that
  * authenticate as that user. The dashboard authenticates with a cookie, so every
  * HTTP check below needs one - exactly like a browser.
@@ -2101,7 +2116,7 @@ await checkAsync('the key is remembered and can be cleared', async () => {
   };
 
   const KEY = 'deepai-gateway-last-content';
-  const saved = 'sk-a-real-looking-key';
+  const saved = deepaiKey(9);
 
   // --- A browser that has never signed in: an empty field, nothing said about saving.
   const fresh = await boot();
@@ -3354,7 +3369,7 @@ await checkAsync('browser sign-in exists only when a deployment asks for it', as
   globalThis.fetch = async (url) => {
     if (String(url).includes('/desktop_auth/exchange/')) {
       exchanges += 1;
-      return new Response(JSON.stringify({ api_key: 'sk-from-callback', username: 'callback-user', is_pro: false }),
+      return new Response(JSON.stringify({ api_key: deepaiKey(10), username: 'callback-user', is_pro: false }),
         { status: 200, headers: { 'content-type': 'application/json' } });
     }
     if (String(url).includes('api.deepai.org')) {
@@ -3533,7 +3548,7 @@ await checkAsync('no name from the database can reach the page', async () => {
     const response = await realFetch(`${base}/api/login/key`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ key: 'sk-noname' }),
+      body: JSON.stringify({ key: deepaiKey(6) }),
     });
     assert.equal(response.status, 200);
     const cookie = String(response.headers.get('set-cookie') ?? '').split(';')[0];
@@ -3605,7 +3620,7 @@ await checkAsync('a refused sign-in leaves a trail, and the database is owner-on
     const refused = await realFetch(`${base}/api/login/key`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ key: 'sk-nope' }),
+      body: JSON.stringify({ key: deepaiKey(8) }),
     });
     assert.equal(refused.status, 401);
 
@@ -4100,8 +4115,8 @@ await checkAsync('the same DeepAI key never becomes two accounts', async () => {
   const base = `http://127.0.0.1:${server.address().port}`;
 
   // What an earlier sign-in stored: the real DeepAI username.
-  saveAccount(fresh, { apiKey: 'sk-shared-key', username: 'kontomilosz350', isPro: false });
-  assert.equal(accountForApiKey(fresh, 'sk-shared-key').username, 'kontomilosz350');
+  saveAccount(fresh, { apiKey: deepaiKey(7), username: 'kontomilosz350', isPro: false });
+  assert.equal(accountForApiKey(fresh, deepaiKey(7)).username, 'kontomilosz350');
 
   const realFetch = globalThis.fetch;
   const http = (...args) => realFetch(...args);
@@ -4121,7 +4136,7 @@ await checkAsync('the same DeepAI key never becomes two accounts', async () => {
     const res = await http(`${base}/api/login/key`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ key: 'sk-shared-key' }),
+      body: JSON.stringify({ key: deepaiKey(7) }),
     });
     const body = await res.json();
     assert.equal(res.status, 200, JSON.stringify(body));
@@ -4170,13 +4185,13 @@ await checkAsync('the account key alone is a complete sign-in', async () => {
     const json = (body, status = 200) => new Response(JSON.stringify(body),
       { status, headers: { 'content-type': 'application/json' } });
     if (target.endsWith('/deepai_code/theos')) {
-      if (codeLane === 'accept' && key === 'sk-code-enabled') {
+      if (codeLane === 'accept' && key === deepaiKey(1)) {
         return json({ enabled: true, balance: '7.5', granted: '10.0', refresh_at: null });
       }
       return json({ err: 'Invalid Authentication' }, 401);
     }
     if (target.endsWith('/get_usage_summary')) {
-      return json({ is_authenticated: key === 'sk-model-api-only' });
+      return json({ is_authenticated: key === deepaiKey(2) });
     }
     return json({});
   };
@@ -4195,22 +4210,22 @@ await checkAsync('the account key alone is a complete sign-in', async () => {
     assert.equal(listAccounts(fresh).length, 0, 'and no account is created');
 
     // A key for the model API but not for Code: the one case that needs its own advice.
-    const foreign = await post({ key: 'sk-model-api-only' });
+    const foreign = await post({ key: deepaiKey(2) });
     assert.equal(foreign.status, 403);
     assert.equal((await foreign.json()).code, 'not-for-code');
 
     // A key DeepAI does not know at all.
-    const wrong = await post({ key: 'sk-nothing-like-a-key' });
+    const wrong = await post({ key: deepaiKey(3) });
     assert.equal(wrong.status, 401);
     assert.equal((await wrong.json()).code, 'rejected');
 
     // The real thing.
-    const done = await post({ key: 'sk-code-enabled' });
+    const done = await post({ key: deepaiKey(1) });
     const doneText = await done.text();
     assert.equal(done.status, 200, doneText);
     const body = JSON.parse(doneText);
-    assert.equal(body.username, usernameForKey('sk-code-enabled'), 'the owner is the key fingerprint');
-    assert.ok(!doneText.includes('sk-code-enabled'), 'and the key is never echoed back');
+    assert.equal(body.username, usernameForKey(deepaiKey(1)), 'the owner is the key fingerprint');
+    assert.ok(!doneText.includes(deepaiKey(1)), 'and the key is never echoed back');
 
     const cookie = String(done.headers.get('set-cookie') ?? '').split(';')[0];
     assert.match(cookie, /deepai_gateway_session=/, 'a session is minted');
@@ -4221,7 +4236,7 @@ await checkAsync('the account key alone is a complete sign-in', async () => {
     assert.equal(account.displayName, undefined);
 
     // Whitespace around a pasted key is not part of it.
-    const padded = await post({ key: '  sk-code-enabled  ' });
+    const padded = await post({ key: `  ${deepaiKey(1)}  ` });
     assert.equal(padded.status, 200, 'a key with stray spaces still signs in');
 
     // Signing in twice with one key is one account.
@@ -4292,14 +4307,14 @@ await checkAsync('a refused sign-in explains which kind of refusal it was', asyn
 
     // A key DeepAI does not recognise.
     globalThis.fetch = lane({ theos: 401, usage: 401 });
-    const rejected = await post({ key: 'sk-nonsense' });
+    const rejected = await post({ key: deepaiKey(5) });
     assert.equal(rejected.status, 401);
     assert.equal((await rejected.json()).code, 'rejected');
 
     // A real DeepAI key that is not enabled for the Code lane: the likeliest failure of
     // all, and the one that must not be reported as a typo.
     globalThis.fetch = lane({ theos: 401, usage: 'auth' });
-    const wrongLane = await post({ key: 'sk-model-api-only' });
+    const wrongLane = await post({ key: deepaiKey(2) });
     assert.equal(wrongLane.status, 403);
     const wrongLaneBody = await wrongLane.json();
     assert.equal(wrongLaneBody.code, 'not-for-code');
@@ -4310,13 +4325,13 @@ await checkAsync('a refused sign-in explains which kind of refusal it was', asyn
 
     // DeepAI is down, which is not the visitor's mistake.
     globalThis.fetch = lane({ theos: 500, usage: 401 });
-    const down = await post({ key: 'sk-fine' });
+    const down = await post({ key: deepaiKey(4) });
     assert.equal(down.status, 502);
     assert.equal((await down.json()).code, 'unreachable');
 
     // And a network failure is reported as one rather than as a bad key.
     globalThis.fetch = async () => { throw new Error('offline'); };
-    const offline = await post({ key: 'sk-fine' });
+    const offline = await post({ key: deepaiKey(4) });
     assert.equal(offline.status, 502);
     assert.equal((await offline.json()).code, 'unreachable');
 

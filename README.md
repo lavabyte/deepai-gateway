@@ -117,6 +117,11 @@ plain-HTTP localhost, where a `Secure` cookie would never be sent.
 The dashboard offers one field: **the account's API key**, from
 <https://deepai.org/dashboard/profile>. Paste it, press the button, and you are in.
 
+That key is a **UUID** - `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` - and not the `sk-` form this
+gateway hands out for its own API. The two are unrelated: the UUID is the DeepAI account's
+credential and is replayed upstream, while an `sk-` key is minted here and only this gateway
+understands it.
+
 The key is the credential DeepAI validates, so nothing else is asked for. That is also why
 there is no name or email anywhere in the interface: a DeepAI key does not say who it
 belongs to, and an address a visitor types is a claim rather than evidence. The account is

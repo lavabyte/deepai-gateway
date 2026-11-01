@@ -297,7 +297,8 @@ function keyPasteHelp(prefix = '') {
 
       <div class="field mt-3">
         <input class="input input--key" id="${prefix}key-paste" type="text" spellcheck="false"
-          autocomplete="off" autocapitalize="off" placeholder="sk-..." value="${esc(lastKey())}">
+          autocomplete="off" autocapitalize="off"
+          placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${esc(lastKey())}">
         <div class="field__hint">${t('key.hint')}</div>
         ${lastKey() === '' ? '' : `
           <div class="field__hint" id="${prefix}content-saved">

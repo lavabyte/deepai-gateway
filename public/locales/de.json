@@ -121,7 +121,7 @@
   "home.title": "Übersicht",
   "home.useIt": "Verwendung",
   "home.useItSub": "Richte einen beliebigen OpenAI-Client auf dieses Gateway.",
-  "key.hint": "Der Schlüssel wird auf diesem Server gespeichert und an DeepAI gesendet, um deine Anfragen zu bedienen.",
+  "key.hint": "Er sieht so aus: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx. Der Schlüssel wird auf diesem Server gespeichert und an DeepAI gesendet, um deine Anfragen zu bedienen.",
   "key.pasteFirst": "Füge zuerst deinen API-Schlüssel ein.",
   "key.step1": "Hole deinen API-Schlüssel von",
   "key.step2": "Füge ihn unten ein:",
