@@ -330,24 +330,6 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
 /* An API key is read character by character, so it is set in the mono face. */
 .input--key { font-family: var(--mono); letter-spacing: .01em; }
 
-/*
- * The route kept behind a disclosure: the account JSON form is the fallback for a key
- * DeepAI has not enabled for Code, so it should be out of the way without being hidden.
- */
-.fallback > summary {
-  display: flex; align-items: center; gap: 7px;
-  padding: 4px 0; cursor: pointer; list-style: none;
-  font-size: 12.5px; color: var(--text-2);
-}
-.fallback > summary::-webkit-details-marker { display: none; }
-.fallback > summary::before {
-  content: '+'; width: 14px; text-align: center;
-  font: 500 13px/1 var(--mono); color: var(--text-3);
-}
-.fallback[open] > summary::before { content: '-'; }
-.fallback > summary:hover { color: var(--ink); }
-.fallback > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 2px; }
-
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field__label { font-size: 12px; font-weight: 500; color: var(--text-2); }
 .field__hint { font-size: 11.5px; color: var(--text-3); }
@@ -407,8 +389,6 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
 }
 .note--warning { background: var(--badge-amber-bg); border-color: var(--warning); color: var(--badge-amber-tx); }
 /* A hint that prevents a mistake, rather than a warning about a failure. */
-.note--info { background: var(--badge-blue-bg); border-color: var(--link); color: var(--badge-blue-tx); }
-.note--info code { background: transparent; border-color: currentColor; color: inherit; }
 .note--error { background: var(--badge-red-bg); border-color: var(--error); color: var(--badge-red-tx); }
 
 .snippet {

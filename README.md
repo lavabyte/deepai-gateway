@@ -124,15 +124,9 @@ its key's fingerprint, so the same key always resolves to the same owner and no 
 claim another's.
 
 **A key from that page is not automatically enabled for DeepAI Code.** If DeepAI refuses it
-for the Code lane the dashboard says so specifically, and the account JSON route below is
-the one that works then.
-
-### Signing in with the account JSON
-
-Behind *Other way: paste the account JSON* on the sign-in card, and the route to use when
-the profile key is not enabled for Code - or when the account was created with Google or
-Apple. It is the same key, taken from the account JSON DeepAI produces for a signed-in
-browser at <https://api.deepai.org/daily-time-sync/user/>. Only the key is read out of it.
+for the Code lane the dashboard says exactly that, rather than calling it a wrong key: the
+key is real, and the Code app is where a key that works comes from. There is no other route
+to fall back to, so that message is the whole advice.
 
 ### Why the browser sign-in is off
 
@@ -185,49 +179,10 @@ so a paste needs no session and nobody can finish somebody else's attempt.
 `/auth-callback` is served as an alias of `/callback`, because earlier builds advertised
 that path.
 
-### Where the JSON route's steps come from
-
-The visitor signs in at `deepai.org` in their own browser - with a password, or with
-Google or Apple - and then reads the account JSON out of DeepAI's own API:
-
-1. Go to `https://deepai.org` and log in or register.
-2. Go to `https://api.deepai.org/daily-time-sync/user/`, scroll down and choose the
-   **Raw Data** tab. A browser asks for a JSON page and gets the account itself.
-3. Copy the **Content** and paste it into the dashboard.
-
-That JSON carries both the account's `email` and its `userprofile.api_key` - the account
-key the Code lane accepts - so pressing **Log In** signs in with a key DeepAI has already
-issued. **Only the key is read out of it.** The email is not stored, not returned and not
-shown: it is a claim about ownership, and ownership comes from the key.
-
-It is the route that works for a Google or Apple account without a tunnel, and the one for
-a profile key DeepAI has not enabled for Code: the page is rendered for a session the
-visitor already has, so nothing is typed from memory and nothing has to be trusted but the
-key, which DeepAI validates.
-
-The hint about `OK` sits **between steps 1 and 2**, because it warns about what step 2
-will show and is useless once step 2 has been read. The list is split into two so it can,
-the second resuming at 2.
-
-**If the page shows a plain `OK`, the visitor is not logged in.** The API answers `200`
-with the account JSON and `201 OK` without one, so the dashboard says it in as few words
-as it takes: *"If you get plain `OK` in step 2, make sure you are logged in."*
-
-Two earlier versions of this instruction were worse, and both were taught by trying them:
-
-- a browser-console command (`console.log(await (await fetch(...)).text())`) returns `'OK'`
-  for anyone not already on DeepAI's own origin, because of the same `201`;
-- the steps once sat behind a click, so the instructions a visitor needed were the ones
-  they could not see.
-
-There is no password form and no bare-key form. A DeepAI account created with Google or
-Apple has no password to give, and a key pasted on its own cannot say whose account it is,
-so three doors meant two of them were the wrong one for most visitors.
-
 ### What a refusal says
 
-The key inside the pasted JSON is checked the same way a stored account is
-(`GET /deepai_code/theos`), so a refusal says which kind it was:
+The key is checked the way a stored account is (`GET /deepai_code/theos`), so a refusal
+says which kind it was:
 
 | What DeepAI said | What the visitor is told |
 | --- | --- |
@@ -236,33 +191,38 @@ The key inside the pasted JSON is checked the same way a stored account is
 | anything else | DeepAI is unreachable; not the visitor's mistake |
 
 That middle case is the likeliest failure of all, because `deepai.org` issues a key for
-the public model API and it is not automatically enabled for DeepAI Code.
+the public model API and it is not automatically enabled for DeepAI Code. Its message names
+the Code app, and it is the only advice there is: the key field is the only route, so a
+visitor holding such a key needs to be told where a different one comes from rather than
+left to conclude they mistyped.
 
-The paste itself is refused before any network call when it carries no key: `empty`,
-`not-json`, `no-key` and `too-long` each say which part was wrong. A test asserts that
-every reason either parser can return has a message, and that no message describes a
-reason nothing can produce.
+An empty field and an implausibly long one are refused before any network call. A test
+asserts that every reason the key check can report has a message, that the two the route
+answers itself have one too, and that no message describes a reason nothing can produce.
 
-### Why ownership does not come from the pasted email
+### Why the account has no name
 
-The email is taken from DeepAI's own JSON, so it is fact rather than a claim - but it is
-still only a **label**, and ownership is derived from the key:
+Ownership is derived from the key, and nothing else:
 
 `api_keys.owner_username` decides who sees and pays for a key, so an owner the visitor
 could choose would let them claim someone else's account. The owner is therefore
 `key-<sha256(key)[0..16]>`: one-to-one with the key, non-reversible, and impossible to
-point at another account. The email is stored as a per-account `display_name` setting, and
-the dashboard shows it in place of that fingerprint.
+point at another account.
+
+An email used to be read out of the account JSON and shown as a `display_name`. It is gone
+from both ends. It was a claim rather than evidence - nothing DeepAI answers confirms an
+address - and it was rendered in the top bar and on the account card, which made a stored
+string into a page's markup. The badge shows the Credits balance alone.
 
 **A key already known to the gateway keeps its account.** DeepAI mints a fresh key on
 every sign-in, so one DeepAI account can hold several, and the same key can arrive twice.
 Matching on the key keeps that on one owner instead of splitting the account, its keys and
 its usage across two identities that look unrelated in the dashboard.
 
-### Why a key alone cannot be asked who it belongs to
+### Why the account has no name to show
 
-No request makes a DeepAI key reveal its account - which is why the JSON route reads the
-email from DeepAI's page rather than trying to derive it:
+No request makes a DeepAI key reveal its account, which is why there is no name to put
+beside it rather than a field asking for one:
 
 | Attempt | Result |
 | --- | --- |
@@ -289,16 +249,15 @@ DeepAI could have issued. That is the whole authentication model, so:
   reach the port. Set `HOST=127.0.0.1` to keep it local, and put TLS and your own access
   control in front of anything public.
 - **The pasted key is kept in the browser.** Signing in means finding the account's key, so
-the last one is saved to `localStorage` and the field is filled with it next time, including
-after signing out. It is the account's **API key**, so it is readable by any script on this
-origin and by anyone who opens that browser profile: the sign-in card says so, offers
-**Clear it**, and **Forget this account** removes it. Use **Clear it** on a shared machine,
-and prefer a private window on one you do not control. A JSON blob left in that slot by an
-older version is ignored rather than offered as a key.
-
-**The sign-in route is unauthenticated and unthrottled** - it has to be, since it *is* the
+  the last one is saved to `localStorage` and the field is filled with it next time,
+  including after signing out. It is the account's **API key**, so it is readable by any
+  script on this origin and by anyone who opens that browser profile: the sign-in card says
+  so, offers **Clear it**, and **Forget this account** removes it. Use **Clear it** on a
+  shared machine, and prefer a private window on one you do not control. A JSON blob left in
+  that slot by an older version is ignored rather than offered as a key.
+- **The sign-in route is unauthenticated and unthrottled** - it has to be, since it *is* the
   way in - and a valid-looking paste makes the gateway issue up to three requests to DeepAI.
-  Put a rate limiter in front of `/api/login/profile` (and `/callback` when enabled) if the
+  Put a rate limiter in front of `/api/login/key` (and `/callback` when enabled) if the
   gateway is exposed.
 - **Per-key limits are a check-then-act**, so a key can exceed its cap by sending concurrent
   requests. Treat a key's limit as a guard against accidents, not against an adversary.
@@ -627,7 +586,6 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | --- | --- | --- |
 | `GET` | `/` | The dashboard |
 | `POST` | `/api/login/key` | The way in: the account's API key - see [Signing in](#signing-in) |
-| `POST` | `/api/login/profile` | The fallback: the account JSON copied out of the visitor's own browser |
 | `GET` | `/logout` | Sign out, then redirect to `/` |
 | `GET` | `/api/account` | This session's account, allowance, default model, key quota |
 | `GET` | `/api/account/events` | That account's auth trail (login, logout, refresh, denied) |
@@ -818,8 +776,7 @@ and no external database. The only runtime dependency is Express.
 - The model catalog is fetched from `GET /deepai_code/models` and cached for ten
   minutes; an embedded snapshot keeps the gateway usable offline.
 - DeepAI's browser sign-in is **not** used by default: it always calls back to `127.0.0.1`,
-  which no setting can move. Sign-in is the account's API key, or the account JSON copied
-  out of DeepAI's own API page as a fallback - see [Signing in](#signing-in).
+  which no setting can move. Sign-in is the account's API key - see [Signing in](#signing-in).
 
 ## Limits
 

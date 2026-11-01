@@ -16,7 +16,6 @@ import { randomUUID } from 'node:crypto';
 import {
   checkKey,
   checkPastedKey,
-  parseAccountPaste,
   usernameForKey,
 } from '../deepai/account.js';
 import { loadCatalog, publicModel } from '../deepai/catalog.js';
@@ -69,22 +68,22 @@ import {
 /**
  * What each sign-in failure says to the visitor.
  *
- * These are the reasons the paste parser and the key check can report, and no others.
- * A separate table from any protocol vocabulary because these are read by someone
- * looking at a page, not at a response: each says what happened and what to do next.
- * The `not-for-code` case is the one worth the words - `deepai.org` issues a key for
- * the public model API, and it is not automatically enabled for DeepAI Code, so
- * "wrong key" would send the visitor looking for a mistake they did not make.
+ * These are the reasons the key check can report, and no others. A separate table from any
+ * protocol vocabulary because these are read by someone looking at a page, not at a
+ * response: each says what happened and what to do next.
+ *
+ * The `not-for-code` case is the one worth the words - `deepai.org` issues keys for the
+ * public model API, and one is not automatically enabled for DeepAI Code, so "wrong key"
+ * would send the visitor looking for a mistake they did not make. The advice names the
+ * Code app, because the profile page is where the key they have came from.
  */
 const KEY_LOGIN_FAILURES = {
-  empty: [400, 'Paste what your browser console printed first.'],
-  'too-long': [400, 'That is far longer than the account details DeepAI sends, so something else must have been pasted.'],
-  'not-json': [400, 'That is not the console output. Copy everything it printed, starting with "{".'],
-  'no-key': [400, 'That output has no API key in it. Sign in at deepai.org in the same browser, then run the command again.'],
-  rejected: [401, 'DeepAI did not recognise that key. Copy it again from your DeepAI profile.'],
+  empty: [400, 'Paste your API key first.'],
+  'too-long': [400, 'That is far longer than an API key, so something else must have been pasted.'],
+  rejected: [401, 'DeepAI did not recognise that key. Copy it again from https://deepai.org/dashboard/profile.'],
   'not-for-code': [
     403,
-    'That key works for the DeepAI model API, but it is not enabled for DeepAI Code, which is what this gateway uses. Use the key the DeepAI Code app shows, or log in with DeepAI instead.',
+    'That key works for the DeepAI model API, but it is not enabled for DeepAI Code, which is what this gateway uses. Use the key the DeepAI Code app shows.',
   ],
   unreachable: [502, 'Could not reach DeepAI to check that key. Try again in a moment.'],
 };
@@ -226,25 +225,6 @@ export function adminRouter(db, runtime) {
       return res.status(400).json({ ok: false, error: KEY_LOGIN_FAILURES['too-long'][1], code: 'too-long' });
     }
     return signInWithKey(res, { key });
-  });
-
-  /**
-   * Sign in with the account details copied out of the visitor's own browser.
-   *
-   * The fallback for an account whose profile key DeepAI has not enabled for DeepAI Code,
-   * and the one route that works for a Google or Apple account without a tunnel: their
-   * sign-in happens in their browser as usual, and the page hands back the account JSON
-   * DeepAI itself produced, which carries the key the Code lane accepts.
-   */
-  router.post('/login/profile', async (req, res) => {
-    const text = typeof req.body?.text === 'string' ? req.body.text : '';
-    const parsed = parseAccountPaste(text);
-    if (parsed.ok !== true) {
-      const [status, message] = KEY_LOGIN_FAILURES[parsed.reason] ?? [400, 'That could not be read.'];
-      runtime.log?.(`profile sign-in refused: ${parsed.reason}`);
-      return res.status(status).json({ ok: false, error: message, code: parsed.reason });
-    }
-    return signInWithKey(res, { key: parsed.apiKey });
   });
 
   /**

@@ -368,120 +368,23 @@ async function signInWithKey() {
   }
 }
 
-function profilePasteHelp(prefix = '') {
-  return `
-    <section class="step" id="${prefix}profile-step">
-      <!--
-        The list is split so the hint sits between the two steps it concerns. The second
-        list restarts at 2, so the numbering stays honest while a paragraph separates
-        them visually.
-      -->
-      <ol class="step__list">
-        <li>
-          ${t('signin.step1')} <a href="https://deepai.org" target="_blank" rel="noreferrer noopener">https://deepai.org</a>
-          ${t('signin.step1Tail')}
-        </li>
-      </ol>
 
-      <div class="note note--info mt-3">
-        ${t('signin.okHint')}
-      </div>
-
-      <ol class="step__list mt-3" start="2">
-        <li>
-          ${t('signin.step2')}
-          <a href="https://api.deepai.org/daily-time-sync/user/" target="_blank" rel="noreferrer noopener">https://api.deepai.org/daily-time-sync/user/</a>${t('signin.step2Tail')}
-        </li>
-        <li>${t('signin.step3')} <strong>Content</strong> ${t('signin.step3Tail')}</li>
-      </ol>
-
-      <div class="field mt-3">
-        <label class="field__label" for="${prefix}profile-paste">Content</label>
-        <textarea class="textarea" id="${prefix}profile-paste" rows="7" spellcheck="false" autocomplete="off"
-          placeholder='{"pk": ..., "username": "...", "email": "...", "userprofile": {"api_key": "..."}}'></textarea>
-        <div class="field__hint">
-          ${t('signin.contentHint')}
-        </div>
-      </div>
-      <div class="row mt-3"><button class="btn btn--primary" id="${prefix}login-with-profile" type="button">${t('common.logIn')}</button></div>
-    </section>`;
-}
 
 /**
- * Sign in with the account details the visitor pasted.
+ * The way in: the account's API key, and nothing else.
  *
- * Both secrets are cleared from the field once accepted, so nothing lingers in the page.
- */
-async function signInWithProfile() {
-  const field = $('profile-paste');
-  const text = field?.value?.trim() ?? '';
-  if (text === '') {
-    toast(t('signin.runCommand'), 'error');
-    field?.focus();
-    return;
-  }
-  // Saved before the request, not after: an attempt that DeepAI refuses is exactly the
-  // one worth keeping, so it can be corrected rather than fetched again.
-  rememberContent(text);
-
-  const button = $('login-with-profile');
-  const label = button?.textContent;
-  if (button) {
-    button.disabled = true;
-    button.textContent = t('signin.signingIn');
-  }
-  try {
-    await api('/login/profile', { method: 'POST', body: { text } });
-    if (field) field.value = '';
-    toast(t('signin.loggedIn'));
-    await loadAccount();
-    await render();
-  } catch (error) {
-    toast(String(error.message ?? error), 'error');
-    if (button) {
-      button.disabled = false;
-      button.textContent = label ?? t('common.logIn');
-    }
-    field?.focus();
-    field?.select();
-  }
-}
-
-/**
- * The second way in: a pasted API key.
- *
- * A key is the same credential the browser sign-in would have produced, so it
- * needs no callback, no address to copy and no password - which makes it the
- * shortest route on a gateway reached over the network.
- *
- * The email is asked for because a DeepAI key genuinely does not say who it
- * belongs to, so the name can only come from the visitor. It is a label and not a
- * credential, which is why it is described as unchecked rather than presented as a
- * fact: nothing can confirm it. `/deepai_code/theos` and `/get_usage_summary`
- * answer with allowance only, `/daily-time-sync/user/` refuses a key, and the
- * exchange needs a code. The one place a real identity appears is the browser
- * sign-in, which is why that route does not ask.
- *
- * Ownership still comes from the key, never from this field, so the name cannot be
- * used to claim another account - and it is scoped to the session that typed it.
- */
-/**
- * The way in.
- *
- * One route only: the account JSON, copied from DeepAI's own API page. The password
- * form and the bare-key form were both removed - the password route cannot work for a
- * Google or Apple account, and a bare key cannot supply the email, so keeping three
- * doors meant two of them were the wrong one for most visitors.
+ * Every earlier route is gone - the password form, the account JSON copied out of
+ * DeepAI's API page, and the console command before that. Each existed to work around a
+ * key that DeepAI had not enabled for the Code lane, and each asked the visitor to prove
+ * something they could not: a password proves nothing about a Google account, and an
+ * email address is a claim rather than evidence. The key is the one credential DeepAI
+ * actually checks, so it is the one thing asked for.
  *
  * @param {string} prefix - distinguishes the ids when both cards are in the DOM.
- * @returns {string} markup containing the pasted-JSON form.
+ * @returns {string} markup containing the key form.
  */
 function signInRoutes(prefix = '') {
   return `<div class="mt-3">${keyPasteHelp(prefix)}</div>`
-    + `<details class="fallback mt-3">
-        <summary>${t('signin.otherWay')}</summary>
-        <div class="mt-3">${profilePasteHelp(prefix)}</div>
-      </details>`
     + (state.account?.callbackLogin === true ? browserSignIn(prefix) : '');
 }
 
@@ -585,10 +488,9 @@ function wireSignInForms(prefix = '') {
       void signInWithKey();
     }
   });
-  id('login-with-profile')?.addEventListener('click', () => void signInWithProfile(prefix));
   id('content-forget')?.addEventListener('click', () => {
     rememberContent('');
-    const field = id('profile-paste');
+    const field = id('key-paste');
     if (field !== null) field.value = '';
     id('content-saved')?.remove();
     toast(t('signin.contentForgotten'));
