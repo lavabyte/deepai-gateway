@@ -204,6 +204,8 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
   white-space: nowrap; text-decoration: none;
 }
 .btn:disabled { opacity: .45; cursor: default; }
+/* `a:hover` is more specific than `.btn`, so a link styled as a button underlined itself. */
+.btn:hover { text-decoration: none; }
 .btn--primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .btn--primary:hover:not(:disabled) { opacity: .85; }
 .btn--secondary { background: var(--surface); border-color: var(--hairline); }
@@ -380,10 +382,18 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
 .note--warning { background: var(--badge-amber-bg); border-color: var(--warning); color: var(--badge-amber-tx); }
 /* A hint that prevents a mistake, rather than a warning about a failure. */
 .note--error { background: var(--badge-red-bg); border-color: var(--error); color: var(--badge-red-tx); }
-/* The sign-in steps, which are read before anything is clicked. */
-.note--info { background: var(--badge-blue-bg); border-color: var(--link); color: var(--badge-blue-tx); }
-.note--info .step__list { margin: 0; padding-left: 18px; }
-.note--info li { margin: 2px 0; }
+/*
+ * The sign-in steps. This is the one thing on a signed-out screen that has to be read before
+ * anything can happen, so it is larger than body copy and in the attention colour rather than
+ * the ordinary one: at 13px in grey it read as a footnote beside the button it explains.
+ */
+.note--attention {
+  background: var(--badge-amber-bg); border-color: var(--warning); color: var(--badge-amber-tx);
+  padding: 14px 16px; font-size: 15px; line-height: 1.6;
+}
+.note--attention .step__list { margin: 0; padding-left: 20px; }
+.note--attention li { margin: 4px 0; }
+.note--attention strong { font-weight: 600; }
 
 .snippet {
   display: flex; align-items: center; gap: 10px;

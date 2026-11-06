@@ -3474,11 +3474,11 @@ await checkAsync('the sign-in card is three steps, a link, a field and a button'
   const html = vm.runInContext('signInRoutes()', sandbox);
 
   // The three steps, in a blue box, before anything is clicked.
-  assert.match(html, /note note--info/, 'the steps sit in an info box');
+  assert.match(html, /note note--attention/, 'the steps sit in an info box');
   assert.match(html, /<li>Authenticate with <strong>DeepAI<\/strong><\/li>/, 'step 1 is authenticate');
   assert.match(html, /<li>Copy callback url<\/li>/, 'step 2 is copy the callback url');
   assert.match(html, /<li>Paste it below<\/li>/, 'step 3 is paste it');
-  const boxAt = html.indexOf('note--info');
+  const boxAt = html.indexOf('note--attention');
   const linkAt = html.indexOf('login-browser');
   assert.ok(boxAt < linkAt, 'and the steps come before the button');
 
@@ -3493,6 +3493,21 @@ await checkAsync('the sign-in card is three steps, a link, a field and a button'
   assert.match(html, /<input class="input input--url" id="browser-paste" type="text"/,
     'a one-line field');
   assert.match(html, /id="login-finish"[^>]*>Login to gateway</, 'and a button that logs in');
+
+  /*
+   * The button must not underline on hover, and the steps must be readable.
+   *
+   * Both were reported from the rendered page: `a:hover` is more specific than `.btn`, so the
+   * link styled as a button underlined itself; and the steps rendered at the 13px of body
+   * copy, which made the one thing that has to be read look like a footnote beside the button
+   * it explains.
+   */
+  const css = readFileSync(join(root, 'public', 'app.css'), 'utf8');
+  assert.match(css, /\.btn:hover \{[^}]*text-decoration:\s*none/, 'a button link must not underline on hover');
+  const base = Number(/\.note \{[^}]*font-size:\s*([\d.]+)px/.exec(css)?.[1] ?? 0);
+  const attention = Number(/\.note--attention \{[^}]*font-size:\s*([\d.]+)px/.exec(css)?.[1] ?? 0);
+  assert.ok(attention > base, `the steps must be larger than body copy (${attention} vs ${base})`);
+  assert.match(css, /\.note--attention \{[^}]*var\(--badge-amber-bg\)/, 'and in the attention colour');
 
   // Nothing of the routes that were removed may remain, on the card or in the source.
   for (const gone of ['key-paste', 'login-with-key', 'profile-paste', 'login-with-profile',
@@ -3576,7 +3591,7 @@ await checkAsync('both signed-out screens offer the one route', async () => {
     assert.match(html, /id="(account-)?browser-paste"/, `${name} must offer the address field`);
     assert.match(html, /id="(account-)?login-finish"/, `${name} must submit it`);
     assert.match(html, /id="(account-)?login-browser"/, `${name} must offer the DeepAI link`);
-    assert.match(html, /note note--info/, `${name} must show the steps`);
+    assert.match(html, /note note--attention/, `${name} must show the steps`);
     for (const gone of ['id="password-form"', 'id="api-key"', 'id="signin"', 'key-paste',
       'login-with-key', 'profile-paste', 'Raw Data', 'daily-time-sync']) {
       assert.ok(!html.includes(gone), `${name} must not offer a removed route: ${gone}`);

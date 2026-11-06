@@ -300,7 +300,7 @@ function isAuthFailure(error) {
 function signInRoutes(prefix = '') {
   return `
     <section class="step" id="${prefix}signin-step">
-      <div class="note note--info">
+      <div class="note note--attention">
         <ol class="step__list">
           <li>${t('signin.stepAuthenticate')} <strong>DeepAI</strong></li>
           <li>${t('signin.stepCopy')}</li>
