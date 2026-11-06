@@ -3721,6 +3721,67 @@ await checkAsync('both signed-out screens offer the one route', async () => {
   }
 });
 
+await checkAsync('a privileged port is replaced with one DeepAI accepts', async () => {
+  /*
+   * DeepAI parses `port` as a port a native app could be listening on, and answers
+   * `400 Invalid desktop sign-in request` for anything below 1024 - so a gateway on 80 or
+   * 443 had no valid value to send and the sign-in could not even be started. `0` and a
+   * negative are refused for the same reason.
+   *
+   * A normal port is sent in their place. Nothing depends on it: DeepAI only uses the port to
+   * build a redirect to `127.0.0.1`, which generally cannot load, and the sign-in is finished
+   * by pasting the address back - redeemed by the `state` alone, never by the port.
+   *
+   * Binding 80 is not possible without privileges, so the local port is substituted on the
+   * request before Express sees it. The route, the query it builds and the address it reports
+   * are all the real ones.
+   */
+  const { createServer } = await import('node:http');
+  const { openDatabase } = await import('../src/db.js');
+  const { createApp } = await import('../server.js');
+  const { advertisedCallbackPort, FALLBACK_CALLBACK_PORT } = await import('../src/deepai/callback-login.js');
+
+  // The pure decision, first, because it is where the rule lives.
+  assert.equal(FALLBACK_CALLBACK_PORT, 8787, 'the replacement is the port this project uses by default');
+  for (const port of [80, 443, 1, 1023, 0, -1, 65536, NaN, undefined, 'not a port']) {
+    assert.equal(advertisedCallbackPort(port), FALLBACK_CALLBACK_PORT,
+      `${String(port)} is not a port to name to DeepAI`);
+  }
+  for (const port of [1024, 3000, 8787, 25912, 65535]) {
+    assert.equal(advertisedCallbackPort(port), port, `${port} must be sent as it is`);
+  }
+  // Including the string form, which is what a header or a query would carry.
+  assert.equal(advertisedCallbackPort('25912'), 25912, 'a numeric string is a port');
+
+  // Then the route, so the two cannot drift apart.
+  const fresh = openDatabase(':memory:');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  let localPort = 80;
+  const server = createServer((req, res) => {
+    Object.defineProperty(req.socket, 'localPort', { value: localPort, configurable: true });
+    app(req, res);
+  });
+  server.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    for (const [on, expected] of [[80, '8787'], [443, '8787'], [1023, '8787'], [0, '8787'],
+      [8787, '8787'], [25912, '25912']]) {
+      localPort = on;
+      const response = await fetch(`http://127.0.0.1:${server.address().port}/login?json=1`);
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(new URL(body.url).searchParams.get('port'), expected,
+        `a gateway on ${on} must ask DeepAI for ${expected}`);
+      // The address shown to the visitor has to be the one DeepAI will build, or the copy of
+      // it the instructions ask for would be wrong.
+      assert.equal(body.callbackUrl, `http://127.0.0.1:${expected}/callback`,
+        'and the address reported back has to match it');
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 await checkAsync('a pasted callback address yields its code and state, or says what is missing', async () => {
   /*
    * This is the input a visitor produces when the redirect could not open: whatever their

@@ -5,8 +5,12 @@
  * it always builds `http://127.0.0.1:<port>/callback` as the redirect, and nothing in the
  * request can move that host - `port` is parsed as a plain integer, so a URL, a `host:port`
  * pair, `0`, `-1` and an empty value are each rejected with `400 Invalid desktop sign-in
- * request`. The redirect therefore only resolves when the browser reaches that address as
- * this gateway: the browser runs on this host, or the port is forwarded to it.
+ * request`. A **privileged port is refused as well**, so a gateway listening on 80 or 443
+ * cannot name the port it is actually on; `advertisedCallbackPort` answers with a normal
+ * one instead, which costs nothing because the port only decides where a redirect that
+ * usually cannot open would have gone. The redirect therefore only resolves when the
+ * browser reaches that address as this gateway: the browser runs on this host, or the port
+ * is forwarded to it.
  *
  * That is why the flow ends by asking for the address back. The browser lands on a page that
  * cannot load, the address carries the one-shot `code` and the `state` this gateway
@@ -32,6 +36,37 @@ const FLOW_TTL_MS = 5 * 60_000;
 
 /** Ceiling on concurrent attempts, so an unauthenticated route cannot grow state freely. */
 const MAX_FLOWS = 64;
+
+/**
+ * The port advertised when this gateway's own port cannot be named to DeepAI.
+ *
+ * It is the port this project listens on by default, so the address shown to the visitor is
+ * the one they would see from a normal deployment.
+ */
+export const FALLBACK_CALLBACK_PORT = 8787;
+
+/**
+ * The port to put in the sign-in request.
+ *
+ * DeepAI refuses the whole request when `port` is not a port a native app could plausibly be
+ * listening on: below 1024 it is privileged and it says `400 Invalid desktop sign-in
+ * request`, and `0` or a negative is not a port at all. A gateway is often put on 80 or 443,
+ * and then there is no valid value to send - so a normal port is sent in its place.
+ *
+ * Nothing depends on the substitution. DeepAI only uses the port to build a redirect to
+ * `127.0.0.1`, which generally cannot load; the sign-in is completed by pasting the address
+ * back, and that is redeemed by the `state` alone, never by the port. When the browser *can*
+ * reach loopback, the fallback simply means it reaches the default port rather than the one
+ * this gateway is on - so the paste is still the way through, which it already was.
+ *
+ * @param {unknown} localPort - the port this gateway is listening on.
+ * @returns {number} a port DeepAI will accept.
+ */
+export function advertisedCallbackPort(localPort) {
+  const port = Number(localPort);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) return FALLBACK_CALLBACK_PORT;
+  return port;
+}
 
 /** The address DeepAI will build, from the port it is given. */
 function loopbackCallbackUrl(port) {
@@ -217,7 +252,8 @@ export function createCallbackLogin(db, runtime, options = {}) {
    * uses: it can then show the address DeepAI will come back to before navigating.
    */
   router.get('/login', (req, res) => {
-    const port = Number(req.socket?.localPort) || 0;
+    // The port DeepAI is willing to be told, which is not always the one this is on.
+    const port = advertisedCallbackPort(req.socket?.localPort);
     const { url } = begin(port, apiOrigin);
     if (req.query.json === '1') {
       return res.json({ ok: true, url, callbackUrl: loopbackCallbackUrl(port), path: '/callback' });

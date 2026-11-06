@@ -133,6 +133,10 @@ RFC 8252 for a native client:
 - The sign-in request carries only `state` and `port`. DeepAI parses `port` as a plain TCP
   port - a full URL, a `host:port` pair, `0`, `-1` or an empty value are all rejected with
   `400 Invalid desktop sign-in request` - so no parameter carries a public origin.
+- **A privileged port is refused too.** A gateway listening on 80 or 443 cannot name the port
+  it is on, so `8787` is sent in its place. Nothing depends on it: the port only decides where
+  a redirect that usually cannot open would have gone, and pasting the address back is
+  redeemed by the `state` alone.
 - The sign-in page builds nothing client-side: it polls `/daily-time-sync/user/` and reloads
   *itself*, leaving the redirect to DeepAI's server, which only ever learns a port number.
 
