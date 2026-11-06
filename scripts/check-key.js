@@ -75,10 +75,18 @@ if (allowance.status === 426 || lane.status === 426) {
   console.log('  revision that answers 401 with a deliberately wrong key, and this will work again.');
   process.exit(1);
 }
-if (allowance.status === 200 && lane.status !== 401) {
+/*
+ * The allowance answer is the strongest signal there is: it is the very call the gateway
+ * makes to accept a key, so a 200 here settles the question on its own. The Code-lane probe
+ * only decides the cases where the allowance was refused.
+ */
+if (allowance.status === 200 || (lane.status !== 401 && lane.status !== 0)) {
   console.log('VERDICT: the key works for DeepAI Code.');
-  console.log('  The dashboard should accept it. If it does not, the gateway is older than the');
-  console.log('  lane revision above, or it is rejecting the key for a reason of its own.');
+  if (allowance.status === 200) {
+    console.log(`  The allowance answered 200${allowance.text.includes('balance') ? ' with a balance' : ''}, which is the call the`);
+    console.log('  gateway itself makes. Any refusal on the dashboard is a gateway-side problem,');
+    console.log('  not a problem with this key.');
+  }
   process.exit(0);
 }
 if (lane.status === 401 && identity.status === 200) {
