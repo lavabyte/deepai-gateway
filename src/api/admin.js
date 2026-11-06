@@ -158,6 +158,27 @@ export function adminRouter(db, runtime) {
   });
 
   /**
+   * What to add to a refusal, given what this deployment can offer.
+   *
+   * `not-for-code` is the refusal with somewhere to go: the profile page issues keys for
+   * DeepAI's model API, and DeepAI Code wants one of its own. This gateway can mint one from
+   * DeepAI's own sign-in page - so the advice names the button on this card when that route
+   * is served, and says how to serve it when it is not. Without this the message ends at
+   * "use the key the Code app shows", which is no help to someone who has not installed it.
+   *
+   * @param {string} reason
+   * @param {{callbackLogin?: boolean}} runtime
+   * @returns {string} a sentence, or nothing.
+   */
+  const keyAdvice = (reason, runtime) => {
+    if (reason !== 'not-for-code') return '';
+    return runtime.callbackLogin === true
+      ? ' Use the sign-in page on this card instead: it returns a key DeepAI Code accepts.'
+      : ' This gateway can fetch one from DeepAI\'s own sign-in page: start it with CALLBACK_LOGIN=1,'
+        + ' then use the sign-in page on this card.';
+  };
+
+  /**
    * Turn a DeepAI key into a session.
    *
    * The key is the credential DeepAI validates, so DeepAI has already issued it; this
@@ -178,7 +199,8 @@ export function adminRouter(db, runtime) {
     }
 
     if (check.ok !== true) {
-      const [status, message] = KEY_LOGIN_FAILURES[check.reason] ?? [400, 'That key could not be used.'];
+      const [status, base] = KEY_LOGIN_FAILURES[check.reason] ?? [400, 'That key could not be used.'];
+      const message = base + keyAdvice(check.reason, runtime);
       runtime.log?.(`key sign-in refused: ${check.reason}`);
       // A refusal is worth recording: the trail is what an operator reads to see a key
       // being tried repeatedly. It is filed under the fingerprint the key derives, which is

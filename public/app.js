@@ -401,7 +401,7 @@ function browserSignIn(prefix = '') {
     <section class="step mt-3" id="${prefix}browser-step">
       <div class="step__title">${t('browser.title')}</div>
       <p class="step__lead">${t('browser.lead')}</p>
-      <p class="step__lead">${t('browser.callbackHint', { url: loopbackCallback() })}</p>
+      <p class="step__lead">${t('browser.callbackHint')}</p>
       <div class="row mt-3"><button class="btn btn--secondary" id="${prefix}login-browser" type="button">${t('browser.start')}</button></div>
       <div class="field mt-3">
         <label class="field__label" for="${prefix}browser-paste">${t('browser.pasteLabel')}</label>
@@ -410,12 +410,6 @@ function browserSignIn(prefix = '') {
       </div>
       <div class="row mt-3"><button class="btn" id="${prefix}login-finish" type="button">${t('browser.finish')}</button></div>
     </section>`;
-}
-
-/** The loopback address DeepAI will send the browser to, for the copy. */
-function loopbackCallback() {
-  const port = location.port !== '' ? location.port : (location.protocol === 'https:' ? '443' : '80');
-  return `http://127.0.0.1:${port}/callback`;
 }
 
 /** Start the browser sign-in: ask the gateway for the URL, then go there. */

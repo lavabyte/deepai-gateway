@@ -668,6 +668,28 @@ totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens
 When the gateway reports usage back to its clients it re-inflates
 `prompt_tokens` so a client's own accounting stays consistent.
 
+## When DeepAI refuses the key as "not enabled for DeepAI Code"
+
+`deepai.org/dashboard/profile` issues keys for **DeepAI's model API**, and DeepAI Code is a
+different lane that wants a key of its own. A profile key is real and works against the model
+API, so DeepAI answers `401` for the Code lane and the dashboard can tell the two apart - but
+it cannot make the key work. Nothing on `deepai.org` changes this: `/dashboard` redirects to
+`/dashboard/profile`, and that page is the only place a key is shown.
+
+A key DeepAI Code accepts comes from **DeepAI's own sign-in page** - the same flow the
+official Code app uses. This gateway implements it:
+
+```bash
+CALLBACK_LOGIN=1 npm start
+```
+
+The sign-in card then offers **Use DeepAI's sign-in page**, which signs in at DeepAI and
+comes back with a key the Code lane accepts. DeepAI returns the browser to a `127.0.0.1`
+address on the gateway's own port, which only opens where that address reaches the gateway;
+**if the page does not load, paste its address into the field below the button** - the address
+carries the one-shot code and the state that authorises the completion, so it works from a
+browser that could never open it.
+
 ## When DeepAI answers 426
 
 A `426 Upgrade Required` on `/v1/*` is not about the gateway's version. DeepAI reads one

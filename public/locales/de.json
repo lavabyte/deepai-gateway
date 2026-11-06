@@ -24,7 +24,7 @@
   "authEvent.login": "Anmeldung",
   "authEvent.logout": "Abmeldung",
   "authEvent.refresh": "Aktualisierung",
-  "browser.callbackHint": "DeepAI schickt den Browser zurück zu {url}. Das öffnet nur dort, wo diese Adresse dieses Gateway erreicht - auf seinem eigenen Host oder über eine Portweiterleitung.",
+  "browser.callbackHint": "DeepAI schickt den Browser an eine 127.0.0.1-Adresse auf dem eigenen Port dieses Gateways zurück. Die öffnet sich nur dort, wo diese Adresse das Gateway erreicht. Wenn die Seite nicht lädt, kopiere ihre Adresse aus der Adressleiste und füge sie unten ein.",
   "browser.finish": "Anmeldung abschließen",
   "browser.lead": "Melde dich wie gewohnt bei DeepAI an. Hier wird nichts eingegeben, und es funktioniert auch für ein Konto, das mit Google oder Apple erstellt wurde.",
   "browser.pasteLabel": "Wenn diese Seite nicht geladen wurde, füge ihre Adresse hier ein",

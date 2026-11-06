@@ -24,7 +24,7 @@
   "authEvent.login": "login",
   "authEvent.logout": "logout",
   "authEvent.refresh": "refresh",
-  "browser.callbackHint": "DeepAI sends the browser back to {url}, which only opens where that address reaches this gateway: on its own host, or through a port forward.",
+  "browser.callbackHint": "DeepAI sends the browser back to a 127.0.0.1 address on this gateway's own port, which only opens where that address reaches the gateway. If that page does not load, copy its address from the address bar and paste it below.",
   "browser.finish": "Finish signing in",
   "browser.lead": "Sign in on DeepAI as usual. Nothing is typed here, and it works for an account created with Google or Apple.",
   "browser.pasteLabel": "If that page did not load, paste its address here",

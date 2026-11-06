@@ -24,7 +24,7 @@
   "authEvent.login": "logowanie",
   "authEvent.logout": "wylogowanie",
   "authEvent.refresh": "odświeżenie",
-  "browser.callbackHint": "DeepAI odsyła przeglądarkę pod {url}, co zadziała tylko tam, gdzie ten adres trafia do tej bramy: na jej hoście albo przez przekierowanie portu.",
+  "browser.callbackHint": "DeepAI odsyła przeglądarkę pod adres 127.0.0.1 na porcie tej bramy, który otworzy się tylko tam, gdzie ten adres trafia do bramy. Jeśli strona się nie wczyta, skopiuj jej adres z paska adresu i wklej go poniżej.",
   "browser.finish": "Dokończ logowanie",
   "browser.lead": "Zaloguj się na DeepAI jak zwykle. Nic nie wpisujesz tutaj i działa to także dla konta utworzonego przez Google lub Apple.",
   "browser.pasteLabel": "Jeśli tamta strona się nie wczytała, wklej jej adres tutaj",

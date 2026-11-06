@@ -24,7 +24,7 @@
   "authEvent.login": "inicio de sesión",
   "authEvent.logout": "cierre de sesión",
   "authEvent.refresh": "renovación",
-  "browser.callbackHint": "DeepAI devuelve el navegador a {url}, que solo abre donde esa dirección llega a esta puerta de enlace: en su propio host o mediante un reenvío de puerto.",
+  "browser.callbackHint": "DeepAI devuelve el navegador a una dirección 127.0.0.1 en el puerto propio de esta puerta de enlace, que solo abre donde esa dirección llega a la puerta. Si la página no carga, copia su dirección de la barra y pégala abajo.",
   "browser.finish": "Terminar de iniciar sesión",
   "browser.lead": "Inicia sesión en DeepAI como siempre. Aquí no se escribe nada, y funciona también para una cuenta creada con Google o Apple.",
   "browser.pasteLabel": "Si esa página no se cargó, pega aquí su dirección",

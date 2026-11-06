@@ -4356,9 +4356,33 @@ await checkAsync('a refused sign-in explains which kind of refusal it was', asyn
     const wrongLaneBody = await wrongLane.json();
     assert.equal(wrongLaneBody.code, 'not-for-code');
     assert.match(wrongLaneBody.error, /not enabled for DeepAI Code/);
-    // The advice has to name somewhere to get a key that works, since there is no other
-    // route left to fall back to.
+    // The advice has to name somewhere to get a key that works. The Code app is where the
+    // key comes from, and this deployment does not serve DeepAI's sign-in page - so it must
+    // also say how to start serving it, or the reader is left with an app they may not have.
     assert.match(wrongLaneBody.error, /DeepAI Code app/);
+    assert.match(wrongLaneBody.error, /CALLBACK_LOGIN=1/,
+      'a deployment without the sign-in page says how to get one');
+
+    // With the sign-in page served, the advice points at the button already on the card
+    // rather than at an environment variable the reader cannot set.
+    const callbackApp = createApp(openDatabase(':memory:'), { log: () => {}, logRequests: false, callbackLogin: true });
+    const callbackServer = callbackApp.listen(0, '127.0.0.1');
+    await new Promise((resolve) => callbackServer.once('listening', resolve));
+    const callbackBase = `http://127.0.0.1:${callbackServer.address().port}`;
+    try {
+      globalThis.fetch = lane({ theos: 401, usage: 'auth' });
+      const served = await realFetch(`${callbackBase}/api/login/key`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ key: 'sk-model-key' }),
+      });
+      const servedBody = await served.json();
+      assert.equal(servedBody.code, 'not-for-code');
+      assert.match(servedBody.error, /sign-in page on this card/, 'and points at the route it serves');
+      assert.ok(!servedBody.error.includes('CALLBACK_LOGIN'),
+        'without naming a variable when the route is already on');
+    } finally {
+      await new Promise((resolve) => callbackServer.close(resolve));
+    }
 
     // DeepAI is down, which is not the visitor's mistake.
     globalThis.fetch = lane({ theos: 500, usage: 401 });
