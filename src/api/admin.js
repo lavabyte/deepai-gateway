@@ -80,15 +80,25 @@ import {
 const KEY_LOGIN_FAILURES = {
   empty: [400, 'Paste your API key first.'],
   'too-long': [400, 'That is far longer than an API key, so something else must have been pasted.'],
+  // Reachable when a stored credential is empty rather than when one is typed: the route
+  // refuses an empty field with `empty` before the key is ever checked.
+  'no-key': [400, 'No API key was given. Paste the key from your DeepAI profile.'],
   rejected: [401, 'DeepAI did not recognise that key. Copy it again from https://deepai.org/dashboard/profile.'],
   'not-for-code': [
     403,
     'That key works for the DeepAI model API, but it is not enabled for DeepAI Code, which is what this gateway uses. Use the key the DeepAI Code app shows.',
   ],
+  'machine-required': [
+    502,
+    'DeepAI refused the request because this gateway could not identify the machine it runs on, which is what its daily Credits grant is issued against. This is a gateway problem, not a key problem. Set DEEPAI_MACHINE_ID to a stable value for this host.',
+  ],
   'lane-outdated': [
     502,
     'DeepAI has retired the DeepAI Code version this gateway speaks to it in, so it refused the request before reading the key. This is a gateway problem, not a problem with the key. The gateway logs name the revision it sent.',
   ],
+  // An upstream status that is not one of the named cases: a 500 from DeepAI, say. Not the
+  // visitor's mistake, and not something a different key would fix.
+  http: [502, 'DeepAI answered with an error while checking that key. Try again in a moment.'],
   unreachable: [502, 'Could not reach DeepAI to check that key. Try again in a moment.'],
 };
 

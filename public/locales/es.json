@@ -13,6 +13,7 @@
   "account.refresh": "Actualizar saldo",
   "account.refreshError.http": "DeepAI respondió con un error, así que el saldo no se pudo leer. Inténtalo en un momento.",
   "account.refreshError.lane-outdated": "DeepAI ha retirado la versión en la que esta puerta de enlace le habla, así que el saldo no se puede leer. Es un problema de la puerta de enlace, no de la cuenta.",
+  "account.refreshError.machine-required": "DeepAI no pudo identificar la máquina donde se ejecuta esta puerta de enlace, que es contra la que se emite su asignación diaria de créditos. Define DEEPAI_MACHINE_ID para este host.",
   "account.refreshError.no-account": "Esta cuenta ya no está guardada. Inicia sesión de nuevo.",
   "account.refreshError.no-key": "No hay ninguna clave de DeepAI guardada para esta cuenta. Inicia sesión de nuevo.",
   "account.refreshError.rejected": "DeepAI rechaza la clave de esta cuenta. Inicia sesión de nuevo con una clave que DeepAI acepte.",

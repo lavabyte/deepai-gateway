@@ -54,6 +54,18 @@ export async function checkKey(apiKey, signal) {
     ]);
 
     if (allowanceResponse.status === 401 || allowanceResponse.status === 403) {
+      /*
+       * A refusal carries a code that says *which* refusal it is, and they need different
+       * fixes. `auth_required` is the key; `machine_required` is this host - the app's own
+       * source says the server withholds the daily grant from a build it cannot identify,
+       * and answers that way rather than pretending the key is wrong. Reporting both as "the
+       * key was rejected" sends the reader to change a key that was never the problem.
+       */
+      const body = await allowanceResponse.json().catch(() => undefined);
+      const code = typeof body?.error?.code === 'string' ? body.error.code : '';
+      if (code === 'machine_required') {
+        return { ok: false, reason: 'machine-required', error: 'DeepAI requires a machine identity' };
+      }
       return { ok: false, reason: 'rejected', error: 'the key was rejected by DeepAI' };
     }
     /*
@@ -135,9 +147,13 @@ export async function checkPastedKey(apiKey, signal) {
    * to a string that a later edit changed, which silently reclassified every rejected key as
    * "could not reach DeepAI".
    */
-  if (check.reason === 'lane-outdated') {
-    // DeepAI's verdict, but about this gateway rather than about the key.
-    return { ok: false, reason: 'lane-outdated', error: check.error };
+  /*
+   * Both of these are DeepAI's verdict, but about this gateway rather than about the key:
+   * one is a retired lane revision, the other a host DeepAI cannot identify. Neither is
+   * fixed by trying another key, so neither may be reported as one.
+   */
+  if (check.reason === 'lane-outdated' || check.reason === 'machine-required') {
+    return { ok: false, reason: check.reason, error: check.error };
   }
   if (check.reason !== 'rejected') {
     // Not a verdict from DeepAI, so do not report it as one.

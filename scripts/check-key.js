@@ -23,6 +23,7 @@
 
 import { existsSync } from 'node:fs';
 import { API_ORIGIN, LANE_HEADERS, LANE_VERSION } from '../src/deepai/wire.js';
+import { MACHINE_HEADER, machineId } from '../src/deepai/machine.js';
 
 const USAGE = `Usage: node scripts/check-key.js <api-key>
        node scripts/check-key.js --account [username]
@@ -92,6 +93,15 @@ async function probe(label, url, init = {}) {
 }
 
 console.log(`lane revision sent: ${LANE_VERSION}`);
+/*
+ * The machine header is the other half of what the server checks, and it is the one an
+ * operator can fix: without it DeepAI withholds the daily grant and answers
+ * `machine_required`, which reads as a key problem unless it is named.
+ */
+const id = machineId();
+console.log(id === ''
+  ? `${MACHINE_HEADER}: not available on this host - DeepAI will answer machine_required.`
+  : `${MACHINE_HEADER}: ${id.slice(0, 16)}...`);
 console.log('');
 
 const allowance = await probe('allowance', `${API_ORIGIN}/deepai_code/theos`);

@@ -2425,6 +2425,50 @@ await checkAsync('the key checker tells the three refusals apart', async () => {
   assert.match(source, /LANE_VERSION/, 'and it reports the revision it sent, not a guessed one');
 });
 
+await checkAsync('every Code-lane request identifies the machine, as the app does', async () => {
+  /*
+   * Read out of the DeepAI Code app itself (0.3.18, `app.asar`), because it is documented
+   * nowhere else:
+   *
+   *   const DEEPAI_MACHINE_HEADER = "X-DeepAI-Code-Machine";   // sha256(machine uuid)
+   *
+   * and its own comment says the server "withholds the grant from a build that omits it".
+   * A gateway without it is such a build, so every request to `/deepai_code` carries it
+   * beside the lane revision.
+   */
+  const { LANE_HEADERS, LANE_VERSION, requestHeaders } = await import('../src/deepai/wire.js');
+  const { MACHINE_HEADER, machineHeaders, machineId } = await import('../src/deepai/machine.js');
+
+  assert.equal(MACHINE_HEADER, 'X-DeepAI-Code-Machine', 'the header name the app uses');
+  assert.equal(LANE_HEADERS['X-DeepAI-Code-Theos'], LANE_VERSION);
+
+  // The identifier is hashed, never sent raw, and the digest is what goes on the wire.
+  const fake = machineHeaders({ DEEPAI_MACHINE_ID: 'a-named-machine' });
+  assert.equal(fake[MACHINE_HEADER], 'a-named-machine',
+    'an operator naming the machine gets exactly that value');
+  assert.equal(machineId({ DEEPAI_MACHINE_ID: 'a-named-machine' }), 'a-named-machine');
+
+  // Detected values are digests: 64 hex characters, or nothing when a host has no id.
+  const detected = machineId({});
+  assert.ok(detected === '' || /^[0-9a-f]{64}$/.test(detected),
+    `a detected id must be a sha256 digest or empty, saw ${detected.slice(0, 16)}`);
+
+  /*
+   * A host with no identifier sends no header rather than an empty one - which is what the
+   * app does, and what makes the server answer `machine_required` instead of guessing.
+   */
+  assert.deepEqual(machineHeaders({ DEEPAI_MACHINE_ID: 'x' }), { [MACHINE_HEADER]: 'x' });
+
+  // And it reaches the streaming request headers too, not only the JSON ones.
+  const streaming = requestHeaders({ apiKey: 'k', sessionId: 's' });
+  for (const name of ['X-DeepAI-Code-Theos', MACHINE_HEADER]) {
+    if (name === MACHINE_HEADER && machineId() === '') continue;
+    assert.ok(streaming[name] !== undefined, `${name} must be on a streaming request`);
+  }
+  assert.equal(streaming[MACHINE_HEADER], LANE_HEADERS[MACHINE_HEADER],
+    'and be the same value the other requests carry');
+});
+
 await checkAsync('a retired lane revision is reported as the gateway problem it is', async () => {
   /*
    * DeepAI reads one version from the request: `X-DeepAI-Code-Theos`. It is the lane
@@ -2553,7 +2597,7 @@ await checkAsync('the defaults a fresh clone gets are the documented ones', asyn
    * binds every interface - which is also why the README says plainly that this exposes the
    * dashboard, and why `.env.example` explains how to keep it local.
    */
-  const { readFileSync } = await import('node:fs');
+  const { readFileSync, readdirSync, statSync } = await import('node:fs');
   const { join } = await import('node:path');
   const { config } = await import('../server.js');
   const root = new URL('..', import.meta.url).pathname;
@@ -2568,8 +2612,22 @@ await checkAsync('the defaults a fresh clone gets are the documented ones', asyn
   // Every setting the code reads is offered in `.env.example`, and nothing else is: an
   // example that drifts is worse than none, because it looks authoritative.
   const example = readFileSync(join(root, '.env.example'), 'utf8');
-  const server = readFileSync(join(root, 'server.js'), 'utf8');
-  const read = new Set([...server.matchAll(/env\.([A-Z][A-Z0-9_]*)/g)].map((m) => m[1]));
+  /*
+   * Every source file, not just `server.js`: a setting is read where it is used, and the
+   * machine identity is read in `src/deepai/machine.js`. Scanning one file made a documented
+   * variable look invented.
+   */
+  const sources = new Set();
+  const collect = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) collect(full);
+      else if (full.endsWith('.js')) sources.add(readFileSync(full, 'utf8'));
+    }
+  };
+  collect(join(root, 'src'));
+  sources.add(readFileSync(join(root, 'server.js'), 'utf8'));
+  const read = new Set([...sources].flatMap((text) => [...text.matchAll(/env\.([A-Z][A-Z0-9_]*)/g)].map((m) => m[1])));
   const offered = new Set([...example.matchAll(/^#?([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]));
 
   assert.deepEqual([...read].filter((name) => !offered.has(name)).sort(), [],
@@ -4376,6 +4434,10 @@ await checkAsync('every sign-in failure has something useful to say', async () =
   const reasonsIn = (text) => new Set(
     [...text.matchAll(/return \{ ok: false, reason: '([a-z_-]+)'/g)].map((m) => m[1]),
   );
+  /** Reasons a function passes through from elsewhere, named in a comparison. */
+  const passedThrough = (text) => new Set(
+    [...text.matchAll(/reason === '([a-z_-]+)'/g)].map((m) => m[1]),
+  );
   const tableBody = (name) => {
     const from = admin.indexOf(`const ${name} = {`);
     assert.ok(from !== -1, `expected to find ${name}`);
@@ -4394,9 +4456,19 @@ await checkAsync('every sign-in failure has something useful to say', async () =
     return account.slice(at, docStart > at ? docStart : (next === -1 ? undefined : next));
   };
 
-  const fromKeyCheck = reasonsIn(functionBody('checkPastedKey'));
-  assert.ok(fromKeyCheck.size >= 3, `expected checkPastedKey's reasons to be found, saw ${fromKeyCheck.size}`);
-  for (const reason of fromKeyCheck) {
+  /*
+   * Both functions produce reasons, and both are scanned: `checkKey` reads DeepAI's answer -
+   * including the codes only the body carries, like `machine_required` - and `checkPastedKey`
+   * adds the one verdict that needs a second request to reach (`not-for-code`).
+   */
+  const fromKeyCheck = reasonsIn(functionBody('checkKey'));
+  const fromPasteCheck = new Set([
+    ...reasonsIn(functionBody('checkPastedKey')),
+    ...passedThrough(functionBody('checkPastedKey')),
+  ]);
+  assert.ok(fromKeyCheck.size >= 4, `expected checkKey's reasons to be found, saw ${fromKeyCheck.size}`);
+  assert.ok(fromPasteCheck.size >= 2, `expected checkPastedKey's reasons to be found, saw ${fromPasteCheck.size}`);
+  for (const reason of [...fromKeyCheck, ...fromPasteCheck]) {
     assert.ok(keysOf('KEY_LOGIN_FAILURES').has(reason), `${reason} has no message`);
   }
 
@@ -4406,7 +4478,7 @@ await checkAsync('every sign-in failure has something useful to say', async () =
 
   // And the table may not carry messages nothing can produce: those are leftovers from
   // removed routes, and they read as coverage that is not there.
-  const produced = new Set([...fromKeyCheck, ...routeCodes]);
+  const produced = new Set([...fromKeyCheck, ...fromPasteCheck, ...routeCodes]);
   const orphaned = [...keysOf('KEY_LOGIN_FAILURES')].filter((reason) => !produced.has(reason));
   assert.deepEqual(orphaned, [], `messages for reasons nothing produces: ${orphaned}`);
 

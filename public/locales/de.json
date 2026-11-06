@@ -13,6 +13,7 @@
   "account.refresh": "Guthaben aktualisieren",
   "account.refreshError.http": "DeepAI hat mit einem Fehler geantwortet; das Guthaben konnte nicht gelesen werden. Versuche es gleich noch einmal.",
   "account.refreshError.lane-outdated": "DeepAI hat die Version zurückgezogen, in der dieses Gateway mit ihm spricht; das Guthaben kann nicht gelesen werden. Das ist ein Gateway-Problem, kein Kontoproblem.",
+  "account.refreshError.machine-required": "DeepAI konnte die Maschine dieses Gateways nicht erkennen, auf die der tägliche Guthaben-Zuschuss ausgestellt wird. Setze DEEPAI_MACHINE_ID für diesen Host.",
   "account.refreshError.no-account": "Dieses Konto ist nicht mehr gespeichert. Melde dich erneut an.",
   "account.refreshError.no-key": "Für dieses Konto ist kein DeepAI-Schlüssel gespeichert. Melde dich erneut an.",
   "account.refreshError.rejected": "DeepAI lehnt den Schlüssel dieses Kontos ab. Melde dich erneut mit einem Schlüssel an, den DeepAI akzeptiert.",

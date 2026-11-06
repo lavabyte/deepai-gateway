@@ -8,6 +8,8 @@
  * @module deepai-gateway/deepai/wire
  */
 
+import { machineHeaders } from './machine.js';
+
 export const API_ORIGIN = 'https://api.deepai.org';
 
 /**
@@ -26,7 +28,17 @@ export const API_ORIGIN = 'https://api.deepai.org';
  * which makes the revision cheap to find again.
  */
 export const LANE_VERSION = '3';
-export const LANE_HEADERS = Object.freeze({ 'X-DeepAI-Code-Theos': LANE_VERSION });
+const LANE_BASE = { 'X-DeepAI-Code-Theos': LANE_VERSION };
+
+/**
+ * Every Code-lane request carries two identifying headers, and the app sends both:
+ * the lane revision, and the machine digest. The machine one is what the server grants
+ * daily Theos against - see `machine.js` for where that comes from and why omitting it
+ * matters.
+ *
+ * Built once, because the machine digest is computed at most once per process.
+ */
+export const LANE_HEADERS = Object.freeze({ ...LANE_BASE, ...machineHeaders() });
 
 /**
  * Product identity sent upstream.

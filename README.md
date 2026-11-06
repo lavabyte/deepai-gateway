@@ -708,6 +708,41 @@ address on the gateway's own port, which only opens where that address reaches t
 carries the one-shot code and the state that authorises the completion, so it works from a
 browser that could never open it.
 
+## The machine header, and `machine_required`
+
+Every request to `/deepai_code` carries two identifying headers. The lane revision is one;
+the other is a machine identity, and it is what DeepAI issues its daily Credits grant
+against.
+
+This is not documented anywhere, so it was read out of the DeepAI Code app itself - 0.3.18,
+`app.asar`:
+
+```js
+const DEEPAI_MACHINE_HEADER = "X-DeepAI-Code-Machine";   // sha256(machine identifier)
+/**
+ * Daily Theos are granted once per machine: the server reads this header and withholds the
+ * grant from a build that omits it. ... When no identifier is readable the header is
+ * omitted and the server, told apart from an older build by the lane version, answers
+ * metered calls with machine_required.
+ */
+```
+
+The gateway hashes the same identifiers the app does - the DMI product UUID on Linux,
+`IOPlatformUUID` on macOS, the SMBIOS UUID or `MachineGuid` on Windows - and sends only the
+digest. **The raw identifier never leaves the host.**
+
+A refusal that names `machine_required` is reported as its own failure, because it is the
+gateway's problem and not the key's: no other key will fix it. The fix is to give the host a
+stable identifier, or to name one:
+
+```bash
+DEEPAI_MACHINE_ID=<a value that stays the same> npm start
+```
+
+Set it for a container that gets a new identifier on every start. A value that keeps
+changing makes DeepAI see a new machine each time, which is the situation the header exists
+to avoid. `npm run check-key` prints the value being sent.
+
 ## When DeepAI answers 426
 
 A `426 Upgrade Required` on `/v1/*` is not about the gateway's version. DeepAI reads one

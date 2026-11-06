@@ -13,6 +13,7 @@
   "account.refresh": "Refresh balance",
   "account.refreshError.http": "DeepAI answered with an error, so the balance could not be read. Try again in a moment.",
   "account.refreshError.lane-outdated": "DeepAI has retired the version this gateway speaks to it in, so the balance cannot be read. This is a gateway problem, not an account problem.",
+  "account.refreshError.machine-required": "DeepAI could not identify the machine this gateway runs on, which is what its daily Credits grant is issued against. Set DEEPAI_MACHINE_ID for this host.",
   "account.refreshError.no-account": "This account is no longer stored. Sign in again.",
   "account.refreshError.no-key": "No DeepAI key is stored for this account. Sign in again.",
   "account.refreshError.rejected": "DeepAI refused this account key. Sign in again with a key DeepAI accepts.",

@@ -13,6 +13,7 @@
   "account.refresh": "Odśwież saldo",
   "account.refreshError.http": "DeepAI odpowiedział błędem, więc salda nie udało się odczytać. Spróbuj za chwilę.",
   "account.refreshError.lane-outdated": "DeepAI wycofał wersję, w której ta brama z nim rozmawia, więc salda nie można odczytać. To problem bramy, nie konta.",
+  "account.refreshError.machine-required": "DeepAI nie rozpoznał maszyny, na której działa ta brama, a to na nią przyznaje dzienny przydział kredytów. Ustaw DEEPAI_MACHINE_ID dla tego hosta.",
   "account.refreshError.no-account": "To konto nie jest już zapisane. Zaloguj się ponownie.",
   "account.refreshError.no-key": "Dla tego konta nie ma zapisanego klucza DeepAI. Zaloguj się ponownie.",
   "account.refreshError.rejected": "DeepAI odrzuca klucz tego konta. Zaloguj się ponownie kluczem, który DeepAI akceptuje.",

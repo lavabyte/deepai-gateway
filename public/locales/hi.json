@@ -13,6 +13,7 @@
   "account.refresh": "शेष ताज़ा करें",
   "account.refreshError.http": "DeepAI ने त्रुटि के साथ उत्तर दिया, इसलिए शेष पढ़ा नहीं जा सका। थोड़ी देर में फिर कोशिश करें।",
   "account.refreshError.lane-outdated": "DeepAI ने वह संस्करण वापस ले लिया है जिसमें यह गेटवे उससे बात करता है, इसलिए शेष पढ़ा नहीं जा सकता। यह गेटवे की समस्या है, खाते की नहीं।",
+  "account.refreshError.machine-required": "DeepAI इस गेटवे वाली मशीन को पहचान नहीं सका, और दैनिक क्रेडिट उसी पर दिया जाता है। इस होस्ट के लिए DEEPAI_MACHINE_ID सेट करें।",
   "account.refreshError.no-account": "यह खाता अब सहेजा नहीं है। दोबारा साइन इन करें।",
   "account.refreshError.no-key": "इस खाते के लिए कोई DeepAI कुंजी सहेजी नहीं है। दोबारा साइन इन करें।",
   "account.refreshError.rejected": "DeepAI इस खाते की कुंजी अस्वीकार करता है। ऐसी कुंजी से दोबारा साइन इन करें जिसे DeepAI स्वीकार करता हो।",
