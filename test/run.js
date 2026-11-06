@@ -3412,6 +3412,123 @@ await checkAsync('the project presents one consistent identity', async () => {
  * `POST /api/login/complete`. These checks pin both halves of that.
  */
 
+await checkAsync('the account is polled only while the tab is on screen', async () => {
+  /*
+   * A dashboard left open in a background tab used to ask for the account every minute for as
+   * long as the browser stayed open, and once more per additional tab. The tab that is on
+   * screen is the only one showing the result, so the timer is stopped when the tab goes to
+   * the background and started again when it comes back.
+   *
+   * The events are dispatched for real here: the sandbox records the handlers app.js
+   * registers and hands them back, so this exercises the wiring rather than the helper alone.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const vm = await import('node:vm');
+  const root = new URL('..', import.meta.url).pathname;
+  const source = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+
+  const nodes = new Map();
+  const element = () => {
+    const n = {
+      innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
+      dataset: {}, style: {}, value: '', attrs: {}, children: [],
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      addEventListener() {}, appendChild(c) { n.children.push(c); },
+      append(...c) { n.children.push(...c); }, remove() {},
+      replaceChildren(...c) { n.children = Array.from(c); },
+      querySelector: () => null, querySelectorAll: () => [],
+      setAttribute(k, v) { n.attrs[k] = v; }, getAttribute(k) { return n.attrs[k] ?? null; },
+      closest: () => null, focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
+    };
+    return n;
+  };
+  for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
+    'account-badge', 'account-badge-text', 'auth-button', 'nav', 'theme-toggle',
+    'locale-button', 'locale-menu', 'locale-flag', 'currency-button', 'currency-menu', 'currency-sign']) {
+    nodes.set(id, element());
+  }
+
+  const handlers = new Map();
+  const intervals = new Map();
+  const cleared = [];
+  let nextTimer = 1;
+  const requests = [];
+
+  const documentStub = {
+    // Mutable from the test, which is what makes the visibility transitions possible.
+    visibilityState: 'visible',
+    getElementById: (id) => { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); },
+    createElement: () => element(), querySelector: () => null, querySelectorAll: () => [],
+    addEventListener: (type, fn) => { handlers.set(type, fn); },
+    documentElement: { lang: '', dataset: {} }, visibilityState: 'visible',
+    body: element(),
+  };
+  const windowStub = {
+    addEventListener: (type, fn) => { handlers.set(type, fn); },
+    matchMedia: () => ({ matches: false, addEventListener() {} }), location: { assign() {} },
+  };
+
+  const sandbox = {
+    document: documentStub,
+    window: windowStub,
+    location: { search: '', pathname: '/', hash: '' },
+    history: { replaceState() {} },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    navigator: { language: 'en-GB', languages: ['en-GB'] },
+    fetch: async (url) => {
+      const target = String(url);
+      requests.push(target);
+      if (target.includes('/locales/')) return localeResponse();
+      const body = target.includes('/account')
+        ? { ok: true, signedIn: true, username: 'someone', allowance: { balance: '4.5', granted: '10' },
+            balanceLow: false, keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false } }
+        : { ok: true, models: [] };
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+    setInterval: (fn, ms) => { const id = nextTimer += 1; intervals.set(id, { fn, ms }); return id; },
+    clearInterval: (id) => { cleared.push(id); intervals.delete(id); },
+    setTimeout: () => 0,
+    console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
+    Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
+  };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  new vm.Script(source, { filename: 'app.js' }).runInContext(sandbox);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  const accountReads = () => requests.filter((u) => u.includes('/api/account')).length;
+
+  // On screen: one timer, and it asks for the account when it fires.
+  assert.equal(intervals.size, 1, 'a visible tab polls');
+  const [timerId, timer] = [...intervals.entries()][0];
+  assert.equal(timer.ms, 60_000, 'once a minute');
+  const before = accountReads();
+  timer.fn();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(accountReads() > before, 'and the tick reads the account');
+
+  // Backgrounded: the timer is stopped outright, so there is nothing left to fire.
+  documentStub.visibilityState = 'hidden';
+  handlers.get('visibilitychange')();
+  assert.equal(intervals.size, 0, 'a background tab has no timer at all');
+  assert.ok(cleared.includes(timerId), 'the one that was running is cleared');
+  const whileHidden = accountReads();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(accountReads(), whileHidden, 'and nothing is requested while it is away');
+
+  // Returning: it reads immediately, rather than waiting out the rest of the minute.
+  documentStub.visibilityState = 'visible';
+  handlers.get('visibilitychange')();
+  assert.equal(intervals.size, 1, 'the timer comes back');
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.ok(accountReads() > whileHidden, 'with an immediate read, not a stale balance');
+
+  // The whole client keeps exactly one such timer, whatever else it grows later.
+  assert.equal((source.match(/setInterval\(/g) ?? []).length, 1, 'one timer in the client');
+  assert.equal((source.match(/visibilitychange/g) ?? []).length, 1, 'and one place that reacts to it');
+});
+
 await checkAsync('the sign-in card is three steps, a link, a field and a button', async () => {
   /*
    * One route in, and it is DeepAI's: the visitor authenticates there, copies the address the

@@ -2202,12 +2202,58 @@ window.addEventListener('hashchange', () => { void render(); });
 
 // A page restored from the back/forward cache can carry a stale account state.
 window.addEventListener('pageshow', (event) => {
-  if (event.persisted) void render();
+  if (!event.persisted) return;
+  // A restored page resumes with whatever timer state it had, so the poll is re-settled here
+  // rather than trusted to have survived the cache.
+  syncAccountPoll();
+  void render();
 });
 
-// Returning to the tab is a good moment to re-check the session.
+/*
+ * The balance is re-read on a timer, but only while somebody could be reading it.
+ *
+ * It used to tick unconditionally, so a dashboard left open in a background tab asked for
+ * the account every minute for as long as the browser stayed open - for a number nobody was
+ * looking at, and once more per additional tab. Nothing about that read is worth doing off
+ * screen: the tab that is on screen is the only one showing the result. So the timer is
+ * stopped when the tab goes to the background and started again when it returns, and coming
+ * back reads the account straight away instead of waiting out the rest of the interval.
+ */
+const ACCOUNT_POLL_MS = 60_000;
+
+/** The running timer, or null when the poll is stopped. */
+let accountPoll = null;
+
+/**
+ * Whether this tab is on screen.
+ *
+ * `visibilityState` is `hidden` for a background tab, a minimised window and a locked screen,
+ * which is what "left open somewhere" means. Anything else counts as on screen, so a browser
+ * that does not report it keeps polling rather than showing a balance that never moves.
+ *
+ * @returns {boolean}
+ */
+function isOnScreen() {
+  return document.visibilityState !== 'hidden';
+}
+
+/** Start the poll, or stop it, so that it runs exactly when the tab is on screen. */
+function syncAccountPoll() {
+  if (isOnScreen()) {
+    if (accountPoll === null) {
+      accountPoll = setInterval(() => { void loadAccount(); }, ACCOUNT_POLL_MS);
+    }
+  } else if (accountPoll !== null) {
+    clearInterval(accountPoll);
+    accountPoll = null;
+  }
+}
+
+// Coming back to the tab is the moment to re-check: the session may have ended while it was
+// away, and the balance has had time to move.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') void loadAccount();
+  syncAccountPoll();
+  if (isOnScreen()) void loadAccount();
 });
 
 /* Kick off: language, account and catalog in parallel, then the first view. */
@@ -2227,6 +2273,6 @@ document.addEventListener('visibilitychange', () => {
     history.replaceState(null, '', `${location.pathname}${location.hash}`);
   }
   await render({ refreshAccount: false });
-  // Keep the balance reasonably fresh while the tab is open.
-  setInterval(() => { void loadAccount(); }, 60_000);
+  // Keep the balance fresh, for as long as this tab is the one being looked at.
+  syncAccountPoll();
 })();

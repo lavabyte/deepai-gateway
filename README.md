@@ -189,7 +189,11 @@ Report a security problem by opening an issue, or privately if the repository of
 - **Recent requests** - newest first, failures included, with token split,
   duration and status.
 - **Account card** - who is signed in, the Credits balance, and a low-balance
-  warning.
+  warning. The balance is re-read once a minute, **but only while this tab is the
+  one on screen**: a background tab stops asking entirely and picks up again, with
+  an immediate read, the moment you return to it. A dashboard left open in a
+  background tab therefore costs nothing, and opening a second tab does not double
+  the traffic - only the visible tab polls.
 - **14-day sparkline** of daily tokens.
 
 ### Models
