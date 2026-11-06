@@ -2703,8 +2703,22 @@ await checkAsync('every language is complete and agrees on its placeholders', as
   const app = readFileSync(join(root, 'public', 'app.js'), 'utf8');
   const html = readFileSync(join(root, 'public', 'index.html'), 'utf8');
   const used = new Set();
-  for (const m of app.matchAll(/\bt\(\s*'([a-zA-Z][\w.]*)'/g)) used.add(m[1]);
-  for (const m of app.matchAll(/counted\(\s*'([a-zA-Z][\w.]*)'/g)) used.add(m[1]);
+  /*
+   * Any string literal in the client that names a key the locale file has.
+   *
+   * The obvious pattern - the key right after `t(` - misses the ways a key can be *chosen*
+   * rather than typed in place, and `t(model.premier ? 'a' : 'b')` was a real key it read as
+   * an orphan. Rather than teach this a little grammar, any literal that matches a key in the
+   * locale file counts as referenced. It is generous on purpose: the question is whether
+   * anything can ask for the key, and a key named in the client - in a call, in a ternary, in
+   * a table - can be asked for.
+   *
+   * It still catches what it is for: a key that nothing names at all is still unnamed, which
+   * is how the abandoned `common.logIn` was found.
+   */
+  for (const m of app.matchAll(/'([a-z][a-zA-Z]*\.[a-zA-Z][\w.]*)'/g)) {
+    if (english[m[1]] !== undefined) used.add(m[1]);
+  }
   /*
    * Keys built at runtime from a stable family: `t(`status.${status}`)`. The family is read
    * out of the source rather than listed here, because a list has to be remembered - and the
@@ -2727,6 +2741,74 @@ await checkAsync('every language is complete and agrees on its placeholders', as
   // English must not have been translated into itself for any key a translator touched.
   assert.notEqual(LOCALES.pl['common.cancel'], english['common.cancel'],
     'a translation must actually differ from English');
+});
+
+await checkAsync('a dialog and a tooltip speak the visitor\'s language too', async () => {
+  /*
+   * Reported from the page: clicking "Usuń" on a key opened a confirmation written in English.
+   *
+   * Five sentences were hardcoded in the client rather than asked of the locale file, so the
+   * dialog was English in every language - and because the text never reached the locale file,
+   * nothing in the test suite could see it either. The same was true of the model pill tooltip.
+   *
+   * Currency names were the third case, and were deliberate: the code said a currency "says the
+   * same thing in every language the dashboard speaks". It does not - "British Pound" is
+   * English, and it was what a Polish visitor read. `Intl.DisplayNames` answers with the right
+   * name in whatever language is loaded, so no table is needed.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const root = new URL('..', import.meta.url).pathname;
+  const app = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+
+  // The sentences are gone from the source: asking for them is the only way to show them.
+  for (const gone of ['Revoke this key?', 'is deleted and stops working immediately',
+    'This cannot be undone', 'Usage already recorded is kept', 'Revoke key',
+    'Premium - billed in Credits', 'Free - unmetered']) {
+    assert.ok(!app.includes(gone), `${JSON.stringify(gone)} must not be hardcoded in the client`);
+  }
+
+  // And they are asked for, with the key name as a parameter rather than joined into the text,
+  // so a translation can put it where its own grammar wants it.
+  for (const key of ['keys.revokeTitle', 'keys.revokeLine1', 'keys.revokeLine2',
+    'keys.revokeLine3', 'keys.revokeConfirm', 'models.pillPremium', 'models.pillFree']) {
+    assert.ok(app.includes(`'${key}'`), `${key} must be referenced by the client`);
+  }
+  assert.match(app, /t\('keys\.revokeLine1', \{ name: key\.name \}\)/,
+    'the key name is a placeholder, not concatenation');
+
+  // Currency names come from the browser, which knows them in every language.
+  assert.match(app, /new Intl\.DisplayNames\(\[state\.locale\], \{ type: 'currency' \}\)/,
+    'currency names are localised through Intl.DisplayNames');
+  assert.match(app, /function currencyName\(entry\)/, 'behind one helper');
+  // The English name in the table is the fallback, so a browser without the API still names it.
+  assert.match(app, /currencyName\(entry\)/, 'and the tooltip uses it');
+  assert.ok(!/\$\{entry\.label\}/.test(app), 'the English label must no longer be shown directly');
+
+  // Every language carries them, and the one with a placeholder carries it everywhere.
+  const locales = Object.fromEntries(['en', 'pl', 'de', 'es', 'hi'].map((code) =>
+    [code, JSON.parse(readFileSync(join(root, 'public', 'locales', `${code}.json`), 'utf8'))]));
+  for (const [code, strings] of Object.entries(locales)) {
+    for (const key of ['keys.revokeTitle', 'keys.revokeLine1', 'keys.revokeLine2',
+      'keys.revokeLine3', 'keys.revokeConfirm', 'models.pillPremium', 'models.pillFree']) {
+      assert.equal(typeof strings[key], 'string', `${code} is missing ${key}`);
+      assert.ok(strings[key].trim() !== '', `${code} has an empty ${key}`);
+    }
+    assert.ok(strings['keys.revokeLine1'].includes('{name}'),
+      `${code} must keep the name placeholder in the first line`);
+    /*
+     * A translated dialog must not have picked up the decorative characters this project bans.
+     * The characters are built from their code points rather than written as escapes: the
+     * character test decodes escapes before judging them, so spelling one here would make this
+     * file fail the very rule it is checking.
+     */
+    const banned = [0x2018, 0x2019, 0x201c, 0x201d, 0x2014, 0x2026].map((cp) => String.fromCodePoint(cp));
+    for (const key of ['keys.revokeTitle', 'keys.revokeLine1', 'keys.revokeLine2',
+      'keys.revokeLine3', 'keys.revokeConfirm']) {
+      assert.ok(!banned.some((character) => strings[key].includes(character)),
+        `${code}.${key} contains a character the project bans`);
+    }
+  }
 });
 
 await checkAsync('the language switcher offers every language and remembers the choice', async () => {

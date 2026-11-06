@@ -976,8 +976,33 @@ async function setLocale(code) {
   localStorage.setItem(LOCALE_KEY, entry.code);
   applyStaticText();
   renderLocaleButton();
+  // The currency tooltip is a translated name, so it is redrawn with everything else.
+  renderCurrencyButton();
   renderAccountBadge();
   await render({ refreshAccount: false });
+}
+
+/**
+ * The name of a currency in the language the dashboard is showing.
+ *
+ * `Intl.DisplayNames` is what makes this free: the browser already knows what a currency code
+ * is called in every language it supports, so there is no table to translate and even a
+ * language the dashboard does not ship gets a correct name. The English name in the table is
+ * the fallback for a browser without the API.
+ *
+ * This used to be the English name in every language, on the reasoning that a currency is a
+ * code with a sign and says the same thing everywhere. It does not: "British Pound" is
+ * English, and it is what a Polish visitor read in the tooltip.
+ *
+ * @param {{code: string, label: string}} entry
+ * @returns {string}
+ */
+function currencyName(entry) {
+  try {
+    return new Intl.DisplayNames([state.locale], { type: 'currency' }).of(entry.code) ?? entry.label;
+  } catch {
+    return entry.label;
+  }
 }
 
 /**
@@ -985,8 +1010,7 @@ async function setLocale(code) {
  *
  * `¥` alone cannot tell JPY from CNY and `Fr` cannot tell CHF from anything else that
  * writes francs, so the code travels in the tooltip and the accessibility label instead
- * of widening the menu. The names are not translated either way: a currency is a code
- * with a sign, and it says the same thing in every language the dashboard speaks.
+ * of widening the menu.
  */
 function renderCurrencyMenu() {
   const menu = $('currency-menu');
@@ -1002,8 +1026,8 @@ function renderCurrencyMenu() {
     sign.className = 'picker__sign';
     sign.setAttribute('aria-hidden', 'true');
     sign.textContent = entry.sign;
-    option.title = `${entry.code} ${entry.label}`;
-    option.setAttribute('aria-label', `${entry.code} ${entry.label}`);
+    option.title = `${entry.code} ${currencyName(entry)}`;
+    option.setAttribute('aria-label', `${entry.code} ${currencyName(entry)}`);
     option.append(sign);
     option.addEventListener('click', () => {
       closeCurrencyMenu();
@@ -1041,7 +1065,7 @@ function renderCurrencyButton() {
   const sign = $('currency-sign');
   if (sign !== null) sign.textContent = entry.sign;
   const button = $('currency-button');
-  if (button !== null) button.setAttribute('title', `${entry.label} (${entry.code})`);
+  if (button !== null) button.setAttribute('title', `${currencyName(entry)} (${entry.code})`);
   for (const option of document.querySelectorAll('[data-currency]')) {
     option.classList.toggle('is-active', option.dataset.currency === state.currency);
   }
@@ -1888,13 +1912,16 @@ async function renderKeys() {
 
       if (action === 'revoke') {
         const confirmed = await confirmAction({
-          title: 'Revoke this key?',
+          title: t('keys.revokeTitle'),
           lines: [
-            `'${key.name}' is deleted and stops working immediately.`,
-            'This cannot be undone, and anything using this key will need a new one.',
-            'Usage already recorded is kept.',
+            // The name is the visitor's own text, and `confirmAction` sets it as text, so it
+            // cannot become markup. It is passed as a parameter rather than joined in, so a
+            // translation can put it where its own grammar wants it.
+            t('keys.revokeLine1', { name: key.name }),
+            t('keys.revokeLine2'),
+            t('keys.revokeLine3'),
           ],
-          confirmLabel: 'Revoke key',
+          confirmLabel: t('keys.revokeConfirm'),
           danger: true,
         });
         if (!confirmed) return;
@@ -1990,7 +2017,7 @@ function openKeyModal(existing, onDone) {
     pill.type = 'button';
     pill.className = 'pill';
     pill.textContent = model.displayName ?? model.id;
-    pill.title = model.premier ? 'Premium - billed in Credits' : 'Free - unmetered';
+    pill.title = t(model.premier ? 'models.pillPremium' : 'models.pillFree');
     pill.dataset.on = String(selected.has(model.id));
     pill.addEventListener('click', () => {
       // Touching any pill means an explicit list, not "every model".
