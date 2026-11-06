@@ -2164,6 +2164,43 @@ await checkAsync('the key is remembered and can be cleared', async () => {
     'and a blocked write does not throw');
 });
 
+await checkAsync('a retired lane revision is reported as the gateway problem it is', async () => {
+  /*
+   * DeepAI reads one version from the request: `X-DeepAI-Code-Theos`. It is the lane
+   * protocol revision, not this gateway's version, and a retired one is refused with
+   * `426 lane_version_unsupported` - before the key is read, and with a body that tells the
+   * reader to "update the app", which a client of this gateway does not have.
+   *
+   * Sending `1` stopped working exactly that way. The header therefore comes from one named
+   * constant, and a 426 is turned into a message that names the cause.
+   */
+  const { LANE_HEADERS, LANE_VERSION, errorFor } = await import('../src/deepai/wire.js');
+
+  assert.equal(LANE_HEADERS['X-DeepAI-Code-Theos'], LANE_VERSION, 'the header carries the constant');
+  // `1` and `2` were retired by DeepAI; anything at or below them would send every request
+  // into the 426 path, which is the outage this guards against.
+  assert.ok(Number(LANE_VERSION) >= 3, `lane revision ${LANE_VERSION} is retired`);
+
+  // The mapping: a 426 is the lane, and says so rather than repeating "update the app".
+  const retired = await errorFor(new Response(
+    JSON.stringify({ error: { message: 'This version of DeepAI Code is no longer supported. Please update the app.', code: 'lane_version_unsupported' } }),
+    { status: 426 },
+  ), 'DeepAI Code');
+  assert.equal(retired.status, 426, 'the status is passed through');
+  assert.equal(retired.code, 'LANE_OUTDATED', 'with a code that names the cause');
+  assert.match(retired.message, /retired lane revision/, 'and a message that names it');
+  assert.match(retired.message, /not a problem with the request or the key/,
+    'so the reader does not go looking for a bad key');
+
+  // Other statuses keep their meanings: this must not become a catch-all.
+  const auth = await errorFor(new Response('{}', { status: 401 }), 'DeepAI Code');
+  assert.equal(auth.code, 'AUTH');
+  const limited = await errorFor(new Response('{}', { status: 429 }), 'DeepAI Code');
+  assert.equal(limited.code, 'RATE_LIMIT');
+  const broken = await errorFor(new Response('{}', { status: 500 }), 'DeepAI Code');
+  assert.equal(broken.code, 'PROVIDER_ERROR');
+});
+
 await checkAsync('the text stays inside the characters a keyboard can reach', async () => {
   /*
    * The line, written down so it does not have to be remembered:

@@ -10,8 +10,23 @@
 
 export const API_ORIGIN = 'https://api.deepai.org';
 
-/** Header the desktop app uses to mark `/deepai_code` traffic. */
-export const LANE_HEADERS = Object.freeze({ 'X-DeepAI-Code-Theos': '1' });
+/**
+ * Header the desktop app uses to mark `/deepai_code` traffic, and the one place DeepAI
+ * reads a *version* from.
+ *
+ * The number is the lane protocol revision, not this gateway's version, and DeepAI retires
+ * them: a request carrying an old one is refused with
+ * `426 lane_version_unsupported` - "This version of DeepAI Code is no longer supported.
+ * Please update the app." - before the key is even looked at. `1` and `2` were retired;
+ * `3` is the current revision and the oldest one still accepted, so it is what is sent.
+ *
+ * If a 426 comes back, DeepAI has retired this number too. Probe
+ * `POST /deepai_code/chat/completions` with an invalid key and a candidate value: a retired
+ * lane answers `426 lane_version_unsupported` and a live one answers `401 auth_required`,
+ * which makes the revision cheap to find again.
+ */
+export const LANE_VERSION = '3';
+export const LANE_HEADERS = Object.freeze({ 'X-DeepAI-Code-Theos': LANE_VERSION });
 
 /**
  * Product identity sent upstream.
@@ -105,6 +120,20 @@ export async function errorFor(response, label) {
       `DeepAI: rate limited or at capacity (HTTP ${status})${detail}`,
       'RATE_LIMIT',
       { status, providerRetryAfterMs: after },
+    );
+  }
+  /*
+   * 426 is DeepAI retiring a lane revision, not a fault in the request: it is answered
+   * before the key is read, and its body says only "Please update the app" - which, sent to
+   * a client of this gateway, names an app the reader does not have. The message says what
+   * is actually wrong and what fixes it, because the body cannot be made to.
+   */
+  if (status === 426) {
+    return new UpstreamError(
+      `DeepAI has retired lane revision ${LANE_VERSION}: the request was refused before the key was read. `
+      + `This is a gateway configuration issue, not a problem with the request or the key. ${detail}`,
+      'LANE_OUTDATED',
+      { status },
     );
   }
   return new UpstreamError(`${label} HTTP ${status}${detail}`, 'PROVIDER_ERROR', {

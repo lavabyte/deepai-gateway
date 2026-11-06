@@ -668,6 +668,29 @@ totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens
 When the gateway reports usage back to its clients it re-inflates
 `prompt_tokens` so a client's own accounting stays consistent.
 
+## When DeepAI answers 426
+
+A `426 Upgrade Required` on `/v1/*` is not about the gateway's version. DeepAI reads one
+version from the request - the `X-DeepAI-Code-Theos` header, which is a **lane protocol
+revision** - and retires revisions from time to time. A retired one is refused before the
+key is even read, with a body that says *"This version of DeepAI Code is no longer
+supported. Please update the app."*, which is advice a client of this gateway cannot act on.
+
+The revision lives in one named constant, `LANE_VERSION` in `src/deepai/wire.js`. If a 426
+comes back, DeepAI has retired it too, and finding the new one takes a minute:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' https://api.deepai.org/deepai_code/chat/completions \
+  -H 'Api-Key: not-a-key' -H 'content-type: application/json' \
+  -H 'X-DeepAI-Code-Theos: 4' \
+  -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],"stream":true}'
+```
+
+A retired revision answers `426`; a live one answers `401` (`auth_required`), because the
+fake key is the only thing left to fail on. Set `LANE_VERSION` to a value that answers
+`401`, and the gateway turns any future `426` into a message that names the cause instead of
+passing DeepAI's wording through.
+
 ## Performance
 
 Streaming is a pass-through: deltas are forwarded as they arrive, and the
