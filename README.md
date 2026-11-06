@@ -67,7 +67,6 @@ each one; `npm start` reads `.env`, so nothing has to be exported in your shell.
 | `HOST` | `0.0.0.0` | Listen address: every interface. Set `127.0.0.1` for this host only |
 | `DATABASE` | `./data/deepai.db` | SQLite file |
 | `TRUST_PROXY` | unset | Set `1` behind a TLS proxy: trust `X-Forwarded-*` and set `Secure` cookies |
-| `CALLBACK_LOGIN` | `0` | Set `1` to also offer DeepAI's browser sign-in, finishing at `/callback` - see [Signing in with `/callback`](#signing-in-with-callback) |
 | `FORGET_ACCOUNT_AFTER_DAYS` | `0` | Forget accounts nobody has used for this many days - see [Retention](#retention). `0` (the default) forgets nothing |
 | `LOG_REQUESTS` | `1` | Set `0` to silence per-request logging |
 | `PRICING_CACHE` | `./data/pricing.json` | Where the fetched price table is cached |
@@ -114,126 +113,34 @@ plain-HTTP localhost, where a `Secure` cookie would never be sent.
 
 ## Signing in
 
-The dashboard offers one field: **the account's API key**, from
-<https://deepai.org/dashboard/profile>. Paste it, press the button, and you are in.
+There is one way in, and it is DeepAI's own sign-in page. Three steps:
 
-That key is a **UUID** - `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` - and not the `sk-` form this
-gateway hands out for its own API. The two are unrelated: the UUID is the DeepAI account's
-credential and is replayed upstream, while an `sk-` key is minted here and only this gateway
-understands it.
+1. **Get callback url** opens DeepAI's sign-in in a new tab. It is a real link, not a popup.
+2. Authenticate there, as you normally would - a password, or Google or Apple.
+3. DeepAI sends the browser to a `127.0.0.1` address on this gateway, which usually cannot
+   load. **The address is still in the bar: copy it and paste it into the field**, then press
+   **Login to gateway**.
 
-The key is the credential DeepAI validates, so nothing else is asked for. That is also why
-there is no name or email anywhere in the interface: a DeepAI key does not say who it
-belongs to, and an address a visitor types is a claim rather than evidence. The account is
-its key's fingerprint, so the same key always resolves to the same owner and no name can
-claim another's.
+No password is typed into this gateway, and no API key is asked for. The address carries the
+one-shot `code` and the 256-bit `state` this gateway generated, so pasting it back is what
+completes the sign-in - and it works from any browser, with no tunnel and no port forward.
 
-**A key from that page is not automatically enabled for DeepAI Code.** If DeepAI refuses it
-for the Code lane the dashboard says exactly that, rather than calling it a wrong key: the
-key is real, and the Code app is where a key that works comes from. There is no other route
-to fall back to, so that message is the whole advice.
+### Why the address has to be pasted
 
-### Why the browser sign-in is off
+**DeepAI chooses the sign-in callback host, and it always chooses `127.0.0.1`.** It implements
+RFC 8252 for a native client:
 
-**DeepAI chooses the sign-in callback host, and it always chooses `127.0.0.1`.** That is
-why this gateway does not use DeepAI's browser sign-in by default:
+- The sign-in request carries only `state` and `port`. DeepAI parses `port` as a plain TCP
+  port - a full URL, a `host:port` pair, `0`, `-1` or an empty value are all rejected with
+  `400 Invalid desktop sign-in request` - so no parameter carries a public origin.
+- The sign-in page builds nothing client-side: it polls `/daily-time-sync/user/` and reloads
+  *itself*, leaving the redirect to DeepAI's server, which only ever learns a port number.
 
-- The sign-in request carries only `state` and `port`. DeepAI parses `port` as a plain
-  TCP port - a full URL, a `host:port` pair, `0`, `-1` or an empty value are all rejected
-  with `400 Invalid desktop sign-in request` - so there is no parameter through which a
-  public origin could be passed.
-- The sign-in page builds nothing client-side either: it polls
-  `/daily-time-sync/user/` and reloads *itself*, leaving the redirect to DeepAI's server,
-  which only ever learns a port number.
+A browser on any other machine therefore lands on an address it cannot open. That is the
+whole reason for step 3: the address is the credential, so it is copied rather than followed.
 
-This is the RFC 8252 native-app pattern: the official DeepAI Code desktop app binds
-`127.0.0.1:0`, hands over the ephemeral port, and expects the browser to come back to
-loopback. A browser on any other machine cannot open that address, and **no setting
-changes it** - which is why there is no `PUBLIC_URL` and no relay to configure.
-
-### Signing in with `/callback`
-
-Off unless `CALLBACK_LOGIN` is set, because DeepAI fixes the redirect host to `127.0.0.1`:
-
-```bash
-CALLBACK_LOGIN=1 npm start
-```
-
-The dashboard then offers **Use DeepAI's sign-in page**, which navigates to DeepAI as usual
-and comes back to `/callback` on this gateway. It completes only where that address reaches
-the gateway, which in practice means:
-
-- the browser runs on the gateway's own host, or
-- the port is forwarded to it, so `127.0.0.1:<port>` in the browser is this gateway:
-
-  ```sh
-  ssh -L 25912:127.0.0.1:8787 you@gateway-host
-  ```
-
-  then browse to `http://127.0.0.1:25912` and sign in.
-
-The port matters: DeepAI parses it as a plain integer, so the one it is given is the port
-the browser must reach. Behind a proxy that is the internal port rather than the public one,
-so use the forward from the browser's own machine.
-
-If the last page does not load - the usual case when the address cannot be reached - the
-card offers a field for pasting that page's address. The address is what authorises the
-completion: it carries the one-shot `code` and the 256-bit `state` this gateway generated,
-so a paste needs no session and nobody can finish somebody else's attempt.
-
-`/auth-callback` is served as an alias of `/callback`, because earlier builds advertised
-that path.
-
-### What a refusal says
-
-The key is checked the way a stored account is (`GET /deepai_code/theos`), so a refusal
-says which kind it was:
-
-| What DeepAI said | What the visitor is told |
-| --- | --- |
-| `credits` returns 401 and the public API does not recognise the key either | "DeepAI did not recognise that key" |
-| `credits` returns 401 but the public model API *does* accept it | the key is valid but **not enabled for DeepAI Code** - which is what this gateway uses |
-| anything else | DeepAI is unreachable; not the visitor's mistake |
-
-That middle case is the likeliest failure of all, because `deepai.org` issues a key for
-the public model API and it is not automatically enabled for DeepAI Code. Its message names
-the Code app, and it is the only advice there is: the key field is the only route, so a
-visitor holding such a key needs to be told where a different one comes from rather than
-left to conclude they mistyped.
-
-An empty field and an implausibly long one are refused before any network call. A test
-asserts that every reason the key check can report has a message, that the two the route
-answers itself have one too, and that no message describes a reason nothing can produce.
-
-### Why the account has no name
-
-Ownership is derived from the key, and nothing else:
-
-`api_keys.owner_username` decides who sees and pays for a key, so an owner the visitor
-could choose would let them claim someone else's account. The owner is therefore
-`key-<sha256(key)[0..16]>`: one-to-one with the key, non-reversible, and impossible to
-point at another account.
-
-An email used to be read out of the account JSON and shown as a `display_name`. It is gone
-from both ends. It was a claim rather than evidence - nothing DeepAI answers confirms an
-address - and it was rendered in the top bar and on the account card, which made a stored
-string into a page's markup. The badge shows the Credits balance alone.
-
-**A key already known to the gateway keeps its account.** DeepAI mints a fresh key on
-every sign-in, so one DeepAI account can hold several, and the same key can arrive twice.
-Matching on the key keeps that on one owner instead of splitting the account, its keys and
-its usage across two identities that look unrelated in the dashboard.
-
-### Why the account has no name to show
-
-No request makes a DeepAI key reveal its account, which is why there is no name to put
-beside it rather than a field asking for one:
-
-| Attempt | Result |
-| --- | --- |
-| `GET /deepai_code/theos`, `GET /get_usage_summary` with the key | allowance only, no identity |
-| `GET /daily-time-sync/user/` - the endpoint DeepAI's own sign-in page uses to ask "who am I" - with the key | answers **201**, not 200, which that page reads as "not signed in" |
-| `POST /deepai_code/desktop_auth/exchange/` with a key instead of a code | `400 invalid code` |
+If the browser *can* reach the gateway on loopback - it runs on the same host, or the port is
+forwarded - the redirect opens by itself and the sign-in completes without the paste.
 
 ## Security
 
@@ -262,8 +169,8 @@ DeepAI could have issued. That is the whole authentication model, so:
   that slot by an older version is ignored rather than offered as a key.
 - **The sign-in route is unauthenticated and unthrottled** - it has to be, since it *is* the
   way in - and a valid-looking paste makes the gateway issue up to three requests to DeepAI.
-  Put a rate limiter in front of `/api/login/key` (and `/callback` when enabled) if the
-  gateway is exposed.
+  Put a rate limiter in front of `/api/login/complete` and `/callback` if the gateway is
+  exposed.
 - **Per-key limits are a check-then-act**, so a key can exceed its cap by sending concurrent
   requests. Treat a key's limit as a guard against accidents, not against an adversary.
 
@@ -590,7 +497,7 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/` | The dashboard |
-| `POST` | `/api/login/key` | The way in: the account's API key - see [Signing in](#signing-in) |
+| `POST` | `/api/login/complete` | The way in: the callback address DeepAI sent the browser to - see [Signing in](#signing-in) |
 | `GET` | `/logout` | Sign out, then redirect to `/` |
 | `GET` | `/api/account` | This session's account, allowance, default model, key quota |
 | `GET` | `/api/account/events` | That account's auth trail (login, logout, refresh, denied) |
@@ -688,25 +595,8 @@ it checks the key the gateway actually stored, which is the only key the dashboa
 and it saves copying a secret into a terminal. It reads `DATABASE`, or `./data/deepai.db`,
 exactly as the server does.
 
-It prints what DeepAI answers for the key's allowance, for the model API, and for the Code
-lane, then a verdict: the key is unknown, the key is real but not enabled for Code, the key
-works, or the gateway is speaking a retired lane revision. It never prints the key, and the
-Code-lane probe uses an unusable model name - DeepAI checks authentication before the request
-body - so it cannot generate a token or spend a credit.
-
-A key DeepAI Code accepts comes from **DeepAI's own sign-in page** - the same flow the
-official Code app uses. This gateway implements it:
-
-```bash
-CALLBACK_LOGIN=1 npm start
-```
-
-The sign-in card then offers **Use DeepAI's sign-in page**, which signs in at DeepAI and
-comes back with a key the Code lane accepts. DeepAI returns the browser to a `127.0.0.1`
-address on the gateway's own port, which only opens where that address reaches the gateway;
-**if the page does not load, paste its address into the field below the button** - the address
-carries the one-shot code and the state that authorises the completion, so it works from a
-browser that could never open it.
+The sign-in the gateway uses is the one the Code app uses: DeepAI's own page, and the
+`desktop_auth` exchange behind it for an `api_key` - see [Signing in](#signing-in).
 
 ## The machine header, and `machine_required`
 

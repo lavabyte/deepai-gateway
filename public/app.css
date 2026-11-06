@@ -201,7 +201,7 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
   font-size: 13px; font-weight: 500; cursor: pointer;
   border: 1px solid transparent; background: transparent; color: var(--ink);
   transition: background .15s, border-color .15s, color .15s, opacity .15s;
-  white-space: nowrap;
+  white-space: nowrap; text-decoration: none;
 }
 .btn:disabled { opacity: .45; cursor: default; }
 .btn--primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
@@ -314,21 +314,11 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
   background-position: calc(100% - 14px) 14px, calc(100% - 9px) 14px;
   background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
 }
-/*
- * A button that reads as a link, for the small in-sentence actions - "Clear it" beside the
- * field it clears. It had no rule of its own, so it rendered as a default browser button:
- * grey, boxed, and nothing like the hint it sits inside.
- */
-.linklike {
-  padding: 0; border: 0; background: none;
-  font: inherit; color: var(--link); cursor: pointer;
-  text-decoration: underline; text-underline-offset: 2px;
-}
-.linklike:hover { color: var(--ink); }
-.linklike:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 2px; }
+/* A callback address is read character by character, so it is set in the mono face. */
+.input--url { font-family: var(--mono); letter-spacing: .01em; }
 
-/* An API key is read character by character, so it is set in the mono face. */
-.input--key { font-family: var(--mono); letter-spacing: .01em; }
+/* "Get callback url" is an anchor with the button classes, so it opens in a new tab. */
+.btn.is-disabled { opacity: .45; pointer-events: none; }
 
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field__label { font-size: 12px; font-weight: 500; color: var(--text-2); }
@@ -390,6 +380,10 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
 .note--warning { background: var(--badge-amber-bg); border-color: var(--warning); color: var(--badge-amber-tx); }
 /* A hint that prevents a mistake, rather than a warning about a failure. */
 .note--error { background: var(--badge-red-bg); border-color: var(--error); color: var(--badge-red-tx); }
+/* The sign-in steps, which are read before anything is clicked. */
+.note--info { background: var(--badge-blue-bg); border-color: var(--link); color: var(--badge-blue-tx); }
+.note--info .step__list { margin: 0; padding-left: 18px; }
+.note--info li { margin: 2px 0; }
 
 .snippet {
   display: flex; align-items: center; gap: 10px;

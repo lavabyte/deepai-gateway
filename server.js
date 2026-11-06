@@ -54,7 +54,6 @@ export function config(env = process.env) {
      * reaches that address as this gateway. The paste-the-JSON route works from anywhere,
      * which is why it is the default.
      */
-    callbackLogin: env.CALLBACK_LOGIN === '1' || env.CALLBACK_LOGIN === 'true',
   };
 }
 
@@ -80,8 +79,6 @@ export function createApp(db, options = {}) {
   const runtime = {
     log: options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`)),
     trustProxy: options.trustProxy === true,
-    // Read by the dashboard so it only offers the route when the gateway serves it.
-    callbackLogin: options.callbackLogin === true,
   };
 
   const app = express();
@@ -115,17 +112,17 @@ export function createApp(db, options = {}) {
   app.use(attachSession(db));
 
   /*
-   * DeepAI's browser sign-in, when a deployment asks for it.
+   * DeepAI's own sign-in, which is the only way in.
    *
-   * Mounted before the dashboard router so `/api/login/complete` is served by the module
-   * that owns the pending attempts - the same map the `/callback` page route reads, which
-   * is why both come from one factory.
+   * Always mounted, not behind a setting: the flow finishes by pasting back the address the
+   * browser could not open, which works from anywhere - so there is nothing a deployment
+   * could opt out of, and a deployment that had opted out would have no way to sign in at
+   * all. Mounted before the dashboard router so `/api/login/complete` is served by the
+   * module that owns the pending attempts.
    */
-  if (runtime.callbackLogin) {
-    const callback = createCallbackLogin(db, runtime);
-    app.use(callback.router);
-    app.post('/api/login/complete', callback.complete);
-  }
+  const callback = createCallbackLogin(db, runtime);
+  app.use(callback.router);
+  app.post('/api/login/complete', callback.complete);
 
   app.use('/v1', v1Router(db));
   app.use('/api', adminRouter(db, runtime));
@@ -303,11 +300,6 @@ export function start(overrides = {}) {
       // The dashboard is protected by a cookie, but an operator should still
       // know the panel is reachable from the network.
       console.log('[deepai-gateway] note: HOST is not loopback - the dashboard is reachable from the network');
-    }
-    if (settings.callbackLogin) {
-      console.log('[deepai-gateway] note: DeepAI browser sign-in is enabled (CALLBACK_LOGIN); it finishes at /callback,');
-      console.log(`[deepai-gateway]       which DeepAI fixes to ${`http://127.0.0.1:${port}/callback`}`);
-      console.log('[deepai-gateway]       and only opens on a browser that can reach it, e.g. through a port forward');
     }
     // A setting that deletes accounts is worth stating out loud at every boot.
     if (settings.forgetAccountAfterDays > 0) {

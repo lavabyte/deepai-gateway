@@ -1,16 +1,17 @@
 /**
  * DeepAI's own browser sign-in, finishing at `/callback` on this gateway.
  *
- * **Off unless `CALLBACK_LOGIN` is set.** DeepAI implements RFC 8252 for a native client:
+ * DeepAI implements RFC 8252 for a native client:
  * it always builds `http://127.0.0.1:<port>/callback` as the redirect, and nothing in the
  * request can move that host - `port` is parsed as a plain integer, so a URL, a `host:port`
  * pair, `0`, `-1` and an empty value are each rejected with `400 Invalid desktop sign-in
  * request`. The redirect therefore only resolves when the browser reaches that address as
  * this gateway: the browser runs on this host, or the port is forwarded to it.
  *
- * That is why the default sign-in is the account JSON pasted from
- * `https://api.deepai.org/daily-time-sync/user/`, which works from anywhere. This module
- * exists for the deployment where the forward is easy and the paste is not wanted.
+ * That is why the flow ends by asking for the address back. The browser lands on a page that
+ * cannot load, the address carries the one-shot `code` and the `state` this gateway
+ * generated, and pasting it completes the sign-in from anywhere - no port forward, no tunnel,
+ * and no password typed into this gateway.
  *
  * A pending attempt is keyed by its own `state` - 256 random bits the gateway generates
  * and DeepAI echoes back - rather than by a per-browser cookie. The state IS the capability:
@@ -118,7 +119,7 @@ const FAILURES = {
 };
 
 /**
- * The sign-in routes, mounted only when `CALLBACK_LOGIN` is on.
+ * The sign-in routes. They are the only way in, so they are always mounted.
  *
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {object} runtime - `{ log, trustProxy, completeLogin }`

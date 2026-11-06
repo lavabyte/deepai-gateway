@@ -283,175 +283,86 @@ function isAuthFailure(error) {
 
 
 /**
- * The one way in: the account JSON, read out of DeepAI's own API page.
+ * The one way in: DeepAI's own sign-in page, and the address it comes back to.
  *
- * DeepAI's own browser sign-in always calls back to `127.0.0.1`, which nothing here can
- * change, and a Google or Apple account has no password to post anywhere. But the account
- * JSON is served to the visitor's own browser, and a browser shows it as a plain page - so
- * they open that address, where they are already signed in, and copy what it says.
+ * The flow is three steps and one field. DeepAI signs the visitor in on its own page - so a
+ * Google or Apple account works, and no password is ever typed here - and then sends the
+ * browser to a `127.0.0.1` address on this gateway, which usually cannot load. The address
+ * is still in the bar, and it carries the one-shot `code` and the `state` this gateway
+ * generated, so pasting it back completes the sign-in. Nothing needs a tunnel.
  *
- * Two earlier versions of this instruction were worse, and both were taught by trying
- * them: a browser-console command returns `'OK'` unless the console happens to be on
- * DeepAI's own origin, because the API answers `201 OK` to an unauthenticated request;
- * and a link the visitor had to click to reveal these steps meant the instructions they
- * needed were the ones they could not see.
- */
-function keyPasteHelp(prefix = '') {
-  return `
-    <section class="step" id="${prefix}key-step">
-      <ol class="step__list">
-        <li>
-          ${t('key.step1')}
-          <a href="https://deepai.org/dashboard/profile" target="_blank" rel="noreferrer noopener">https://deepai.org/dashboard/profile</a>
-        </li>
-        <li>${t('key.step2')}</li>
-      </ol>
-
-      <div class="field mt-3">
-        <input class="input input--key" id="${prefix}key-paste" type="text" spellcheck="false"
-          autocomplete="off" autocapitalize="off"
-          placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="${esc(lastKey())}">
-        <div class="field__hint">${t('key.hint')}</div>
-        ${lastKey() === '' ? '' : `
-          <div class="field__hint" id="${prefix}content-saved">
-            ${t('signin.contentSaved')}
-            <button class="linklike" id="${prefix}content-forget" type="button">${t('signin.contentForget')}</button>
-          </div>`}
-      </div>
-      <div class="row mt-3">
-        <button class="btn btn--primary" id="${prefix}login-with-key" type="button">${t('common.logIn')}</button>
-      </div>
-    </section>`;
-}
-
-/**
- * The remembered key, for prefilling the field.
- *
- * The same slot used to hold the account JSON the fallback card pastes, and a saved blob
- * would be offered as if it were a key and fail for no visible reason. Anything that looks
- * like that JSON is ignored rather than shown.
- *
- * @returns {string}
- */
-function lastKey() {
-  const saved = lastContent();
-  return saved.trimStart().startsWith('{') ? '' : saved;
-}
-
-/**
- * Sign in with the account's API key.
- *
- * The key is the credential DeepAI validates, so this is the whole sign-in: no JSON, no
- * email, nothing to look up. The field is cleared once the key has been accepted.
- */
-async function signInWithKey() {
-  const field = $('key-paste');
-  const key = field?.value?.trim() ?? '';
-  if (key === '') {
-    toast(t('key.pasteFirst'), 'error');
-    field?.focus();
-    return;
-  }
-  // Saved before the request: a key DeepAI refuses for the Code lane is still the key this
-  // visitor has, and retyping it is the last thing they should have to do.
-  rememberContent(key);
-
-  const button = $('login-with-key');
-  const label = button?.textContent;
-  if (button) {
-    button.disabled = true;
-    button.textContent = t('signin.signingIn');
-  }
-  try {
-    await api('/login/key', { method: 'POST', body: { key } });
-    // Cleared from the page: it is stored on the server, and leaving it in the DOM leaves
-    // it in reach of anything that reads the document.
-    if (field) field.value = '';
-    toast(t('signin.loggedIn'));
-    await afterSignIn();
-  } catch (error) {
-    toast(String(error.message ?? error), 'error');
-    if (button) {
-      button.disabled = false;
-      button.textContent = label ?? t('common.logIn');
-    }
-    field?.focus();
-    field?.select();
-  }
-}
-
-
-
-/**
- * The way in: the account's API key, and nothing else.
- *
- * Every earlier route is gone - the password form, the account JSON copied out of
- * DeepAI's API page, and the console command before that. Each existed to work around a
- * key that DeepAI had not enabled for the Code lane, and each asked the visitor to prove
- * something they could not: a password proves nothing about a Google account, and an
- * email address is a claim rather than evidence. The key is the one credential DeepAI
- * actually checks, so it is the one thing asked for.
+ * The button is a real link opened in a new tab, so it is not a popup: the address is
+ * fetched when the card is drawn and put on the anchor, rather than opened after a click.
  *
  * @param {string} prefix - distinguishes the ids when both cards are in the DOM.
- * @returns {string} markup containing the key form.
+ * @returns {string} markup.
  */
 function signInRoutes(prefix = '') {
-  return `<div class="mt-3">${keyPasteHelp(prefix)}</div>`
-    + (state.account?.callbackLogin === true ? browserSignIn(prefix) : '');
-}
-
-/**
- * DeepAI's own browser sign-in, when the gateway serves it.
- *
- * Only offered when `CALLBACK_LOGIN` is on. DeepAI fixes the redirect to `127.0.0.1`, so
- * this finishes on a browser that can reach that address as this gateway - the copy says
- * so, and the paste field is there for when it cannot.
- */
-function browserSignIn(prefix = '') {
   return `
-    <section class="step mt-3" id="${prefix}browser-step">
-      <div class="step__title">${t('browser.title')}</div>
-      <p class="step__lead">${t('browser.lead')}</p>
-      <p class="step__lead">${t('browser.callbackHint')}</p>
-      <div class="row mt-3"><button class="btn btn--secondary" id="${prefix}login-browser" type="button">${t('browser.start')}</button></div>
-      <div class="field mt-3">
-        <label class="field__label" for="${prefix}browser-paste">${t('browser.pasteLabel')}</label>
-        <textarea class="textarea" id="${prefix}browser-paste" rows="2" spellcheck="false"
-          autocomplete="off" placeholder="http://127.0.0.1:8787/callback?code=...&state=..."></textarea>
+    <section class="step" id="${prefix}signin-step">
+      <div class="note note--info">
+        <ol class="step__list">
+          <li>${t('signin.stepAuthenticate')} <strong>DeepAI</strong></li>
+          <li>${t('signin.stepCopy')}</li>
+          <li>${t('signin.stepPaste')}</li>
+        </ol>
       </div>
-      <div class="row mt-3"><button class="btn" id="${prefix}login-finish" type="button">${t('browser.finish')}</button></div>
+
+      <div class="row mt-3">
+        <a class="btn btn--primary" id="${prefix}login-browser" target="_blank"
+          rel="noopener noreferrer" href="#">${t('signin.getUrl')}</a>
+      </div>
+
+      <div class="field mt-3">
+        <input class="input input--url" id="${prefix}browser-paste" type="text" spellcheck="false"
+          autocomplete="off" autocapitalize="off"
+          placeholder="http://127.0.0.1:8787/callback?code=...&amp;state=...">
+      </div>
+
+      <div class="row mt-3">
+        <button class="btn" id="${prefix}login-finish" type="button">${t('signin.loginToGateway')}</button>
+      </div>
     </section>`;
 }
 
-/** Start the browser sign-in: ask the gateway for the URL, then go there. */
-async function startBrowserLogin(prefix = '') {
-  const button = $(`${prefix}login-browser`);
-  const label = button?.textContent;
-  if (button) {
-    button.disabled = true;
-    button.textContent = t('signin.signingIn');
-  }
+/**
+ * Put the sign-in address on the button, so it opens in a new tab as a link.
+ *
+ * A click handler that fetched first and then called `window.open` would be a popup, and
+ * browsers block those. Resolving the address while drawing the card keeps the button an
+ * ordinary anchor and lets the visitor open it in a tab of their own.
+ *
+ * @param {string} prefix
+ * @returns {Promise<void>}
+ */
+async function loadSignInUrl(prefix = '') {
+  const link = $(`${prefix}login-browser`);
+  if (link === null) return;
   try {
-    // A plain fetch, not `api()`: this is the page route, not an `/api` one.
+    // A plain fetch, not `api()`: this is a page route, not an `/api` one.
     const response = await fetch('/login?json=1', { headers: { accept: 'application/json' } });
     if (!response.ok) throw new Error(t('error.http', { status: response.status }));
     const payload = await response.json();
-    window.location.assign(payload.url);
+    link.setAttribute('href', payload.url);
   } catch (error) {
+    // Without an address the button cannot work, so it says so rather than pointing nowhere.
+    link.setAttribute('href', '#');
+    link.classList.add('is-disabled');
     toast(String(error.message ?? error), 'error');
-    if (button) {
-      button.disabled = false;
-      button.textContent = label ?? t('browser.start');
-    }
   }
 }
 
-/** Finish a browser sign-in from the address the browser could not open. */
+/**
+ * Finish the sign-in with the address the browser could not open.
+ *
+ * @param {string} prefix
+ * @returns {Promise<void>}
+ */
 async function finishBrowserLogin(prefix = '') {
   const field = $(`${prefix}browser-paste`);
   const text = field?.value ?? '';
   if (text.trim() === '') {
-    toast(t('signin.runCommand'), 'error');
+    toast(t('signin.pasteTheAddress'), 'error');
     field?.focus();
     return;
   }
@@ -467,11 +378,13 @@ async function finishBrowserLogin(prefix = '') {
     toast(t('signin.loggedIn'));
     await afterSignIn();
   } catch (error) {
-    toast(String(error.message ?? error), 'error');
+    toast(failureMessage(error), 'error');
     if (button) {
       button.disabled = false;
-      button.textContent = label ?? t('browser.finish');
+      button.textContent = label ?? t('signin.loginToGateway');
     }
+    field?.focus();
+    field?.select();
   }
 }
 
@@ -485,23 +398,16 @@ async function finishBrowserLogin(prefix = '') {
  */
 function wireSignInForms(prefix = '') {
   const id = (name) => $(`${prefix}${name}`);
-  id('login-with-key')?.addEventListener('click', () => void signInWithKey(prefix));
-  // Enter in a one-line field signs in, which is what a one-line field invites.
-  id('key-paste')?.addEventListener('keydown', (event) => {
+  id('login-finish')?.addEventListener('click', () => void finishBrowserLogin(prefix));
+  // Enter in the one-line field signs in, which is what a one-line field invites.
+  id('browser-paste')?.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       event.preventDefault();
-      void signInWithKey();
+      void finishBrowserLogin(prefix);
     }
   });
-  id('content-forget')?.addEventListener('click', () => {
-    rememberContent('');
-    const field = id('key-paste');
-    if (field !== null) field.value = '';
-    id('content-saved')?.remove();
-    toast(t('signin.contentForgotten'));
-  });
-  id('login-browser')?.addEventListener('click', () => void startBrowserLogin(prefix));
-  id('login-finish')?.addEventListener('click', () => void finishBrowserLogin(prefix));
+  // The button is an anchor, so its address is resolved while the card is drawn.
+  void loadSignInUrl(prefix);
 }
 
 /**
@@ -851,36 +757,6 @@ const LOCALES = [
 
 const LOCALE_KEY = 'deepai-gateway-locale';
 
-/*
- * The account JSON a visitor pasted last time, kept in this browser so signing back in
- * does not mean fetching it from DeepAI again.
- *
- * It contains the account's API key, so this is a real trade: the key stays readable in
- * this browser's storage, by any script on this origin and by anyone who opens the
- * profile. That is why it is offered rather than silent, why it names the key it uses in
- * one place, and why signing out keeps it while "Forget this account" clears it.
- */
-const LAST_CONTENT_KEY = 'deepai-gateway-last-content';
-
-/** The content to prefill the sign-in field with, or an empty string. */
-function lastContent() {
-  try {
-    return localStorage.getItem(LAST_CONTENT_KEY) ?? '';
-  } catch {
-    // A browser with storage disabled still has to render the form.
-    return '';
-  }
-}
-
-/** Remember, or forget when given nothing. */
-function rememberContent(text) {
-  try {
-    if (typeof text === 'string' && text.trim() !== '') localStorage.setItem(LAST_CONTENT_KEY, text);
-    else localStorage.removeItem(LAST_CONTENT_KEY);
-  } catch {
-    /* storage unavailable: signing in still works, it just will not be remembered */
-  }
-}
 
 /** The locale entry for a code, or English when the code is unknown. */
 function localeOf(code) {
@@ -1639,9 +1515,6 @@ function wireAccountCard(rerender) {
     if (!confirmed) return;
     try {
       await api('/account/forget', { method: 'POST' });
-      // "Forget this account" is the one action that removes everything, so the key kept
-      // for the next sign-in goes with it.
-      rememberContent('');
       toast(t('account.removed'));
       await loadAccount();
       await render();

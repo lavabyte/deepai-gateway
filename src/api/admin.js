@@ -15,8 +15,6 @@ import express from 'express';
 import { randomUUID } from 'node:crypto';
 import {
   checkKey,
-  checkPastedKey,
-  usernameForKey,
 } from '../deepai/account.js';
 import { loadCatalog, publicModel } from '../deepai/catalog.js';
 import {
@@ -28,7 +26,6 @@ import {
   publicKey,
 } from '../keys.js';
 import {
-  accountForApiKey,
   clearAccount,
   clearSessionCookie,
   createSession,
@@ -65,42 +62,6 @@ import {
   summary,
 } from '../usage.js';
 
-/**
- * What each sign-in failure says to the visitor.
- *
- * These are the reasons the key check can report, and no others. A separate table from any
- * protocol vocabulary because these are read by someone looking at a page, not at a
- * response: each says what happened and what to do next.
- *
- * The `not-for-code` case is the one worth the words - `deepai.org` issues keys for the
- * public model API, and one is not automatically enabled for DeepAI Code, so "wrong key"
- * would send the visitor looking for a mistake they did not make. The advice names the
- * Code app, because the profile page is where the key they have came from.
- */
-const KEY_LOGIN_FAILURES = {
-  empty: [400, 'Paste your API key first.'],
-  'too-long': [400, 'That is far longer than an API key, so something else must have been pasted.'],
-  // Reachable when a stored credential is empty rather than when one is typed: the route
-  // refuses an empty field with `empty` before the key is ever checked.
-  'no-key': [400, 'No API key was given. Paste the key from your DeepAI profile.'],
-  rejected: [401, 'DeepAI did not recognise that key. Copy it again from https://deepai.org/dashboard/profile.'],
-  'not-for-code': [
-    403,
-    'That key works for the DeepAI model API, but it is not enabled for DeepAI Code, which is what this gateway uses. Use the key the DeepAI Code app shows.',
-  ],
-  'machine-required': [
-    502,
-    'DeepAI refused the request because this gateway could not identify the machine it runs on, which is what its daily Credits grant is issued against. This is a gateway problem, not a key problem. Set DEEPAI_MACHINE_ID to a stable value for this host.',
-  ],
-  'lane-outdated': [
-    502,
-    'DeepAI has retired the DeepAI Code version this gateway speaks to it in, so it refused the request before reading the key. This is a gateway problem, not a problem with the key. The gateway logs name the revision it sent.',
-  ],
-  // An upstream status that is not one of the named cases: a 500 from DeepAI, say. Not the
-  // visitor's mistake, and not something a different key would fix.
-  http: [502, 'DeepAI answered with an error while checking that key. Try again in a moment.'],
-  unreachable: [502, 'Could not reach DeepAI to check that key. Try again in a moment.'],
-};
 
 /**
  * Mount the dashboard API.
@@ -151,9 +112,6 @@ export function adminRouter(db, runtime) {
       allowance: view?.allowance ?? null,
       signedInSince: view?.signedInSince ?? null,
       sessionExpiresAt: view?.sessionExpiresAt ?? null,
-      // Whether this gateway also serves DeepAI's browser sign-in, so the dashboard only
-      // offers a route that exists.
-      callbackLogin: runtime.callbackLogin === true,
       defaultModel: account === undefined
         ? 'glm-5.3-flash'
         : getSetting(db, account.username, 'default_model', 'glm-5.3-flash'),
@@ -171,97 +129,6 @@ export function adminRouter(db, runtime) {
     res.json({ events: recentAuthEvents(db, limit, req.account.username) });
   });
 
-  /**
-   * What to add to a refusal, given what this deployment can offer.
-   *
-   * `not-for-code` is the refusal with somewhere to go: the profile page issues keys for
-   * DeepAI's model API, and DeepAI Code wants one of its own. This gateway can mint one from
-   * DeepAI's own sign-in page - so the advice names the button on this card when that route
-   * is served, and says how to serve it when it is not. Without this the message ends at
-   * "use the key the Code app shows", which is no help to someone who has not installed it.
-   *
-   * @param {string} reason
-   * @param {{callbackLogin?: boolean}} runtime
-   * @returns {string} a sentence, or nothing.
-   */
-  const keyAdvice = (reason, runtime) => {
-    if (reason !== 'not-for-code') return '';
-    return runtime.callbackLogin === true
-      ? ' Use the sign-in page on this card instead: it returns a key DeepAI Code accepts.'
-      : ' This gateway can fetch one from DeepAI\'s own sign-in page: start it with CALLBACK_LOGIN=1,'
-        + ' then use the sign-in page on this card.';
-  };
-
-  /**
-   * Turn a DeepAI key into a session.
-   *
-   * The key is the credential DeepAI validates, so DeepAI has already issued it; this
-   * checks it, resolves the owner and mints the cookie. Nothing else is collected: the
-   * account is the key's fingerprint, and no name or email is stored or shown.
-   *
-   * @param {import('express').Response} res
-   * @param {{key: string}} input
-   * @returns {Promise<void>} always sends the response.
-   */
-  const signInWithKey = async (res, { key }) => {
-    let check;
-    try {
-      check = await checkPastedKey(key, AbortSignal.timeout(20_000));
-    } catch (error) {
-      runtime.log?.(`key sign-in failed: ${error?.message ?? error}`);
-      check = { ok: false, reason: 'unreachable' };
-    }
-
-    if (check.ok !== true) {
-      const [status, base] = KEY_LOGIN_FAILURES[check.reason] ?? [400, 'That key could not be used.'];
-      const message = base + keyAdvice(check.reason, runtime);
-      runtime.log?.(`key sign-in refused: ${check.reason}`);
-      // A refusal is worth recording: the trail is what an operator reads to see a key
-      // being tried repeatedly. It is filed under the fingerprint the key derives, which is
-      // the only identity an unvalidated key has.
-      recordAuthEvent(db, 'denied', { username: usernameForKey(key), detail: check.reason });
-      return res.status(status).json({ ok: false, error: message, code: check.reason });
-    }
-
-    // A key DeepAI has already issued for an account keeps that account, so the same
-    // key arriving twice does not split one DeepAI account across two owners. Only a
-    // key never seen before gets a derived owner - which is what keeps a name from
-    // claiming somebody else's account.
-    const known = accountForApiKey(db, key);
-    const username = known?.username ?? usernameForKey(key);
-    const completed = completeLogin(db, runtime, {
-      apiKey: key,
-      username,
-      isPro: check.isPro,
-    }, { secure: runtime.trustProxy === true });
-
-    // Persist the allowance just read, so the badge shows a balance immediately
-    // rather than waiting for the background refresh.
-    saveAllowance(db, username, check.allowance);
-    if (typeof check.isPro === 'boolean') savePro(db, username, check.isPro);
-
-    res.setHeader('set-cookie', completed.cookie);
-    return res.json({ ok: true, username: completed.username, created: completed.created });
-  };
-
-  /**
-   * Sign in with the account's API key alone.
-   *
-   * The key is the credential DeepAI validates, so nothing else is needed: no email, no
-   * name, no JSON. `deepai.org/dashboard/profile` shows it. A key that DeepAI issues for
-   * its model API but has not enabled for DeepAI Code is refused with `not-for-code`, which
-   * is the one failure worth separating from a wrong key.
-   */
-  router.post('/login/key', async (req, res) => {
-    const key = typeof req.body?.key === 'string' ? req.body.key.trim() : '';
-    if (key === '') {
-      return res.status(400).json({ ok: false, error: KEY_LOGIN_FAILURES.empty[1], code: 'empty' });
-    }
-    if (key.length > 4096) {
-      return res.status(400).json({ ok: false, error: KEY_LOGIN_FAILURES['too-long'][1], code: 'too-long' });
-    }
-    return signInWithKey(res, { key });
-  });
 
   /**
    * Log out of **this browser only**.
@@ -736,7 +603,9 @@ export async function refreshAllowance(db, runtime, username) {
   if (account === undefined) return { ok: false, code: 'no-account', error: 'Not signed in.' };
   const check = await checkKey(account.apiKey, AbortSignal.timeout(15_000));
   if (!check.ok) {
-    recordAuthEvent(db, 'denied', { username, detail: check.error });
+    // The reason code, not the sentence: the trail is scanned for patterns - the same
+    // refusal repeated - and a code is stable where wording is not.
+    recordAuthEvent(db, 'denied', { username, detail: check.reason ?? 'unreachable' });
     /*
      * `code` is what the dashboard translates; `error` is the English sentence, kept for the
      * log and for a client that has no string for the code. The dashboard used to print the

@@ -70,7 +70,7 @@ export async function checkKey(apiKey, signal) {
     }
     /*
      * A retired lane revision is answered before the key is read, and it used to arrive here
-     * as `HTTP 426` - which `checkPastedKey` turns into "could not reach DeepAI". DeepAI was
+     * as `HTTP 426`, which the dashboard reported as "could not reach DeepAI". DeepAI was
      * reached, and it said something specific: this gateway is sending a version it has
      * retired. Reported as its own state so the reader is told that, rather than sent to
      * retry a request that will fail identically every time.
@@ -123,55 +123,5 @@ export function usernameForKey(apiKey) {
   return `key-${digest.slice(0, 16)}`;
 }
 
-/**
- * Validate a key a visitor pasted, saying precisely what is wrong when it is not
- * usable.
- *
- * A key that DeepAI refuses for the Code lane is worth telling apart from a key
- * that is simply wrong: `deepai.org` issues a key for the public model API, and
- * that key is not automatically enabled for DeepAI Code. That is the likeliest
- * failure of all, and the two need different advice.
- *
- * @param {string} apiKey
- * @param {AbortSignal} [signal]
- * @returns {Promise<{ok: true, allowance: object, isPro: boolean}
- *   | {ok: false, reason: 'rejected'|'not-for-code'|'lane-outdated'|'unreachable', error?: string}>}
- */
-export async function checkPastedKey(apiKey, signal) {
-  const check = await checkKey(apiKey, signal);
-  if (check.ok === true) {
-    return { ok: true, allowance: check.allowance, isPro: check.isPro === true };
-  }
-  /*
-   * `check.reason` rather than the wording: comparing the English sentence once tied this
-   * to a string that a later edit changed, which silently reclassified every rejected key as
-   * "could not reach DeepAI".
-   */
-  /*
-   * Both of these are DeepAI's verdict, but about this gateway rather than about the key:
-   * one is a retired lane revision, the other a host DeepAI cannot identify. Neither is
-   * fixed by trying another key, so neither may be reported as one.
-   */
-  if (check.reason === 'lane-outdated' || check.reason === 'machine-required') {
-    return { ok: false, reason: check.reason, error: check.error };
-  }
-  if (check.reason !== 'rejected') {
-    // Not a verdict from DeepAI, so do not report it as one.
-    return { ok: false, reason: 'unreachable', error: check.error };
-  }
-
-  // The Code lane refused it. Ask the public API whether the key works at all.
-  try {
-    const response = await fetch(`${API_ORIGIN}/get_usage_summary`, {
-      headers: { ...laneHeaders(), 'Api-Key': apiKey },
-      signal,
-    });
-    const data = response.ok ? await response.json().catch(() => undefined) : undefined;
-    if (data?.is_authenticated === true) return { ok: false, reason: 'not-for-code' };
-  } catch {
-    /* fall through: treated as simply rejected */
-  }
-  return { ok: false, reason: 'rejected' };
-}
 
 
