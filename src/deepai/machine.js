@@ -29,7 +29,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 /** The header name, as the app spells it. */
@@ -88,7 +88,9 @@ function detect() {
    */
   const dmi = read('/sys/class/dmi/id/product_uuid').toLowerCase();
   if (UUID.test(dmi) && !PLACEHOLDERS.has(dmi)) return dmi;
-  return read('/etc/machine-id');
+  // `/etc/machine-id` and its older dbus path: present on most hosts, and absent in a
+  // container built without one - which is the case the stored fallback exists for.
+  return read('/etc/machine-id') || read('/var/lib/dbus/machine-id');
 }
 
 /*
@@ -107,6 +109,93 @@ function detectedId() {
   return detected;
 }
 
+/** Set by `installMachineId`; undefined until the server has had a say. */
+let installed;
+
+/**
+ * Set the value for this process, overriding detection.
+ *
+ * Passing `undefined` clears it and returns to detection, which is what a test needs so it
+ * does not leave a value behind for everything that runs after it.
+ *
+ * @param {string|undefined} value
+ */
+export function installMachineId(value) {
+  installed = value === undefined ? undefined : (typeof value === 'string' ? value : '');
+}
+
+/** The digest of an arbitrary string, in the same shape the app sends. */
+const digest = (value) => createHash('sha256').update(value).digest('hex');
+
+/**
+ * Settle on the machine identity for this process, and remember it.
+ *
+ * Detection cannot be relied on in a container: `/sys/class/dmi/id/product_uuid` and
+ * `/etc/machine-id` are both routinely absent there, and the server then answers
+ * `machine_required` - which reads as a key problem and is not one. The app has the same
+ * gap, and its comment says the header is simply omitted.
+ *
+ * A gateway has something the app does not: a database that outlives it. A digest is
+ * generated once and kept in `meta`, so the identity survives restarts and redeploys
+ * without anyone setting a variable. It is a *name* for this gateway rather than a fact
+ * about the hardware, which is the right thing here: the grant is per installation, and
+ * one gateway is one installation for every account it serves.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {(message: string) => void} [log]
+ * @returns {string} the value to send, or '' if even the database could not hold one.
+ */
+export function installMachineIdFromDatabase(db, log = () => {}) {
+  const override = typeof process.env.DEEPAI_MACHINE_ID === 'string'
+    ? process.env.DEEPAI_MACHINE_ID.trim()
+    : '';
+  if (override !== '') {
+    installed = override;
+    log(`machine identity: DEEPAI_MACHINE_ID (${override.slice(0, 16)}...)`);
+    return override;
+  }
+
+  const detectedValue = detectedId();
+  if (detectedValue !== '') {
+    installed = detectedValue;
+    log('machine identity: read from this host');
+    return detectedValue;
+  }
+
+  const stored = storedMachineId(db, log);
+  installed = stored;
+  return stored;
+}
+
+/**
+ * This gateway's own identity, read from `meta` or generated and kept there.
+ *
+ * Separate from the function above so the path a container takes can be tested on a machine
+ * that has a host identifier of its own - which is every machine this is developed on, and
+ * therefore exactly the path that would otherwise go unexercised.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {(message: string) => void} [log]
+ * @returns {string}
+ */
+export function storedMachineId(db, log = () => {}) {
+  try {
+    const row = db.prepare('SELECT value FROM meta WHERE key = ?').get('machine_id');
+    if (typeof row?.value === 'string' && row.value !== '') {
+      log('machine identity: kept from the first start, stored in this database');
+      return row.value;
+    }
+    const generated = digest(randomUUID());
+    db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run('machine_id', generated);
+    log('machine identity: generated for this gateway and stored (this host has no identifier)');
+    return generated;
+  } catch (error) {
+    log(`machine identity: could not be stored (${error?.message ?? error})`);
+    return '';
+  }
+}
+
 /**
  * The value for the machine header.
  *
@@ -115,9 +204,9 @@ function detectedId() {
  */
 export function machineId(env = process.env) {
   const override = typeof env.DEEPAI_MACHINE_ID === 'string' ? env.DEEPAI_MACHINE_ID.trim() : '';
-  // Sent as given rather than hashed: an operator who sets this is naming the machine this
-  // gateway stands in for, which may be one the server already knows.
-  return override === '' ? detectedId() : override;
+  if (override !== '') return override;
+  if (installed !== undefined) return installed;
+  return detectedId();
 }
 
 /**

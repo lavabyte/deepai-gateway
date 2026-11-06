@@ -9,7 +9,7 @@
  * @module deepai-gateway/deepai/catalog
  */
 
-import { API_ORIGIN, LANE_HEADERS } from './wire.js';
+import { API_ORIGIN, codeHeaders } from './wire.js';
 
 /** How long a successful catalog answer is reused. */
 const CACHE_TTL_MS = 10 * 60_000;
@@ -123,7 +123,7 @@ function normalize(raw, fallback) {
 /** Fetch the live catalog; rejects on any transport or shape problem. */
 export async function fetchCatalog(signal) {
   const response = await fetch(`${API_ORIGIN}/deepai_code/models`, {
-    headers: { ...LANE_HEADERS, accept: 'application/json' },
+    headers: codeHeaders({ accept: 'application/json' }),
     signal,
   });
   if (!response.ok) throw new Error(`DeepAI model catalog: HTTP ${response.status}`);

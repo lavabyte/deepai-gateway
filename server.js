@@ -18,6 +18,7 @@ import { dirname, join } from 'node:path';
 import { openDatabase } from './src/db.js';
 import { adminRouter } from './src/api/admin.js';
 import { createCallbackLogin } from './src/deepai/callback-login.js';
+import { installMachineIdFromDatabase } from './src/deepai/machine.js';
 import { initPricing, pricingStatus, startPricingRefresh } from './src/pricing.js';
 import { v1Router } from './src/api/v1.js';
 import { prefetchCatalog } from './src/deepai/catalog.js';
@@ -228,14 +229,27 @@ export function createApp(db, options = {}) {
 export function start(overrides = {}) {
   const settings = { ...config(), ...overrides };
   const db = openDatabase(settings.database);
+  const log = (message) => console.log(`[deepai-gateway] ${message}`);
+
+  /*
+   * Settle the machine identity before anything can be requested.
+   *
+   * DeepAI grants its daily Credits per machine and answers `machine_required` to a build it
+   * cannot identify - which reads as a key problem and is not one. The host supplies it when
+   * it can; otherwise the database is given one that persists, because a container has no
+   * identifier to read and no operator to set a variable in most of the deployments that
+   * matter here.
+   */
+  installMachineIdFromDatabase(db, log);
+
   const app = createApp(db, settings);
 
   prefetchCatalog();
 
   // Reference prices come from OpenRouter and are cached on disk, so the
   // dashboard shows real market rates rather than a frozen table.
-  initPricing({ cachePath: settings.pricingCache, log: (message) => console.log(`[deepai-gateway] ${message}`) });
-  startPricingRefresh({ log: (message) => console.log(`[deepai-gateway] ${message}`) });
+  initPricing({ cachePath: settings.pricingCache, log });
+  startPricingRefresh({ log });
   const pricing = pricingStatus();
   console.log(`[deepai-gateway] pricing: ${pricing.source} (${pricing.priced}/${pricing.models} models, captured ${pricing.capturedAt})`);
 

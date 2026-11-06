@@ -22,7 +22,7 @@
 
 import { randomBytes } from 'node:crypto';
 import express from 'express';
-import { API_ORIGIN, LANE_HEADERS } from './wire.js';
+import { API_ORIGIN } from './wire.js';
 import { usernameForKey } from './account.js';
 import { completeLogin } from '../api/admin.js';
 
@@ -83,7 +83,9 @@ export function parseCallbackInput(input) {
 async function exchangeCode(code) {
   const response = await fetch(`${API_ORIGIN}/deepai_code/desktop_auth/exchange/`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', ...LANE_HEADERS },
+    // Only a content type, exactly as the app's own exchange call sends: this endpoint
+    // neither reads a lane revision nor needs a machine identity.
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ code }),
     redirect: 'error',
     signal: AbortSignal.timeout(20_000),

@@ -28,17 +28,20 @@ export const API_ORIGIN = 'https://api.deepai.org';
  * which makes the revision cheap to find again.
  */
 export const LANE_VERSION = '3';
-const LANE_BASE = { 'X-DeepAI-Code-Theos': LANE_VERSION };
+
+/** The lane revision alone. The app sends exactly this on its exchange call. */
+export const LANE_HEADERS = Object.freeze({ 'X-DeepAI-Code-Theos': LANE_VERSION });
 
 /**
- * Every Code-lane request carries two identifying headers, and the app sends both:
- * the lane revision, and the machine digest. The machine one is what the server grants
- * daily Theos against - see `machine.js` for where that comes from and why omitting it
- * matters.
+ * Headers for a request to `/deepai_code`: the lane revision and the machine digest.
  *
- * Built once, because the machine digest is computed at most once per process.
+ * A function, and not a constant, because the machine identity is settled by the server at
+ * boot - from the host when it has one, and from the database when it does not - and a
+ * module-level object would be frozen before that happened. See `machine.js`.
  */
-export const LANE_HEADERS = Object.freeze({ ...LANE_BASE, ...machineHeaders() });
+export function codeHeaders(extra = {}) {
+  return { ...LANE_HEADERS, ...machineHeaders(), ...extra };
+}
 
 /**
  * Product identity sent upstream.
@@ -77,7 +80,7 @@ export function requestHeaders({ apiKey, sessionId, accept = 'text/event-stream'
     'content-type': 'application/json',
     accept,
     'user-agent': USER_AGENT,
-    ...LANE_HEADERS,
+    ...codeHeaders(),
     ...sessionHeaders(sessionId),
     'Api-Key': apiKey,
   };
@@ -85,7 +88,7 @@ export function requestHeaders({ apiKey, sessionId, accept = 'text/event-stream'
 
 /** Headers for an unauthenticated DeepAI Code request. */
 export function laneHeaders(accept = 'application/json') {
-  return { accept, 'user-agent': USER_AGENT, ...LANE_HEADERS };
+  return { accept, 'user-agent': USER_AGENT, ...codeHeaders() };
 }
 
 /** Convert a `Retry-After` header into milliseconds. */

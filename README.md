@@ -732,16 +732,26 @@ The gateway hashes the same identifiers the app does - the DMI product UUID on L
 digest. **The raw identifier never leaves the host.**
 
 A refusal that names `machine_required` is reported as its own failure, because it is the
-gateway's problem and not the key's: no other key will fix it. The fix is to give the host a
-stable identifier, or to name one:
+gateway's problem and not the key's: no other key will fix it, and the dashboard says so
+rather than sending the reader to change a key that was never wrong.
 
-```bash
-DEEPAI_MACHINE_ID=<a value that stays the same> npm start
-```
+**You should not have to configure this.** The identity is settled at startup, in this order:
 
-Set it for a container that gets a new identifier on every start. A value that keeps
-changing makes DeepAI see a new machine each time, which is the situation the header exists
-to avoid. `npm run check-key` prints the value being sent.
+1. `DEEPAI_MACHINE_ID`, when one is set.
+2. This host's own identifier, hashed - the DMI product UUID on Linux, `IOPlatformUUID` on
+   macOS, the SMBIOS UUID or `MachineGuid` on Windows.
+3. **A digest generated once and kept in the database.** A container routinely has neither
+   `/sys/class/dmi/id/product_uuid` nor `/etc/machine-id`, so there is nothing to read - and
+   the app's own comment says it simply omits the header in that case, which is what makes
+   DeepAI answer `machine_required`. A gateway has something the app does not: a database
+   that outlives it. It names itself on first start and keeps that name, so it survives
+   restarts and redeploys with no variable set anywhere.
+
+Step 3 is a name for this installation rather than a fact about the hardware, which is the
+right meaning here: the grant is per installation, and one gateway is one installation for
+every account it serves. A second database is a second machine, and gets its own identity.
+
+`npm run check-key` prints the value being sent.
 
 ## When DeepAI answers 426
 

@@ -2465,8 +2465,51 @@ await checkAsync('every Code-lane request identifies the machine, as the app doe
     if (name === MACHINE_HEADER && machineId() === '') continue;
     assert.ok(streaming[name] !== undefined, `${name} must be on a streaming request`);
   }
-  assert.equal(streaming[MACHINE_HEADER], LANE_HEADERS[MACHINE_HEADER],
+  assert.equal(streaming[MACHINE_HEADER], machineId(),
     'and be the same value the other requests carry');
+
+  /*
+   * The identity must survive a host that has none. A container routinely lacks both
+   * `/sys/class/dmi/id/product_uuid` and `/etc/machine-id`, and DeepAI then answers
+   * `machine_required` - which is what a deployment saw, reading as a key problem.
+   *
+   * The gateway has what the app does not: a database that outlives it. The digest is
+   * generated once and kept in `meta`, so the identity survives restarts without anyone
+   * setting a variable.
+   */
+  const { openDatabase } = await import('../src/db.js');
+  const { storedMachineId, installMachineId } = await import('../src/deepai/machine.js');
+  const fresh = openDatabase(':memory:');
+  const first = storedMachineId(fresh);
+  assert.match(first, /^[0-9a-f]{64}$/, 'a generated identity has the digest shape the app sends');
+  assert.equal(storedMachineId(fresh), first, 'and is reused, not regenerated, on every read');
+  assert.equal(fresh.prepare('SELECT value FROM meta WHERE key = ?').get('machine_id').value, first,
+    'because it is stored in the database');
+
+  // A second database is a different gateway, and gets its own identity.
+  const other = openDatabase(':memory:');
+  assert.notEqual(storedMachineId(other), first, 'two gateways are two machines');
+
+  // And the installed value is what the headers then carry.
+  installMachineId('named-by-the-operator');
+  assert.equal(machineId(), 'named-by-the-operator');
+  installMachineId('');
+  assert.equal(machineId(), '', 'an installed empty value is respected, not silently replaced');
+  /*
+   * And the whole chain the server runs, because the pieces working separately is not the
+   * same as them working together: something must *install* the value, or every header
+   * keeps using whatever detection found - which on the host this matters for is nothing.
+   */
+  const { installMachineIdFromDatabase } = await import('../src/deepai/machine.js');
+  const { codeHeaders } = await import('../src/deepai/wire.js');
+  const wired = openDatabase(':memory:');
+  const installed = installMachineIdFromDatabase(wired, () => {});
+  assert.ok(installed !== '', 'the server resolves an identity');
+  assert.equal(codeHeaders()[MACHINE_HEADER], installed,
+    'and the headers carry the one it resolved, not a stale detection');
+
+  // Cleared, so the value does not leak into whatever runs after this test.
+  installMachineId(undefined);
 });
 
 await checkAsync('a retired lane revision is reported as the gateway problem it is', async () => {
