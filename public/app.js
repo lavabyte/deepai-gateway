@@ -238,10 +238,18 @@ function esc(value) {
 
 /** Error carrying the HTTP status, so callers can react to 401 specifically. */
 class ApiError extends Error {
-  constructor(message, status) {
+  /**
+   * @param {string} message - the server's own wording, for a log or an unknown case.
+   * @param {number} status
+   * @param {string} [code] - the machine-readable reason, when the server sent one. It is
+   *   what the UI translates; without it the only thing left to show is the server's English
+   *   sentence, which is how an internal phrase like "the key was rejected" reached a toast.
+   */
+  constructor(message, status, code) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    if (typeof code === 'string' && code !== '') this.code = code;
   }
 }
 
@@ -259,7 +267,11 @@ async function api(path, options = {}) {
     throw new ApiError(t('error.unexpectedAnswer', { status: response.status }), response.status);
   }
   if (!response.ok || json.ok === false) {
-    throw new ApiError(json.error ?? t('error.http', { status: response.status }), response.status);
+    throw new ApiError(
+      json.error ?? t('error.http', { status: response.status }),
+      response.status,
+      json.code,
+    );
   }
   return json;
 }
@@ -356,8 +368,7 @@ async function signInWithKey() {
     // it in reach of anything that reads the document.
     if (field) field.value = '';
     toast(t('signin.loggedIn'));
-    await loadAccount();
-    await render();
+    await afterSignIn();
   } catch (error) {
     toast(String(error.message ?? error), 'error');
     if (button) {
@@ -454,8 +465,7 @@ async function finishBrowserLogin(prefix = '') {
     await api('/login/complete', { method: 'POST', body: { url: text } });
     if (field) field.value = '';
     toast(t('signin.loggedIn'));
-    await loadAccount();
-    await render();
+    await afterSignIn();
   } catch (error) {
     toast(String(error.message ?? error), 'error');
     if (button) {
@@ -1229,7 +1239,9 @@ function renderAccountBadge() {
       text.textContent = t('common.creditsAmount', { amount: balance });
     } else {
       badge.className = 'badge badge--gray';
-      text.textContent = '\u2014';
+      // A plain hyphen, which is what the rest of the dashboard uses for "no value".
+      // An em dash was here first, and it is the one character this project has banned.
+      text.textContent = '-';
       badge.setAttribute('title', t('account.balanceUnknown'));
     }
   } else {
@@ -1426,20 +1438,69 @@ function accountCard() {
 }
 
 /**
+ * Finish a sign-in: take the account, redraw, and make sure the balance is known.
+ *
+ * Every route ends here, and the balance is the reason it exists. Signing in stores the key
+ * and asks DeepAI for the allowance in the background - so when that read fails, which is
+ * the case this whole path was built around, the dashboard showed an account with no
+ * balance and no explanation: a dash where a number belongs, and nothing to say why.
+ *
+ * So the read is retried once, in the open, and a failure is reported with the same
+ * translated message the Refresh button uses. It is one request, only when there is no
+ * balance to show, and only after a sign-in.
+ *
+ * @returns {Promise<void>}
+ */
+async function afterSignIn() {
+  await loadAccount();
+  await render();
+  if (state.account?.signedIn !== true) return;
+  if (state.account.allowance?.balance) return;
+  try {
+    await api('/account/refresh', { method: 'POST' });
+    await loadAccount();
+    renderAccountBadge();
+  } catch (error) {
+    // `api()` throws for `ok:false`, so there is no result to inspect: the reason is on the
+    // error, and it is translated from its code rather than read out of its message.
+    toast(failureMessage(error), 'error');
+  }
+}
+
+/**
+ * The sentence to show for a failed request.
+ *
+ * A failure arrives either as a thrown `ApiError` (which is what `api()` does for `ok:false`)
+ * or as a returned object, and both carry the server's `code` when there is one. The code is
+ * translated; the server's own wording is only a last resort, because it is an internal
+ * English phrase in a dashboard that may be in another language.
+ *
+ * @param {unknown} error - a thrown ApiError.
+ * @returns {string}
+ */
+function failureMessage(error) {
+  if (error?.code !== undefined) return refreshError({ code: error.code });
+  return String(error?.message ?? error);
+}
+
+/**
  * Why the balance could not be read, in the visitor's language.
  *
- * The server answers with a code and an English sentence. The code is what is translated;
- * the sentence is only used when there is no string for it, because showing an internal
- * phrase like "the key was rejected" tells the visitor nothing they can act on.
+ * The server answers with a code and an English sentence, and only the code is translated
+ * here. The sentence is never shown, not even when the code is unknown: it is the server's
+ * internal wording ("the key was rejected"), which reads as a fault in the visitor's key and
+ * is in one language while the dashboard may be in another. An unknown code gets the
+ * generic translated line, and the detail stays in the log and the account's event trail,
+ * where it belongs.
  *
- * @param {{code?: string, error?: string}} result
+ * @param {{code?: string}} result
  * @returns {string}
  */
 function refreshError(result) {
   const code = typeof result?.code === 'string' && result.code !== '' ? result.code : 'unreachable';
   const key = `account.refreshError.${code}`;
   const translated = t(key);
-  return translated === key ? (result?.error ?? t('error.refresh')) : translated;
+  return translated === key ? t('error.refresh') : translated;
 }
 
 /** One-line summary of the key quota. */
@@ -1555,10 +1616,9 @@ function wireAccountCard(rerender) {
     button.textContent = t('pricing.refreshing');
     try {
       const result = await api('/account/refresh', { method: 'POST' });
-      if (result.ok) toast(t('account.balanceToast', { amount: result.allowance.balance }));
-      else toast(refreshError(result), 'error');
+      toast(t('account.balanceToast', { amount: result.allowance.balance }));
     } catch (error) {
-      toast(String(error.message ?? error), 'error');
+      toast(failureMessage(error), 'error');
     }
     await loadAccount();
     rerender();

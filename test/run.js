@@ -2239,7 +2239,12 @@ await checkAsync('a balance that was never read does not look like one that was'
   const text = unread.nodes.get('account-badge-text').textContent;
   const label = LOCALES.en['account.credits'];
   assert.notEqual(text, label, `the badge must not show the label "${label}" as a value`);
-  assert.equal(text, '\u2014', 'an unread balance is shown as a dash');
+  assert.equal(text, '-', 'an unread balance is shown as a plain hyphen');
+  // The banned characters must not be here, in any spelling - including as an escape, which
+  // is how this one got in. The character is built from its code point so that the check
+  // itself does not contain it.
+  const emDash = String.fromCodePoint(0x2014);
+  assert.ok(!app.includes(emDash), 'and not spelled as an escape either');
   assert.equal(unread.nodes.get('account-badge').className, 'badge badge--gray',
     'and is not painted as an active account');
   assert.equal(unread.nodes.get('account-badge').attrs.title, LOCALES.en['account.balanceUnknown'],
@@ -2258,10 +2263,130 @@ await checkAsync('a balance that was never read does not look like one that was'
     assert.equal(shown, LOCALES.en[`account.refreshError.${code}`], `${code} must be translated`);
     assert.ok(!shown.includes('internal english sentence'), `${code} must not leak the server wording`);
   }
-  // An unknown code still says something rather than nothing.
-  assert.equal(error({ code: 'brand-new', error: 'fallback sentence' }), 'fallback sentence');
+  /*
+   * A sign-in ends with the balance being read, and a failure there is said out loud. This
+   * is the case the whole path was built around: the key stores fine, DeepAI refuses the
+   * allowance, and the account used to appear with a dash and no explanation.
+   */
+  assert.match(app, /async function afterSignIn\(\)/, 'sign-in finishes by checking the balance');
+  assert.match(app, /const result = await api\('\/account\/refresh'/, 'with a real read, not a guess');
+  /*
+   * The failure is translated from its *code*, not from its message. `api()` throws for
+   * `ok:false` with the server's English sentence as the message, which is how "the key was
+   * rejected" reached the screen: the code rode along unused and the sentence was shown.
+   */
+  assert.match(app, /toast\(failureMessage\(error\), 'error'\)/, 'and reports a failure in the visitor\'s language');
+  assert.match(app, /function failureMessage\(error\)/, 'through one translator for both shapes of failure');
+  assert.match(app, /if \(error\?\.code !== undefined\) return refreshError\(\{ code: error\.code \}\)/,
+    'which prefers the code over the server wording');
+  assert.match(app, /this\.code = code/, 'and the code survives being thrown');
+  for (const route of ['/login/key', '/login/complete']) {
+    const at = app.indexOf(`api('${route}'`);
+    const after = app.slice(at, at + 600);
+    assert.match(after, /afterSignIn\(\)/, `${route} must end in afterSignIn`);
+  }
+
+  // An unknown code gets a translated line, never the server's own wording: the detail
+  // belongs in the log, not in a toast written in the wrong language.
+  assert.equal(error({ code: 'brand-new', error: 'internal sentence' }), LOCALES.en['error.refresh']);
+  assert.ok(!error({ code: 'brand-new', error: 'internal sentence' }).includes('internal sentence'),
+    'the server sentence must not reach the screen at all');
   // No result at all is the request itself having failed, which is the unreachable case.
   assert.equal(error(undefined), LOCALES.en['account.refreshError.unreachable']);
+});
+
+await checkAsync('a refused balance is explained in the visitor\'s language', async () => {
+  /*
+   * The whole path, end to end, because this is where the bug lived.
+   *
+   * `api()` throws for `{ok: false}` - it does not return it - and it threw with the
+   * server's English sentence as the message. So every handler that checked `result.ok`
+   * had a dead branch, the `code` the server sent was dropped on the floor, and the toast
+   * read "the key was rejected": an internal phrase, in one language, with no advice.
+   *
+   * The code now rides along on the error and is what gets translated.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const vm = await import('node:vm');
+  const root = new URL('..', import.meta.url).pathname;
+  const app = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+
+  const nodes = new Map();
+  const node = () => {
+    const n = {
+      innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
+      dataset: {}, style: {}, value: '', children: [], attrs: {},
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      addEventListener() {}, appendChild(c) { n.children.push(c); },
+      append(...c) { n.children.push(...c); }, remove() {},
+      setAttribute(k, v) { n.attrs[k] = v; }, getAttribute(k) { return n.attrs[k] ?? null; },
+      closest: () => null, focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
+    };
+    n.replaceChildren = (...c) => { n.children = Array.from(c); };
+    n.querySelector = () => n.children[0] ?? null;
+    n.querySelectorAll = () => [];
+    return n;
+  };
+  for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
+    'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button',
+    'locale-button', 'locale-menu', 'locale-flag', 'currency-button', 'currency-menu', 'currency-sign']) nodes.set(id, node());
+
+  const sandbox = {
+    document: {
+      getElementById: (id) => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); },
+      createElement: () => node(), querySelector: () => null, querySelectorAll: () => [],
+      addEventListener() {}, documentElement: { lang: '', dataset: {} },
+      visibilityState: 'visible', body: node(),
+    },
+    window: { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }), location: { assign() {} } },
+    location: { search: '', pathname: '/', hash: '', port: '8787', protocol: 'http:' },
+    history: { replaceState() {} },
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    navigator: { language: 'en-GB', languages: ['en-GB'] },
+    fetch: async (url) => {
+      const target = String(url);
+      const json = (body, status = 200) => new Response(JSON.stringify(body),
+        { status, headers: { 'content-type': 'application/json' } });
+      if (target.includes('/locales/')) return localeResponse();
+      if (target.includes('/login/complete')) return json({ ok: true, username: 'someone' });
+      // The server answers 200 with `ok: false`, exactly as `/account/refresh` does.
+      if (target.includes('/account/refresh')) {
+        return json({ ok: false, code: 'rejected', error: 'the key was rejected by DeepAI' });
+      }
+      if (target.includes('/account')) {
+        return json({ ok: true, signedIn: true, username: 'someone', allowance: null, balanceLow: false,
+          keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false } });
+      }
+      return json({ ok: true, models: [] });
+    },
+    setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
+    console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
+    Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
+  };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  new vm.Script(app, { filename: 'app.js' }).runInContext(sandbox);
+  await vm.runInContext('loadLocale("en")', sandbox);
+
+  // The threw-not-returned shape is the one that must be handled.
+  const thrown = await vm.runInContext(
+    'api("/account/refresh", { method: "POST" }).then(() => null, (e) => ({ code: e.code, message: e.message }))',
+    sandbox,
+  );
+  assert.equal(thrown.code, 'rejected', 'the code survives being thrown');
+  assert.equal(thrown.message, 'the key was rejected by DeepAI', 'and the server wording is kept for the log');
+  assert.equal(vm.runInContext('failureMessage({ code: "rejected", message: "internal" })', sandbox),
+    LOCALES.en['account.refreshError.rejected'], 'which is what the visitor is shown');
+
+  // And through the real sign-in path, which is where it was visible.
+  vm.runInContext("$('browser-paste').value = 'http://127.0.0.1:8787/callback?code=x&state=y';", sandbox);
+  await vm.runInContext('finishBrowserLogin()', sandbox);
+  const shown = nodes.get('toasts').children.map((c) => c.textContent).filter(Boolean);
+  assert.ok(shown.includes(LOCALES.en['account.refreshError.rejected']),
+    'a sign-in whose balance cannot be read says so, translated');
+  assert.ok(!shown.some((m) => m.includes('the key was rejected')),
+    'and never shows the server\'s internal sentence');
 });
 
 await checkAsync('the key checker tells the three refusals apart', async () => {
@@ -2391,13 +2516,28 @@ await checkAsync('the text stays inside the characters a keyboard can reach', as
     const text = readFileSync(file, 'utf8');
     const lines = text.split('\n');
     lines.forEach((line, index) => {
-      let column = 0;
-      for (const char of line) {
-        const code = char.codePointAt(0);
-        if (TYPEABLE.has(char) || WHITESPACE.has(char) || code < 0x80) { column += 1; continue; }
-        if (isScript(char) || LANGUAGE_PUNCTUATION.has(char) || CURRENCY_SIGNS.has(char) || isFlag(code)) { column += 1; continue; }
-        if (offences.length < 20) {
-          offences.push(`${file.replace(root, '')}:${index + 1}:${column} ${JSON.stringify(char)} U+${code.toString(16).toUpperCase()}`);
+      /*
+       * Escapes are decoded before the scan.
+       *
+       * A `\u`-escaped character is six ASCII characters to this reader and one character
+       * to the browser, so an escaped em dash used to pass a scan meant to keep em dashes out,
+       * which is how one got into the balance placeholder after this test was written to
+       * keep it out: the raw line passed, and the page rendered the dash. Decoding first
+       * means an escape is judged by what it becomes, not by how it is spelled.
+       */
+      const decoded = line.replace(/\\u\{?([0-9a-fA-F]{4,6})\}?/g,
+        (_match, hex) => String.fromCodePoint(parseInt(hex, 16)));
+      for (const [text, escaped] of [[line, false], [decoded, decoded !== line]]) {
+        let column = 0;
+        for (const char of text) {
+          const code = char.codePointAt(0);
+          if (TYPEABLE.has(char) || WHITESPACE.has(char) || code < 0x80) { column += 1; continue; }
+          if (isScript(char) || LANGUAGE_PUNCTUATION.has(char) || CURRENCY_SIGNS.has(char) || isFlag(code)) { column += 1; continue; }
+          if (offences.length < 20) {
+            const how = escaped ? ' (as an escape)' : '';
+            offences.push(`${file.replace(root, '')}:${index + 1}:${column} ${JSON.stringify(char)} U+${code.toString(16).toUpperCase()}${how}`);
+          }
+          column += 1;
         }
       }
     });
