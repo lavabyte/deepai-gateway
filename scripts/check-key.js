@@ -9,18 +9,66 @@
  * predates that separation, or a deployment whose messages have been lost, leaves the
  * question open. This answers it directly.
  *
- * The key is read from the command line, used for three requests, printed nowhere.
+ * The key is read from the command line or from the gateway's own database, used for three
+ * requests, and printed nowhere.
  *
  *   node scripts/check-key.js <api-key>
- *   npm run check-key -- <api-key>
+ *   node scripts/check-key.js --account [username]
+ *   npm run check-key -- --account
+ *
+ * `--account` is the one to reach for when the dashboard says the balance could not be read:
+ * it checks the key the gateway actually stored, which is the only key that matters to the
+ * dashboard, and it saves copying a secret into a terminal.
  */
 
+import { existsSync } from 'node:fs';
 import { API_ORIGIN, LANE_HEADERS, LANE_VERSION } from '../src/deepai/wire.js';
 
-const key = process.argv[2] ?? '';
+const USAGE = `Usage: node scripts/check-key.js <api-key>
+       node scripts/check-key.js --account [username]
 
-if (key.trim() === '') {
-  console.error('Usage: node scripts/check-key.js <api-key>');
+  <api-key>   check a key directly
+  --account   check the key the gateway has stored for an account (default: the only one)
+              reads DATABASE, or ./data/deepai.db, exactly as the server does`;
+
+/** The stored key for one account, or for the only account there is. */
+async function keyFromDatabase(wanted) {
+  const file = process.env.DATABASE ?? './data/deepai.db';
+  if (!existsSync(file)) {
+    console.error(`No database at ${file}. Set DATABASE, or run this from the gateway directory.`);
+    process.exit(2);
+  }
+  const { openDatabase } = await import('../src/db.js');
+  const db = openDatabase(file);
+  const rows = db.prepare('SELECT username, api_key FROM accounts ORDER BY created_at').all();
+  if (rows.length === 0) {
+    console.error('No accounts are stored, so there is no key to check. Sign in first.');
+    process.exit(2);
+  }
+  const row = wanted === undefined
+    ? (rows.length === 1 ? rows[0] : undefined)
+    : rows.find((r) => r.username === wanted);
+  if (row === undefined) {
+    console.error(wanted === undefined
+      ? `Several accounts are stored (${rows.map((r) => r.username).join(', ')}); name one.`
+      : `No account named ${wanted}. Stored: ${rows.map((r) => r.username).join(', ')}.`);
+    process.exit(2);
+  }
+  console.log(`account: ${row.username} (key from ${file})`);
+  return row.api_key;
+}
+
+const args = process.argv.slice(2);
+let key;
+
+if (args[0] === '--account') {
+  key = await keyFromDatabase(args[1]);
+} else {
+  key = args[0] ?? '';
+}
+
+if (typeof key !== 'string' || key.trim() === '') {
+  console.error(USAGE);
   console.error('');
   console.error('The key is on https://deepai.org/dashboard/profile - but see the note at');
   console.error('the end of the output: that page issues keys for the model API, and');

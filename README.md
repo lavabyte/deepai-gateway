@@ -679,8 +679,14 @@ it cannot make the key work. Nothing on `deepai.org` changes this: `/dashboard` 
 Three different refusals look the same from the dashboard, so one command tells them apart:
 
 ```sh
-npm run check-key -- <the-key>
+npm run check-key -- <the-key>      # a key you have
+npm run check-key -- --account      # the key the gateway has stored
 ```
+
+`--account` is the one to reach for when the dashboard says the balance could not be read:
+it checks the key the gateway actually stored, which is the only key the dashboard can use,
+and it saves copying a secret into a terminal. It reads `DATABASE`, or `./data/deepai.db`,
+exactly as the server does.
 
 It prints what DeepAI answers for the key's allowance, for the model API, and for the Code
 lane, then a verdict: the key is unknown, the key is real but not enabled for Code, the key

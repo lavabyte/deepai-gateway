@@ -2164,6 +2164,106 @@ await checkAsync('the key is remembered and can be cleared', async () => {
     'and a blocked write does not throw');
 });
 
+await checkAsync('a balance that was never read does not look like one that was', async () => {
+  /*
+   * Two things the dashboard got wrong about a failed allowance, both visible to the visitor:
+   *
+   *  - the top bar fell back to the *label* ("Credits balance"), so an unread balance sat
+   *    where a number belongs and read as a value;
+   *  - the refresh toast printed the server's internal sentence - "the key was rejected" -
+   *    which is English, unexplained, and untranslated in four of the five languages.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const vm = await import('node:vm');
+  const root = new URL('..', import.meta.url).pathname;
+  const app = readFileSync(join(root, 'public', 'app.js'), 'utf8');
+
+  const boot = async (account) => {
+    const nodes = new Map();
+    const node = () => {
+      const n = {
+        innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
+        dataset: {}, style: {}, value: '', children: [], attrs: {},
+        classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+        addEventListener() {}, appendChild(c) { n.children.push(c); },
+        append(...c) { n.children.push(...c); }, remove() {},
+        setAttribute(k, v) { n.attrs[k] = v; n[k] = v; }, getAttribute(k) { return n.attrs[k] ?? null; },
+        closest: () => null, focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
+      };
+      n.replaceChildren = (...c) => { n.children = Array.from(c); };
+      n.querySelector = () => n.children[0] ?? null;
+      n.querySelectorAll = () => [];
+      return n;
+    };
+    for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
+      'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button',
+      'locale-button', 'locale-menu', 'locale-flag', 'currency-button', 'currency-menu', 'currency-sign']) nodes.set(id, node());
+    const sandbox = {
+      document: {
+        getElementById: (id) => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); },
+        createElement: () => node(), querySelector: () => null, querySelectorAll: () => [],
+        addEventListener() {}, documentElement: { lang: '', dataset: {} },
+        visibilityState: 'visible', body: node(),
+      },
+      window: { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }), location: { assign() {} } },
+      location: { search: '', pathname: '/', hash: '' },
+      history: { replaceState() {} },
+      localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      navigator: { language: 'en-GB', languages: ['en-GB'] },
+      fetch: async (url) => {
+        // The strings have to be the real ones: this test is about what the visitor reads.
+        if (String(url).includes('/locales/')) return localeResponse();
+        return new Response(
+          JSON.stringify(String(url).includes('/account') ? account : { ok: true, models: [] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+      setInterval: () => 0, setTimeout: () => 0, clearInterval() {},
+      console, Intl, URLSearchParams, Response, Error, JSON, Math, Number, String, Array,
+      Object, Boolean, Date, RegExp, Promise, isNaN, parseInt, parseFloat,
+    };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    new vm.Script(app, { filename: 'app.js' }).runInContext(sandbox);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    return { sandbox, nodes };
+  };
+
+  const base = { ok: true, signedIn: true, username: 'key-abc', allowance: null, balanceLow: false,
+    keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false } };
+
+  // --- No balance: a dash and an explanation, never the label.
+  const unread = await boot({ ...base, allowance: null });
+  vm.runInContext('renderAccountBadge()', unread.sandbox);
+  const text = unread.nodes.get('account-badge-text').textContent;
+  const label = LOCALES.en['account.credits'];
+  assert.notEqual(text, label, `the badge must not show the label "${label}" as a value`);
+  assert.equal(text, '\u2014', 'an unread balance is shown as a dash');
+  assert.equal(unread.nodes.get('account-badge').className, 'badge badge--gray',
+    'and is not painted as an active account');
+  assert.equal(unread.nodes.get('account-badge').attrs.title, LOCALES.en['account.balanceUnknown'],
+    'with a tooltip saying how to read it');
+
+  // --- A balance is shown, and the account reads as active.
+  const read = await boot({ ...base, allowance: { balance: '4.5', granted: '10' } });
+  vm.runInContext('renderAccountBadge()', read.sandbox);
+  assert.equal(read.nodes.get('account-badge-text').textContent, '4.5 Credits');
+  assert.equal(read.nodes.get('account-badge').className, 'badge badge--green');
+
+  // --- A refusal is translated, whatever the server's wording was.
+  const error = (result) => vm.runInContext(`refreshError(${JSON.stringify(result)})`, read.sandbox);
+  for (const code of ['rejected', 'lane-outdated', 'unreachable', 'http', 'no-key', 'no-account']) {
+    const shown = error({ code, error: 'internal english sentence' });
+    assert.equal(shown, LOCALES.en[`account.refreshError.${code}`], `${code} must be translated`);
+    assert.ok(!shown.includes('internal english sentence'), `${code} must not leak the server wording`);
+  }
+  // An unknown code still says something rather than nothing.
+  assert.equal(error({ code: 'brand-new', error: 'fallback sentence' }), 'fallback sentence');
+  // No result at all is the request itself having failed, which is the unreachable case.
+  assert.equal(error(undefined), LOCALES.en['account.refreshError.unreachable']);
+});
+
 await checkAsync('the key checker tells the three refusals apart', async () => {
   /*
    * `scripts/check-key.js` exists because three different answers - the key is unknown, the
@@ -2179,6 +2279,10 @@ await checkAsync('the key checker tells the three refusals apart', async () => {
   const root = new URL('..', import.meta.url).pathname;
   const script = join(root, 'scripts', 'check-key.js');
   const source = readFileSync(script, 'utf8');
+
+  // `--account` reads the stored key, so a secret does not have to be pasted into a terminal.
+  assert.match(source, /--account/, 'the checker can read the key from the database');
+  assert.match(source, /DATABASE/, 'using the same variable the server does');
 
   // No key: a usage message rather than a request.
   const bare = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 20_000 });
@@ -2486,8 +2590,12 @@ await checkAsync('every language is complete and agrees on its placeholders', as
   const used = new Set();
   for (const m of app.matchAll(/\bt\(\s*'([a-zA-Z][\w.]*)'/g)) used.add(m[1]);
   for (const m of app.matchAll(/counted\(\s*'([a-zA-Z][\w.]*)'/g)) used.add(m[1]);
-  // Keys built at runtime from a stable family: `t(`status.${status}`)`.
-  for (const m of app.matchAll(/(authEvent|status|window)\.\$\{/g)) {
+  /*
+   * Keys built at runtime from a stable family: `t(`status.${status}`)`. The family is read
+   * out of the source rather than listed here, because a list has to be remembered - and the
+   * first draft of this check flagged a whole family of legitimate keys for that reason.
+   */
+  for (const m of app.matchAll(/([a-zA-Z][\w.]*)\.\$\{/g)) {
     for (const key of Object.keys(english)) if (key.startsWith(`${m[1]}.`)) used.add(key);
   }
   for (const m of html.matchAll(/data-i18n(?:-attr)?="([^"]+)"/g)) {

@@ -1215,13 +1215,23 @@ function renderAccountBadge() {
    */
   button.hidden = !account.signedIn;
   if (account.signedIn) {
-    badge.className = account.balanceLow ? 'badge badge--amber' : 'badge badge--green';
     // The balance and nothing else. The account is identified by the key it was signed in
     // with, which the visitor already knows, so a name here only repeated what they typed.
     const balance = account.allowance?.balance;
-    text.textContent = balance
-      ? t('common.creditsAmount', { amount: balance })
-      : t('account.credits');
+    /*
+     * No balance is shown as a dash, not as the label. The label used to be the fallback, so
+     * an account whose allowance had never been read displayed "Credits balance" in the same
+     * place a number belongs - which reads as a value, and hid the fact that the reading had
+     * failed. `balanceLow` is only meaningful once there is a balance to compare.
+     */
+    if (balance) {
+      badge.className = account.balanceLow ? 'badge badge--amber' : 'badge badge--green';
+      text.textContent = t('common.creditsAmount', { amount: balance });
+    } else {
+      badge.className = 'badge badge--gray';
+      text.textContent = '\u2014';
+      badge.setAttribute('title', t('account.balanceUnknown'));
+    }
   } else {
     badge.className = 'badge badge--red';
     text.textContent = t('common.loggedOut');
@@ -1415,6 +1425,23 @@ function accountCard() {
     </div>`;
 }
 
+/**
+ * Why the balance could not be read, in the visitor's language.
+ *
+ * The server answers with a code and an English sentence. The code is what is translated;
+ * the sentence is only used when there is no string for it, because showing an internal
+ * phrase like "the key was rejected" tells the visitor nothing they can act on.
+ *
+ * @param {{code?: string, error?: string}} result
+ * @returns {string}
+ */
+function refreshError(result) {
+  const code = typeof result?.code === 'string' && result.code !== '' ? result.code : 'unreachable';
+  const key = `account.refreshError.${code}`;
+  const translated = t(key);
+  return translated === key ? (result?.error ?? t('error.refresh')) : translated;
+}
+
 /** One-line summary of the key quota. */
 function keyQuotaLabel(quota) {
   if (quota === undefined || quota === null) return '';
@@ -1529,7 +1556,7 @@ function wireAccountCard(rerender) {
     try {
       const result = await api('/account/refresh', { method: 'POST' });
       if (result.ok) toast(t('account.balanceToast', { amount: result.allowance.balance }));
-      else toast(result.error ?? t('error.refresh'), 'error');
+      else toast(refreshError(result), 'error');
     } catch (error) {
       toast(String(error.message ?? error), 'error');
     }

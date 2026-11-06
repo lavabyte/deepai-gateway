@@ -723,11 +723,17 @@ function isBalanceLow(allowance) {
  */
 export async function refreshAllowance(db, runtime, username) {
   const account = readAccount(db, username);
-  if (account === undefined) return { ok: false, error: 'Not signed in.' };
+  if (account === undefined) return { ok: false, code: 'no-account', error: 'Not signed in.' };
   const check = await checkKey(account.apiKey, AbortSignal.timeout(15_000));
   if (!check.ok) {
     recordAuthEvent(db, 'denied', { username, detail: check.error });
-    return { ok: false, error: check.error };
+    /*
+     * `code` is what the dashboard translates; `error` is the English sentence, kept for the
+     * log and for a client that has no string for the code. The dashboard used to print the
+     * raw sentence at the visitor - "the key was rejected" - which is an internal phrase in
+     * the wrong language, in a toast, with no hint of what to do about it.
+     */
+    return { ok: false, code: check.reason ?? 'unreachable', error: check.error };
   }
   saveAllowance(db, username, check.allowance);
   if (typeof check.isPro === 'boolean') savePro(db, username, check.isPro);

@@ -32,10 +32,15 @@ import { API_ORIGIN, laneHeaders } from './wire.js';
  *
  * @param {string} apiKey
  * @param {AbortSignal} [signal]
- * @returns {Promise<{ok: boolean, allowance?: object, isPro?: boolean, error?: string}>}
+ * @returns {Promise<{ok: boolean, allowance?: object, isPro?: boolean, error?: string,
+ *   reason?: 'no-key'|'rejected'|'lane-outdated'|'http'|'unreachable'}>}
+ *   `reason` is the machine-readable half, for a caller that shows the visitor a translated
+ *   sentence; `error` is the wording for a log.
  */
 export async function checkKey(apiKey, signal) {
-  if (typeof apiKey !== 'string' || apiKey === '') return { ok: false, error: 'no key stored' };
+  if (typeof apiKey !== 'string' || apiKey === '') {
+    return { ok: false, reason: 'no-key', error: 'no key stored' };
+  }
   try {
     const [allowanceResponse, entitlementResponse] = await Promise.all([
       fetch(`${API_ORIGIN}/deepai_code/theos`, {
@@ -49,7 +54,7 @@ export async function checkKey(apiKey, signal) {
     ]);
 
     if (allowanceResponse.status === 401 || allowanceResponse.status === 403) {
-      return { ok: false, error: 'the key was rejected' };
+      return { ok: false, reason: 'rejected', error: 'the key was rejected by DeepAI' };
     }
     /*
      * A retired lane revision is answered before the key is read, and it used to arrive here
@@ -59,9 +64,11 @@ export async function checkKey(apiKey, signal) {
      * retry a request that will fail identically every time.
      */
     if (allowanceResponse.status === 426) {
-      return { ok: false, error: 'the lane revision is retired' };
+      return { ok: false, reason: 'lane-outdated', error: 'the lane revision is retired' };
     }
-    if (!allowanceResponse.ok) return { ok: false, error: `HTTP ${allowanceResponse.status}` };
+    if (!allowanceResponse.ok) {
+      return { ok: false, reason: 'http', error: `HTTP ${allowanceResponse.status}` };
+    }
 
     const data = await allowanceResponse.json().catch(() => ({}));
     const entitlement = entitlementResponse?.ok
@@ -79,7 +86,7 @@ export async function checkKey(apiKey, signal) {
       ...(typeof entitlement?.is_pro === 'boolean' ? { isPro: entitlement.is_pro } : {}),
     };
   } catch (error) {
-    return { ok: false, error: String(error?.message ?? error) };
+    return { ok: false, reason: 'unreachable', error: String(error?.message ?? error) };
   }
 }
 
@@ -123,11 +130,16 @@ export async function checkPastedKey(apiKey, signal) {
   if (check.ok === true) {
     return { ok: true, allowance: check.allowance, isPro: check.isPro === true };
   }
-  if (check.error === 'the lane revision is retired') {
+  /*
+   * `check.reason` rather than the wording: comparing the English sentence once tied this
+   * to a string that a later edit changed, which silently reclassified every rejected key as
+   * "could not reach DeepAI".
+   */
+  if (check.reason === 'lane-outdated') {
     // DeepAI's verdict, but about this gateway rather than about the key.
     return { ok: false, reason: 'lane-outdated', error: check.error };
   }
-  if (check.error !== 'the key was rejected') {
+  if (check.reason !== 'rejected') {
     // Not a verdict from DeepAI, so do not report it as one.
     return { ok: false, reason: 'unreachable', error: check.error };
   }
