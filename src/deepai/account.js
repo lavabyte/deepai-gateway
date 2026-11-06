@@ -51,6 +51,16 @@ export async function checkKey(apiKey, signal) {
     if (allowanceResponse.status === 401 || allowanceResponse.status === 403) {
       return { ok: false, error: 'the key was rejected' };
     }
+    /*
+     * A retired lane revision is answered before the key is read, and it used to arrive here
+     * as `HTTP 426` - which `checkPastedKey` turns into "could not reach DeepAI". DeepAI was
+     * reached, and it said something specific: this gateway is sending a version it has
+     * retired. Reported as its own state so the reader is told that, rather than sent to
+     * retry a request that will fail identically every time.
+     */
+    if (allowanceResponse.status === 426) {
+      return { ok: false, error: 'the lane revision is retired' };
+    }
     if (!allowanceResponse.ok) return { ok: false, error: `HTTP ${allowanceResponse.status}` };
 
     const data = await allowanceResponse.json().catch(() => ({}));
@@ -106,12 +116,16 @@ export function usernameForKey(apiKey) {
  * @param {string} apiKey
  * @param {AbortSignal} [signal]
  * @returns {Promise<{ok: true, allowance: object, isPro: boolean}
- *   | {ok: false, reason: 'rejected'|'not-for-code'|'unreachable', error?: string}>}
+ *   | {ok: false, reason: 'rejected'|'not-for-code'|'lane-outdated'|'unreachable', error?: string}>}
  */
 export async function checkPastedKey(apiKey, signal) {
   const check = await checkKey(apiKey, signal);
   if (check.ok === true) {
     return { ok: true, allowance: check.allowance, isPro: check.isPro === true };
+  }
+  if (check.error === 'the lane revision is retired') {
+    // DeepAI's verdict, but about this gateway rather than about the key.
+    return { ok: false, reason: 'lane-outdated', error: check.error };
   }
   if (check.error !== 'the key was rejected') {
     // Not a verdict from DeepAI, so do not report it as one.

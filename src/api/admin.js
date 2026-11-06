@@ -85,6 +85,10 @@ const KEY_LOGIN_FAILURES = {
     403,
     'That key works for the DeepAI model API, but it is not enabled for DeepAI Code, which is what this gateway uses. Use the key the DeepAI Code app shows.',
   ],
+  'lane-outdated': [
+    502,
+    'DeepAI has retired the DeepAI Code version this gateway speaks to it in, so it refused the request before reading the key. This is a gateway problem, not a problem with the key. The gateway logs name the revision it sent.',
+  ],
   unreachable: [502, 'Could not reach DeepAI to check that key. Try again in a moment.'],
 };
 

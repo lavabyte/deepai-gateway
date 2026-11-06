@@ -676,6 +676,18 @@ API, so DeepAI answers `401` for the Code lane and the dashboard can tell the tw
 it cannot make the key work. Nothing on `deepai.org` changes this: `/dashboard` redirects to
 `/dashboard/profile`, and that page is the only place a key is shown.
 
+Three different refusals look the same from the dashboard, so one command tells them apart:
+
+```sh
+npm run check-key -- <the-key>
+```
+
+It prints what DeepAI answers for the key's allowance, for the model API, and for the Code
+lane, then a verdict: the key is unknown, the key is real but not enabled for Code, the key
+works, or the gateway is speaking a retired lane revision. It never prints the key, and the
+Code-lane probe uses an unusable model name - DeepAI checks authentication before the request
+body - so it cannot generate a token or spend a credit.
+
 A key DeepAI Code accepts comes from **DeepAI's own sign-in page** - the same flow the
 official Code app uses. This gateway implements it:
 

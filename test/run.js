@@ -2164,6 +2164,38 @@ await checkAsync('the key is remembered and can be cleared', async () => {
     'and a blocked write does not throw');
 });
 
+await checkAsync('the key checker tells the three refusals apart', async () => {
+  /*
+   * `scripts/check-key.js` exists because three different answers - the key is unknown, the
+   * key is real but not enabled for DeepAI Code, and the gateway speaks a retired lane
+   * revision - all read as "no" from the dashboard, and each needs a different fix. It talks
+   * to DeepAI, so what is checked here is that it refuses to run without a key and that the
+   * verdicts it can print are the three documented ones; the requests themselves are
+   * exercised by hand against the live service.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  const root = new URL('..', import.meta.url).pathname;
+  const script = join(root, 'scripts', 'check-key.js');
+  const source = readFileSync(script, 'utf8');
+
+  // No key: a usage message rather than a request.
+  const bare = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 20_000 });
+  assert.equal(bare.status, 2, 'running it with no key must fail');
+  assert.match(bare.stderr, /Usage: node scripts\/check-key\.js/, 'and say how to run it');
+  assert.match(bare.stderr, /deepai\.org\/dashboard\/profile/, 'and where a key comes from');
+
+  // The three verdicts, each reachable.
+  for (const verdict of ['the gateway lane revision is retired', 'the key works for DeepAI Code',
+    'the key is real, but DeepAI Code does not accept it', 'DeepAI does not know this key at all']) {
+    assert.ok(source.includes(verdict), `missing verdict: ${verdict}`);
+  }
+  // And it must never print the key it was given.
+  assert.ok(!/console\.log\([^)]*\bkey\b\s*\)/.test(source), 'the key must not be printed');
+  assert.match(source, /LANE_VERSION/, 'and it reports the revision it sent, not a guessed one');
+});
+
 await checkAsync('a retired lane revision is reported as the gateway problem it is', async () => {
   /*
    * DeepAI reads one version from the request: `X-DeepAI-Code-Theos`. It is the lane
