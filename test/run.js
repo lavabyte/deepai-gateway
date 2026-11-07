@@ -3693,6 +3693,25 @@ await checkAsync('the sign-in card is three steps, a link, a field and a button'
     'a one-line field');
   assert.match(html, /id="login-finish"[^>]*>Login to gateway</, 'and a button that logs in');
 
+  const css = readFileSync(join(root, 'public', 'app.css'), 'utf8');
+
+  /*
+   * The walkthrough is the last thing in the box, because it belongs to the steps above it.
+   *
+   * `metadata` is deliberate: it means the file is not fetched until the visitor asks for it,
+   * so a 2 MB recording does not ride along with the dashboard for everyone who never plays
+   * it. Played inline rather than as a download, and the recording keeps its own aspect ratio.
+   */
+  const videoIdx = html.indexOf('<video');
+  assert.ok(videoIdx > html.indexOf('step__list'), 'the film is at the foot of the box');
+  assert.match(html, /<video class="signin-video" controls preload="metadata" playsinline/, 'a video, not a link');
+  assert.match(html, /src="\/assets\/login-tutorial\.mp4"/, 'and the recording that is shipped');
+  assert.match(html, /<a href="\/assets\/login-tutorial\.mp4">[^<]+<\/a>/,
+    'with a link as the fallback for a browser without video');
+  assert.ok(videoIdx < html.indexOf('login-browser'), 'and above the button, where the steps are');
+  assert.match(css, /aspect-ratio:\s*2520 \/ 1080/, 'with the recording own shape reserved');
+  assert.match(css, /\.signin-video \{[^}]*width:\s*100%/, 'and full width of the box');
+
   /*
    * The button must not underline on hover, and the steps must be readable.
    *
@@ -3701,7 +3720,6 @@ await checkAsync('the sign-in card is three steps, a link, a field and a button'
    * copy, which made the one thing that has to be read look like a footnote beside the button
    * it explains.
    */
-  const css = readFileSync(join(root, 'public', 'app.css'), 'utf8');
   assert.match(css, /\.btn:hover \{[^}]*text-decoration:\s*none/, 'a button link must not underline on hover');
   const base = Number(/\.note \{[^}]*font-size:\s*([\d.]+)px/.exec(css)?.[1] ?? 0);
   const attention = Number(/\.note--attention \{[^}]*font-size:\s*([\d.]+)px/.exec(css)?.[1] ?? 0);
@@ -3710,7 +3728,7 @@ await checkAsync('the sign-in card is three steps, a link, a field and a button'
 
   // Nothing of the routes that were removed may remain, on the card or in the source.
   for (const gone of ['key-paste', 'login-with-key', 'profile-paste', 'login-with-profile',
-    'content-saved', 'content-forget', 'inline']) {
+    'content-saved', 'content-forget']) {
     assert.ok(!html.includes(gone), `removed: ${gone} must not be on the card`);
   }
   for (const gone of ['signInWithKey', 'keyPasteHelp', 'rememberContent', 'parseAccountPaste']) {

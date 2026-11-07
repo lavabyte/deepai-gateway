@@ -394,6 +394,19 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
 .note--attention .step__list { margin: 0; padding-left: 20px; }
 .note--attention li { margin: 4px 0; }
 .note--attention strong { font-weight: 600; }
+/* The short film of the three steps, at the foot of the box it belongs to. */
+.signin-tutorial { margin-top: 10px; font-weight: 600; }
+.signin-video {
+  margin-top: 8px; width: 100%; height: auto; display: block;
+  /*
+   * A recorded window, so the aspect is the recording's own: reserving it up front keeps the
+   * box from reflowing once the metadata arrives. No poster, because the first frame is the
+   * opening of a walkthrough, not a still of it.
+   */
+  aspect-ratio: 2520 / 1080;
+  border-radius: var(--radius);
+  background: #000;
+}
 
 .snippet {
   display: flex; align-items: center; gap: 10px;

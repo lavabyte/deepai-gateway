@@ -306,6 +306,13 @@ function signInRoutes(prefix = '') {
           <li>${t('signin.stepCopy')}</li>
           <li>${t('signin.stepPaste')}</li>
         </ol>
+        <p class="signin-tutorial">${t('signin.tutorial')}</p>
+        <video class="signin-video" controls preload="metadata" playsinline
+          src="/assets/login-tutorial.mp4"
+          title="${t('signin.tutorial')}"
+          aria-label="${t('signin.tutorial')}">
+          <a href="/assets/login-tutorial.mp4">${t('signin.tutorial')}</a>
+        </video>
       </div>
 
       <div class="row mt-3">
