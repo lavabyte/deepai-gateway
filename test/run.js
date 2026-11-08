@@ -4128,6 +4128,133 @@ await checkAsync('a stream that never ends an event is cut off, not buffered for
   assert.deepEqual(seen, [{ ok: 1 }]);
 });
 
+await checkAsync('the key cap is configuration, with a bounded and defaulted value', async () => {
+  /*
+   * Reported from a deployment that had set `MAX_KEYS=10` and was shown "1 of 5" on the
+   * panel, and stopped at five: the limit used to be a constant in `src/keys.js`, so the
+   * environment variable read by nothing was silently ignored.
+   *
+   * The cap is now read by `config()`, which is the one place the environment is read, and is
+   * passed to the router through the runtime. A value that cannot be read falls back to the
+   * default rather than to no limit at all: a typo in the environment must not turn a capped
+   * gateway into an uncapped one.
+   */
+  const { parseMaxKeys, keyQuota, hashKey, generateKey, DEFAULT_MAX_KEYS, MAX_KEYS_LIMIT } = await import('../src/keys.js');
+  const { saveAccount } = await import('../src/store.js');
+
+  /**
+   * Add one key for an account, the way creating one does.
+   *
+   * Written here rather than imported because `src/api/admin.js` owns the insert - and the
+   * column types are load-bearing: `created_at` is an INTEGER timestamp, not a date string,
+   * which is what a first attempt got wrong.
+   */
+  const insertKey = (db, ownerUsername) => {
+    const { plaintext, hash, prefix } = generateKey();
+    db.prepare(`INSERT INTO api_keys (
+        id, name, prefix, key_hash, created_at, expires_at, limit_tokens, limit_requests,
+        limit_window, allowed_models, owner_username, owner_key_hash, models_restricted
+      ) VALUES (?, '', ?, ?, ?, NULL, NULL, NULL, 'unlimited', '[]', ?, ?, 0)`)
+      .run(`key_${ownerUsername}_${Math.floor(Math.random() * 1e9)}`, prefix, hash,
+        Date.now(), ownerUsername, '');
+  };
+  void hashKey;
+  const { config } = await import('../server.js');
+
+  assert.equal(parseMaxKeys('10'), 10, 'a number is honoured');
+  assert.equal(parseMaxKeys('1'), 1, 'down to one');
+  for (const bad of [undefined, '', 'abc', '0', '-3', '3.5', NaN, null, 'ten']) {
+    assert.equal(parseMaxKeys(bad), DEFAULT_MAX_KEYS,
+      `${String(bad)} is not a cap, so the default stands`);
+  }
+  assert.equal(parseMaxKeys('99999'), MAX_KEYS_LIMIT,
+    'and an enormous value is bounded rather than taken literally');
+
+  // `config()` is where the environment becomes a value the rest of the app can use.
+  assert.equal(config({}).maxKeys, 5, 'the default when nothing is set');
+  assert.equal(config({ MAX_KEYS: '10' }).maxKeys, 10, 'and what the operator asked for');
+  assert.equal(config({ MAX_KEYS: 'abc' }).maxKeys, 5, 'despite the junk in it');
+
+  // And the quota a caller sees carries the number the deployment chose.
+  const { openDatabase } = await import('../src/db.js');
+  const fresh = openDatabase(':memory:');
+  //The account must exist before a key can be held by it.
+  saveAccount(fresh, { apiKey: 'alice-deepai-key', username: 'alice', isPro: false });
+  assert.equal(keyQuota(fresh, 'alice', 10).max, 10);
+  assert.equal(keyQuota(fresh, 'alice').max, DEFAULT_MAX_KEYS,
+    'with the default when none is given');
+  insertKey(fresh, 'alice');
+  const quota = keyQuota(fresh, 'alice', 1);
+  assert.equal(quota.used, 1);
+  assert.equal(quota.remaining, 0);
+  assert.equal(quota.atLimit, true, 'one key is the whole allowance at a cap of one');
+  // A count over the cap (an account that already had more) reads as full, never negative.
+  const over = keyQuota(fresh, 'alice', 1);
+  assert.ok(over.remaining >= 0, `remaining must not go negative, saw ${over.remaining}`);
+});
+
+await checkAsync('a deployment can raise the key limit', async () => {
+  /*
+   * End to end, because it was reported that the panel ignored `MAX_KEYS=10` and stopped at
+   * five. An app built with a raised cap says so on the account payload and still refuses at
+   * the cap it was given.
+   */
+  const { createApp } = await import('../server.js');
+  const { createSession } = await import('../src/store.js');
+  const { generateKey } = await import('../src/keys.js');
+  const insertKey = (db, ownerUsername) => {
+    const { hash, prefix } = generateKey();
+    db.prepare(`INSERT INTO api_keys (
+        id, name, prefix, key_hash, created_at, expires_at, limit_tokens, limit_requests,
+        limit_window, allowed_models, owner_username, owner_key_hash, models_restricted
+      ) VALUES (?, '', ?, ?, ?, NULL, NULL, NULL, 'unlimited', '[]', ?, ?, 0)`)
+      .run(`key_${ownerUsername}_${Math.floor(Math.random() * 1e9)}`, prefix, hash,
+        Date.now(), ownerUsername, '');
+  };
+  const fresh = openDatabase(':memory:');
+  // The account must exist before a session can be minted for it.
+  const { cookie } = sessionFor(fresh, 'owner');
+  const app = createApp(fresh, { log: () => {}, logRequests: false, maxKeys: 7 });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const account = await fetch(`${base}/api/account`, { headers: { cookie } }).then((r) => r.json());
+    assert.equal(account.keyQuota.max, 7, 'the dashboard reports the number the deployment set');
+
+    // Five keys is what the old constant stopped at; seven must not.
+    for (let i = 0; i < 7; i += 1) {
+      insertKey(fresh, 'owner');
+    }
+    const after = await fetch(`${base}/api/account`, { headers: { cookie } }).then((r) => r.json());
+    assert.equal(after.keyQuota.used, 7);
+    assert.equal(after.keyQuota.atLimit, true, 'and seven is the limit there');
+
+    const refused = await fetch(`${base}/api/keys`, {
+      method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'one too many' }),
+    });
+    assert.equal(refused.status, 409, 'an eighth is refused');
+    const body = await refused.json();
+    assert.equal(body.code, 'key_limit_reached');
+    assert.match(body.error, /at most 7 API keys/, 'and the message names the number that was set');
+
+    // Seven is also the number left when none is set: five.
+    const plain = openDatabase(':memory:');
+    const plainApp = createApp(plain, { log: () => {}, logRequests: false });
+    const plainServer = plainApp.listen(0, '127.0.0.1');
+    await new Promise((resolve) => plainServer.once('listening', resolve));
+    try {
+      const plainAccount = await fetch(`http://127.0.0.1:${plainServer.address().port}/api/account`, { headers: { cookie } }).then((r) => r.json());
+      assert.equal(plainAccount.keyQuota.max, 5, 'with nothing set, it is five as it always was');
+    } finally {
+      await new Promise((resolve) => plainServer.close(resolve));
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 await checkAsync('a refused sign-in leaves a trail, and the database is owner-only', async () => {
   const { openDatabase } = await import('../src/db.js');
   const { recentAuthEvents } = await import('../src/store.js');

@@ -18,7 +18,7 @@ import {
 } from '../deepai/account.js';
 import { loadCatalog, publicModel } from '../deepai/catalog.js';
 import {
-  MAX_KEYS,
+  DEFAULT_MAX_KEYS,
   WINDOWS,
   generateKey,
   hashKey,
@@ -73,6 +73,15 @@ import {
 export function adminRouter(db, runtime) {
   const router = express.Router();
 
+  /**
+   * The key cap for this deployment, falling back to the default when it is not set.
+   *
+   * `config()` always sets it, so this is mostly for tests that mount the router directly.
+   */
+  const maxKeys = (rt) => (Number.isInteger(rt?.maxKeys) && rt.maxKeys > 0
+    ? rt.maxKeys
+    : DEFAULT_MAX_KEYS);
+
   /** The session's account, or `undefined` after answering 401. */
   function requireAccount(req, res) {
     if (req.account !== undefined) return req.account;
@@ -119,8 +128,8 @@ export function adminRouter(db, runtime) {
       // An anonymous caller gets an empty quota, never the deployment-wide
       // count: `keyQuota(db, undefined)` would total every account's keys.
       keyQuota: account === undefined
-        ? { used: 0, max: MAX_KEYS, remaining: MAX_KEYS, atLimit: false }
-        : keyQuota(db, account.username),
+        ? { used: 0, max: maxKeys(runtime), remaining: maxKeys(runtime), atLimit: false }
+        : keyQuota(db, account.username, maxKeys(runtime)),
     });
   });
 
@@ -180,7 +189,7 @@ export function adminRouter(db, runtime) {
     res.json({
       keys: rows.map((row) => publicKey(row, keyUsage(db, row.id, row.limit_window))),
       windows: [...WINDOWS],
-      quota: keyQuota(db, owner),
+      quota: keyQuota(db, owner, maxKeys(runtime)),
     });
   });
 
@@ -190,11 +199,11 @@ export function adminRouter(db, runtime) {
     const account = req.account;
     const owner = account.username;
 
-    const quota = keyQuota(db, owner);
+    const quota = keyQuota(db, owner, maxKeys(runtime));
     if (quota.atLimit) {
       return res.status(409).json({
         ok: false,
-        error: `The gateway allows at most ${MAX_KEYS} API keys. Revoke one before creating another.`,
+        error: `The gateway allows at most ${quota.max} API keys. Revoke one before creating another.`,
         code: 'key_limit_reached',
       });
     }

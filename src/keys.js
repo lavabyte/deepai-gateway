@@ -20,12 +20,33 @@ const KEY_PREFIX = 'sk-';
 const KEY_BYTES = 20;
 
 /**
- * Hard cap on live keys per account.
+ * Default cap on live keys per account, when the operator has not set one.
  *
- * Revoking deletes the key, so this is simply the number of rows an account may
- * hold; there is no separate tombstone population.
+ * The cap itself is configuration (`MAX_KEYS` in the environment, read by `config()` in
+ * `server.js`), because it is a deployment question: how many keys a gateway hands out.
+ * The default is the value this has always shipped with.
  */
-export const MAX_KEYS = 5;
+export const DEFAULT_MAX_KEYS = 5;
+
+/**
+ * Read one operator-supplied cap and return the value to enforce.
+ *
+ * An unparsable or out-of-range value falls back to the default rather than to no limit at
+ * all: a typo in the environment must not silently turn a capped gateway into an uncapped
+ * one. The range is bounded so a large number cannot become an unbounded one by accident,
+ * and the floor keeps a `0` or negative from making every key creation fail.
+ *
+ * @param {unknown} value - whatever the environment held, string or not.
+ * @returns {number} a cap between 1 and {@link MAX_KEYS_LIMIT}.
+ */
+export function parseMaxKeys(value) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) return DEFAULT_MAX_KEYS;
+  return Math.min(n, MAX_KEYS_LIMIT);
+}
+
+/** Upper bound for an operator-set cap: a gateway does not hold thousands of keys. */
+export const MAX_KEYS_LIMIT = 100;
 
 /**
  * Limit windows a key may be created with.
@@ -138,16 +159,18 @@ export function overLimit(row, usage) {
  *
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {string} owner - the account whose quota to report; must not be empty.
+ * @param {number} [max] - the cap for this deployment; {@link DEFAULT_MAX_KEYS} when omitted.
  * @returns {{used: number, max: number, remaining: number, atLimit: boolean}}
  */
-export function keyQuota(db, owner) {
+export function keyQuota(db, owner, max = DEFAULT_MAX_KEYS) {
   if (typeof owner !== 'string' || owner === '') {
     throw new TypeError('keyQuota needs an owner; use totalKeyCount() for a global count');
   }
+  const cap = Number.isInteger(max) && max > 0 ? max : DEFAULT_MAX_KEYS;
   const used = Number(
     db.prepare('SELECT COUNT(*) AS n FROM api_keys WHERE owner_username = ?').get(owner).n,
   );
-  return { used, max: MAX_KEYS, remaining: Math.max(0, MAX_KEYS - used), atLimit: used >= MAX_KEYS };
+  return { used, max: cap, remaining: Math.max(0, cap - used), atLimit: used >= cap };
 }
 
 /**

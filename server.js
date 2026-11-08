@@ -24,7 +24,7 @@ import { v1Router } from './src/api/v1.js';
 import { prefetchCatalog } from './src/deepai/catalog.js';
 import { attachSession } from './src/middleware/session.js';
 import { listAccounts, clearSessionCookie, destroySession, forgetInactiveAccounts, recordAuthEvent } from './src/store.js';
-import { totalKeyCount } from './src/keys.js';
+import { DEFAULT_MAX_KEYS, parseMaxKeys, totalKeyCount } from './src/keys.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -48,6 +48,12 @@ export function config(env = process.env) {
      * negative or unparsable value is treated as off rather than as "everything".
      */
     forgetAccountAfterDays: forgetAfterDays(env.FORGET_ACCOUNT_AFTER_DAYS),
+    /*
+     * How many live API keys one account may hold. Set per deployment, because it is an
+     * operator question about the gateway, not about an account. Defaults to the five keys
+     * it has always allowed; see `parseMaxKeys` for what a bad value becomes.
+     */
+    maxKeys: parseMaxKeys(env.MAX_KEYS),
     /*
      * DeepAI's own browser sign-in, finishing at `/callback`. Off by default: DeepAI
      * hard-codes `127.0.0.1` as the redirect host, so it only completes when the browser
@@ -79,6 +85,8 @@ export function createApp(db, options = {}) {
   const runtime = {
     log: options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`)),
     trustProxy: options.trustProxy === true,
+    // The key cap for this deployment, or `undefined` to fall back to the default.
+    maxKeys: options.maxKeys,
   };
 
   const app = express();
@@ -257,6 +265,12 @@ export function start(overrides = {}) {
   const keyCount = totalKeyCount(db);
   console.log(`[deepai-gateway] database: ${settings.database}`);
   console.log(`[deepai-gateway] stored API keys: ${keyCount}`);
+  // A deployment that set a limit other than the default, so a key-count problem is visible
+  // in the log rather than puzzling in the dashboard. The default says nothing: it is the
+  // value every deployment started with.
+  if (settings.maxKeys !== DEFAULT_MAX_KEYS) {
+    console.log(`[deepai-gateway] API key limit per account: ${settings.maxKeys} (MAX_KEYS)`);
+  }
   console.log(
     accounts.length === 0
       ? '[deepai-gateway] no DeepAI accounts yet - open the dashboard to log in'
