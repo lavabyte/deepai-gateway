@@ -3762,6 +3762,19 @@ await checkAsync('an image the backend refuses is retried as text, not reported 
   multimodal.forgetRejections();
   assert.equal(multimodal.rejectsImages('m1'), false, 'and can be forgotten');
 
+  /*
+   * It expires, which is the half of this that a caller can see. A bare HTTP 400 is the
+   * usual evidence and a long conversation produces one just as easily as an image does, so
+   * a refusal must not cost a model its images for the life of the process: the caller's
+   * answer is "wait a while", not "restart the gateway".
+   */
+  multimodal.noteMultimodalRejection('m3', 1_000);
+  assert.equal(multimodal.rejectsImages('m3', 1_000 + multimodal.REJECTION_TTL_MS - 1), true,
+    'remembered while it is fresh');
+  assert.equal(multimodal.rejectsImages('m3', 1_000 + multimodal.REJECTION_TTL_MS), false,
+    'and forgotten when it is not, so the image is tried again');
+  multimodal.forgetRejections();
+
   const { openDatabase } = await import('../src/db.js');
   const { saveAccount } = await import('../src/store.js');
   const { generateKey } = await import('../src/keys.js');
@@ -4097,6 +4110,100 @@ await checkAsync('a stream reaches the client as it arrives, not after it is com
       `the first delta must not wait for the last (first at ${arrivals[0]}ms)`);
   } finally {
     globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('the stream opens before the model has said anything', async () => {
+  /*
+   * Reported as "you have to wait several seconds for the stream".
+   *
+   * The hours spent measuring it say the wait is the model's: DeepAI accepts the request in
+   * well under a second and then thinks for one to five, and this gateway used to open the
+   * caller's stream only on the first token - so the caller had nothing to read, and nothing
+   * to show, for the whole of that think. A client cannot tell that apart from a dead
+   * gateway, which is how it got reported.
+   *
+   * The stream now opens as soon as the upstream accepts the call, with the role delta OpenAI
+   * sends first. The stub below holds its text back until told otherwise, so the assertions
+   * here fail if the gateway waits for it.
+   */
+  const { openDatabase } = await import('../src/db.js');
+  const { saveAccount } = await import('../src/store.js');
+  const { generateKey } = await import('../src/keys.js');
+  const { createApp } = await import('../server.js');
+
+  const db = openDatabase(':memory:');
+  saveAccount(db, { apiKey: 'upstream', username: 'early-user', isPro: false });
+  const key = generateKey();
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'early-user')`).run(key.hash);
+
+  const realFetch = globalThis.fetch;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const app = createApp(db, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  let release = () => {};
+  const gate = new Promise((resolve) => { release = resolve; });
+  let spoken = false;
+
+  globalThis.fetch = async (url, init) => {
+    if (!String(url).includes('api.deepai.org')) return realFetch(url, init);
+    if (String(url).includes('deepai_code/models')) {
+      return new Response(JSON.stringify(CATALOG_PAYLOAD),
+        { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    const stream = new ReadableStream({
+      async start(controller) {
+        const encoder = new TextEncoder();
+        // The model thinks for as long as this test wants it to.
+        await gate;
+        spoken = true;
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+    return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+
+  try {
+    const pending = realFetch(`${base}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${key.plaintext}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'glm-5.3-flash', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    const response = await Promise.race([pending, sleep(2000).then(() => undefined)]);
+    assert.ok(response !== undefined,
+      'the caller must be able to read before the model speaks');
+    assert.equal(spoken, false, 'and it happened while the model was still silent');
+
+    // The one thing this gateway does before DeepAI is asked anything reports its cost.
+    assert.match(response.headers.get('server-timing') ?? '', /gwcatalog;dur=\d+/,
+      'the catalog read says how long it took');
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const first = decoder.decode((await reader.read()).value, { stream: true });
+    assert.match(first, /"delta":\{"role":"assistant"\}/,
+      'the stream opens with the role delta OpenAI sends first');
+
+    release();
+    let rest = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      rest += decoder.decode(value, { stream: true });
+    }
+    assert.match(rest, /"content":"hi"/, 'the answer follows on the same stream');
+    assert.match(rest, /\[DONE\]/, 'and the stream ends the way a client expects');
+  } finally {
+    release();
+    globalThis.fetch = realFetch;
+    server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
   }
 });

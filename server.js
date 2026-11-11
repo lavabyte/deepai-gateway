@@ -84,6 +84,9 @@ export function createApp(db, options = {}) {
   const runtime = {
     log: options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`)),
     trustProxy: options.trustProxy === true,
+    // Whether per-request lines are written. Shared with the v1 router, which reports where
+    // one completion's time went.
+    logRequests: options.logRequests !== false,
     // The key cap for this deployment, or `undefined` to fall back to the default.
     maxKeys: options.maxKeys,
   };
@@ -131,7 +134,7 @@ export function createApp(db, options = {}) {
   app.use(callback.router);
   app.post('/api/login/complete', callback.complete);
 
-  app.use('/v1', v1Router(db));
+  app.use('/v1', v1Router(db, runtime));
   app.use('/api', adminRouter(db, runtime));
 
   /**

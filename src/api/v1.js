@@ -44,11 +44,29 @@ import {
 const FALLBACK_MODEL = 'glm-5.3-flash';
 
 /**
+ * How long a stream may stay silent before a keep-alive comment is written.
+ *
+ * DeepAI can think for many seconds before its first delta. A proxy or a client that reads
+ * nothing for that long has no way to tell a slow model from a dead connection.
+ */
+const KEEP_ALIVE_MS = 5_000;
+
+/**
+ * How often that silence is checked.
+ *
+ * Separate from the interval above so the rule is "nothing for five seconds" and not "a
+ * multiple of five seconds since the last write": checking on the same grid skipped a whole
+ * period whenever the last write landed a moment before a tick.
+ */
+const KEEP_ALIVE_TICK_MS = 1_000;
+
+/**
  * Mount the OpenAI-compatible routes.
  * @param {import('node:sqlite').DatabaseSync} db
+ * @param {{log?: (message: string) => void, logRequests?: boolean}} [options]
  * @returns {import('express').Router}
  */
-export function v1Router(db) {
+export function v1Router(db, options = {}) {
   const router = express.Router();
 
   // Authenticated, and scoped to the key: a restricted key sees only the
@@ -103,14 +121,14 @@ export function v1Router(db) {
   });
 
   router.post('/chat/completions', authenticate(db), enforceModel(FALLBACK_MODEL), (req, res, next) => {
-    handleChatCompletion(db, req, res).catch(next);
+    handleChatCompletion(db, req, res, options).catch(next);
   });
 
   return router;
 }
 
 /** Validate the request body and run one completion. */
-async function handleChatCompletion(db, req, res) {
+async function handleChatCompletion(db, req, res, options = {}) {
   const body = req.body;
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     return apiError(res, 400, 'The request body must be a JSON object.', 'invalid_body');
@@ -147,11 +165,20 @@ async function handleChatCompletion(db, req, res) {
    * have would fail later, with a message that explains nothing.
    */
   let models;
+  const catalogStart = Date.now();
   try {
     models = await fetchCatalog(AbortSignal.timeout(10_000));
   } catch (error) {
     return apiError(res, 503, catalogMessage(error), 'catalog_unavailable', 'api_error');
   }
+  const catalogMs = Date.now() - catalogStart;
+  /*
+   * The catalog read is the one thing this request does before DeepAI is asked anything, so
+   * its cost is reported on the answer itself. It is the difference between a caller's
+   * "the gateway is slow" and "the catalog read is slow today", and it is invisible from
+   * outside otherwise.
+   */
+  res.setHeader('server-timing', `gwcatalog;dur=${catalogMs}`);
   const model = findModel(models, requestedModel);
   const upstreamModel = model?.id ?? requestedModel;
   const usesResponses = model?.api === 'openai-responses';
@@ -214,7 +241,9 @@ async function handleChatCompletion(db, req, res) {
   const calls = new Map();
   let usage;
   let finish = 'stop';
+  let firstEventMs;
   let firstTokenMs;
+  let roleSent = false;
   let status = 200;
   let errorCode;
   let failure;
@@ -234,6 +263,24 @@ async function handleChatCompletion(db, req, res) {
       ? streamResponsesCompletion(attemptParams)
       : streamChatCompletion(attemptParams);
     for await (const event of source) {
+      /*
+       * DeepAI has accepted the request. Its headers are here long before its first token,
+       * and opening the stream only on that token made a caller wait for the whole model
+       * before seeing a single byte - which is exactly the "the gateway is slow" it read as,
+       * when the wait was the model thinking upstream.
+       *
+       * So the stream is opened here, with the role delta OpenAI itself sends first, and the
+       * bytes of the answer follow as they arrive. The status is settled at this point too,
+       * so a refusal still reaches the caller as a refusal rather than as a 200.
+       */
+      if (event.type === 'open') {
+        if (firstEventMs === undefined) firstEventMs = Date.now() - startedAt;
+        if (write !== undefined && !roleSent) {
+          roleSent = true;
+          write({ role: 'assistant' });
+        }
+        continue;
+      }
       if (firstTokenMs === undefined) firstTokenMs = Date.now() - startedAt;
       if (event.type === 'text') {
         text.push(event.text);
@@ -333,6 +380,7 @@ async function handleChatCompletion(db, req, res) {
     calls.clear();
     usage = undefined;
     finish = 'stop';
+    firstEventMs = undefined;
     firstTokenMs = undefined;
     status = 200;
     errorCode = undefined;
@@ -405,6 +453,10 @@ async function handleChatCompletion(db, req, res) {
     res.write('data: [DONE]\n\n');
     res.end();
   } else if (status === 200) {
+    // Nothing has been written yet, so the whole split can still ride on the answer.
+    const timing = [`gwcatalog;dur=${catalogMs}`];
+    if (firstTokenMs !== undefined) timing.push(`gwmodel;dur=${firstTokenMs}`);
+    res.setHeader('server-timing', timing.join(', '));
     res.json(completion({
       id,
       model: upstreamModel,
@@ -455,6 +507,21 @@ async function handleChatCompletion(db, req, res) {
         'api_error',
       );
     }
+  }
+
+  /*
+   * Where the time went, on one line.
+   *
+   * The three numbers answer the only question a slow request raises: the catalog read
+   * (this gateway's own work), the wait for DeepAI to accept the call, and the wait for its
+   * first token (the model's work). Reading them together is what tells a gateway problem
+   * from a slow model instead of guessing at both.
+   */
+  if (options.logRequests !== false) {
+    const log = options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`));
+    log(`v1 chat/completions ${upstreamModel} stream=${streamed ? 'yes' : 'no'} status=${status} `
+      + `catalog=${catalogMs}ms first-event=${firstEventMs ?? '-'}ms first-token=${firstTokenMs ?? '-'}ms `
+      + `total=${Date.now() - startedAt}ms`);
   }
 
   record(db, {
@@ -528,12 +595,31 @@ function openEventStream(res, status) {
  */
 function makeWriter(res, id, model, created) {
   let opened = false;
+  let lastWrite = Date.now();
+
+  /*
+   * Bytes while the model is silent.
+   *
+   * A comment line is not data - every SSE reader discards it - so it cannot disturb a
+   * client, and it keeps a nearly idle connection visibly alive through whatever proxy sits
+   * between this gateway and the caller.
+   */
+  const pulse = setInterval(() => {
+    if (!opened || res.writableEnded || res.destroyed) return;
+    if (Date.now() - lastWrite < KEEP_ALIVE_MS) return;
+    res.write(': keep-alive\n\n');
+    lastWrite = Date.now();
+  }, KEEP_ALIVE_TICK_MS);
+  pulse.unref?.();
+  res.on('close', () => clearInterval(pulse));
+
   const envelope = `data: {"id":${JSON.stringify(id)},"object":"chat.completion.chunk","created":${created},"model":${JSON.stringify(model)},"choices":[{"index":0,"delta":`;
   return (delta, finishReason = null) => {
     if (!opened) {
       opened = true;
       openEventStream(res, 200);
     }
+    lastWrite = Date.now();
     res.write(`${envelope}${JSON.stringify(delta)},"finish_reason":${finishReason === null ? 'null' : JSON.stringify(finishReason)}}]}\n\n`);
   };
 }

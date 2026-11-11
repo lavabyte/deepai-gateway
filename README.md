@@ -651,8 +651,17 @@ cannot:
 
 The gateway has no turn to remember it in, so the refusal is remembered across requests.
 **The first request is retried without the images**, so a question that can be answered as
-text gets an answer instead of that error - you only pay one extra round trip, once per model
-per process. Every later request for that model is filtered before it is sent.
+text gets an answer instead of that error - you only pay one extra round trip. Requests for
+that model are filtered before they are sent for the next **15 minutes**; after that the
+image is tried again, because a refusal is one request's evidence and a long conversation
+produces the same bare `HTTP 400`.
+
+Nothing is deleted or stored. An image is never written anywhere by this gateway, and the
+filtered message list is a copy built for one call: the caller's own request and history are
+untouched, and the next request carries whatever the caller sends again. Changing a limit
+(key count, request limit, allowance) has no bearing on images at all - if an image stops
+reaching a model, the two things to look at are the catalog's `input` list and this 15-minute
+memory, and the memory is the only one that goes away by itself.
 
 Two refusals are recognised, because DeepAI has answered with both and neither names the
 image as its cause: the worker's `Received multimodal data but multimodal processing is not
@@ -664,10 +673,6 @@ text is answered by every model that was tried; an image produces that 400 with 
 different shapes of image part and four different models that advertise `image` in the
 catalog. So images do not work here, and the retry is what keeps that from being an error in
 the caller's face.
-
-A reply with no text, no reasoning and no tool call is reported as `502 empty_completion`
-whatever the model, because "completed, no content" is not an answer. `deepai-cyber` is
-exempt: it is a local model whose replies are not expected to carry text.
 
 A reply with no text, no reasoning and no tool call is reported as `502 empty_completion`
 whatever the model, because "completed, no content" is not an answer. `deepai-cyber` is
@@ -748,7 +753,57 @@ gateway adds roughly **0.6%** to the wall time of a long completion (measured
 interleaved against a direct DeepAI connection: 108 ms of overhead across
 ~18 s and ~5,000 characters). The remaining latency is DeepAI's own.
 
-Two details keep it that way:
+### Where the wait before the first byte goes
+
+Three things happen before a caller sees an answer, and only one of them
+belongs to this gateway:
+
+| Step | Cost | Whose |
+| --- | --- | --- |
+| caller to gateway | one network round trip | the path |
+| catalog read (`/deepai_code/models`) | ~0.1-0.2 s here | this gateway |
+| DeepAI accepts, then thinks | 0.9-1.9 s for a one-token reply, more for a reasoning turn | the model |
+
+Measured through the deployed gateway with a caller's own key: 1.3-2.4 s to the
+first byte of a one-token reply, of which about half a second is the two hops
+and the catalog read. A 67 kB prompt answered with two tokens took 2.4-3.7 s, so
+that time is prompt processing and thinking, not transport.
+
+The catalog is read on every request and never cached, which is deliberate; it
+is also the only round trip this gateway adds inside the request. What it costs
+is published on the answer as `server-timing: gwcatalog;dur=<ms>`, and every
+completion writes one line to the log when `LOG_REQUESTS` is on:
+
+```
+v1 chat/completions glm-5.3-flash stream=yes status=200 catalog=143ms first-event=612ms first-token=2486ms total=5300ms
+```
+
+`first-event` is DeepAI accepting the call, `first-token` its first delta. If
+`catalog` is large, this gateway is the problem; if it is small and
+`first-token` is large, the model is.
+
+### The stream opens before the model speaks
+
+The caller's stream is opened as soon as DeepAI accepts the request - its
+headers arrive well before its first token - and is opened with the role delta
+OpenAI itself sends first:
+
+```
+data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+```
+
+A client therefore has a message to show and a stream to read while the model
+thinks, instead of a silent connection that is indistinguishable from a hung
+one. While nothing is being sent, a `: keep-alive` comment is written every five
+seconds, which every SSE reader discards and which keeps the connection visibly
+alive through whatever proxy sits in front.
+
+Reasoning models send their thinking as `reasoning_content` deltas before the
+first `content` delta. A client that only renders `content` will look silent for
+as long as the model reasons, even though bytes are arriving - see
+[Reasoning levels](#reasoning-levels).
+
+Two details keep the relay cheap:
 
 - the SSE envelope is serialized once per request and reused for every delta,
   so only the delta object is stringified per chunk;

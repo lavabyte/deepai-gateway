@@ -8,8 +8,9 @@
  * - `streamResponsesCompletion` - `POST /deepai_code/responses`, used by models
  *   that declare `api: "openai-responses"`.
  *
- * Both yield `{type}` events: `text`, `reasoning`, `tool-start`,
- * `tool-arguments`, `usage`, `finish`.
+ * Both yield `{type}` events: `open`, `text`, `reasoning`, `tool-start`,
+ * `tool-arguments`, `usage`, `finish`. `open` means the upstream accepted the
+ * request - its headers are in, the model has not spoken yet.
  *
  * @module deepai-gateway/deepai/client
  */
@@ -123,6 +124,13 @@ export async function* streamChatCompletion(params) {
   }
 
   if (!response.ok) throw await errorFor(response, 'DeepAI Code');
+
+  /*
+   * The request is accepted: the upstream answered with its headers, which for a streamed
+   * completion is well before its first token. Reported so the caller can open its own
+   * stream now instead of on a token the model may take seconds to produce.
+   */
+  yield { type: 'open' };
 
   const calls = new Map();
   let reason = 'stop';
@@ -239,6 +247,9 @@ export async function* streamResponsesCompletion(params) {
   }
 
   if (!response.ok) throw await errorFor(response, 'DeepAI Code');
+
+  // Same as the completions transport: accepted means the stream may open now.
+  yield { type: 'open' };
 
   const calls = new Map();
   let usage;
