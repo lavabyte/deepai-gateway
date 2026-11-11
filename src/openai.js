@@ -103,17 +103,66 @@ export function stopSequences(stop) {
   return [];
 }
 
-/** Map a gateway reasoning effort onto the DeepAI wire value. */
+/**
+ * Pull the requested reasoning effort out of a request body, whichever way it is spelled.
+ *
+ * `reasoning_effort` is the OpenAI spelling and the one this gateway documents, but the
+ * clients in use do not agree on it: some send `thinking_level`, some nest it as
+ * `reasoning.effort`, and a gateway that reads one of them silently ignores the rest - which
+ * looks exactly like not supporting the feature at all.
+ *
+ * The first field present and readable wins, so a client that sends more than one gets the
+ * explicit OpenAI field.
+ *
+ * @param {object} body - the request body.
+ * @returns {string|undefined} the raw value, for {@link effortOf}.
+ */
+export function requestedEffort(body) {
+  if (body === null || typeof body !== 'object') return undefined;
+  const candidates = [
+    body.reasoning_effort,
+    body.thinking_level,
+    body.reasoning?.effort,
+    body.thinking?.effort,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim() !== '') return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * Map a gateway reasoning effort onto the DeepAI wire value.
+ *
+ * `reasoning_effort` is spelled in several ways by the clients that send it, and a value this
+ * function does not recognise is silently dropped - which is indistinguishable to the caller
+ * from the gateway ignoring the field. So the accepted set is the union of the spellings in
+ * use: OpenAI's own `minimal|low|medium|high`, the `xhigh`/`max` that reasoning models
+ * expose, and `off`/`none` for "do not think". Case and surrounding space are not part of the
+ * value, so they are not part of the test.
+ *
+ * DeepAI takes `none|low|medium|high`, so the four levels above `high` collapse onto `high`
+ * in the `gpt-oss` style, and `minimal` maps to `low` - the cheapest level the wire has.
+ * This is the same map the DeepAI Code app applies (`OPENAI_GPT_OSS_EFFORT`).
+ *
+ * @param {unknown} value - whatever the caller put in `reasoning_effort`.
+ * @returns {'none'|'low'|'medium'|'high'|undefined} undefined when the field was not given.
+ */
 export function effortOf(value) {
-  switch (value) {
+  if (typeof value !== 'string') return undefined;
+  switch (value.trim().toLowerCase()) {
     case 'none':
     case 'off':
       return 'none';
+    case 'minimal':
+      // The wire has no level below `low`.
+      return 'low';
     case 'low':
       return 'low';
     case 'medium':
       return 'medium';
     case 'high':
+    case 'xhigh':
     case 'max':
       return 'high';
     default:

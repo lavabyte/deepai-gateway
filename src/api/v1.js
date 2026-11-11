@@ -34,6 +34,7 @@ import {
   chunk,
   completion,
   effortOf,
+  requestedEffort,
   openAIFinish,
   openAIUsage,
   stopSequences,
@@ -188,7 +189,9 @@ async function handleChatCompletion(db, req, res) {
     temperature: numberOrUndefined(body.temperature),
     topP: numberOrUndefined(body.top_p),
     stop: usesResponses ? [] : stopSequences(body.stop),
-    reasoningEffort: effortOf(body.reasoning_effort),
+    // Whatever spelling the caller used: `reasoning_effort`, `thinking_level`, or a nested
+    // `reasoning.effort`. Reading only the first is why an effort could look unsent.
+    reasoningEffort: effortOf(requestedEffort(body)),
     sessionId,
     signal: undefined,
   };

@@ -3842,6 +3842,106 @@ await checkAsync('an image the backend refuses is retried as text, not reported 
   }
 });
 
+await checkAsync('the reasoning effort reaches DeepAI however the caller spells it', async () => {
+  /*
+   * Reported as "effort is not sent". Three separate reasons it could be, and all were real:
+   *
+   *  - `minimal` and `xhigh` were not in the map at all, so a client using either had its
+   *    field dropped without a word;
+   *  - the comparison was case- and whitespace-sensitive, so `HIGH` was dropped too;
+   *  - only `reasoning_effort` was read, while clients also send `thinking_level` and a
+   *    nested `reasoning.effort`.
+   *
+   * DeepAI accepts `none|low|medium|high`, so the levels above `high` collapse onto it, as in
+   * the app's own map.
+   */
+  const { effortOf, requestedEffort } = await import('../src/openai.js');
+
+  const expected = {
+    none: 'none', off: 'none',
+    minimal: 'low', low: 'low', medium: 'medium',
+    high: 'high', xhigh: 'high', max: 'high',
+  };
+  for (const [input, wire] of Object.entries(expected)) {
+    assert.equal(effortOf(input), wire, `${input} must become ${wire}`);
+    assert.equal(effortOf(input.toUpperCase()), wire, `${input.toUpperCase()} too`);
+    assert.equal(effortOf(`  ${input}  `), wire, `whitespace around ${input} must not matter`);
+  }
+  // A value that is not a level is not a level; and no field at all is not a value.
+  for (const junk of ['ludicrous', '', null, undefined, 42, {}]) {
+    assert.equal(effortOf(junk), undefined, `${String(junk)} must not become an effort`);
+  }
+
+  // Every spelling a client may use is read, and the OpenAI field wins when several are sent.
+  assert.equal(requestedEffort({ reasoning_effort: 'high' }), 'high');
+  assert.equal(requestedEffort({ thinking_level: 'medium' }), 'medium');
+  assert.equal(requestedEffort({ reasoning: { effort: 'low' } }), 'low');
+  assert.equal(requestedEffort({ thinking: { effort: 'max' } }), 'max');
+  assert.equal(requestedEffort({ reasoning_effort: 'high', thinking_level: 'low' }), 'high',
+    'the documented field wins over the alternatives');
+  assert.equal(requestedEffort({}), undefined);
+  assert.equal(requestedEffort(null), undefined);
+
+  /*
+   * And it is actually on the request that leaves the gateway - not merely accepted. This is
+   * the part that matters: a mapping that produces the right value into a field nobody sends
+   * would still look like "effort is not sent".
+   */
+  const { openDatabase } = await import('../src/db.js');
+  const { saveAccount } = await import('../src/store.js');
+  const { generateKey } = await import('../src/keys.js');
+  const { createApp } = await import('../server.js');
+
+  const db = openDatabase(':memory:');
+  saveAccount(db, { apiKey: 'upstream', username: 'effort-user', isPro: false });
+  const key = generateKey();
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'effort-user')`).run(key.hash);
+
+  const realFetch = globalThis.fetch;
+  let upstreamBody;
+  const catalog = () => new Response(JSON.stringify(CATALOG_PAYLOAD),
+    { status: 200, headers: { 'content-type': 'application/json' } });
+  const app = createApp(db, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const send = (extra) => realFetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key.plaintext}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'hi' }], ...extra }),
+  });
+
+  try {
+    globalThis.fetch = async (url, init) => {
+      if (!String(url).includes('api.deepai.org')) return realFetch(url, init);
+      if (String(url).includes('deepai_code/models')) return catalog();
+      upstreamBody = JSON.parse(init.body);
+      return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    };
+
+    for (const [field, wire] of [['reasoning_effort', 'high'], ['thinking_level', 'medium'],
+      ['xhigh', 'high'], ['minimal', 'low']]) {
+      const extra = field === 'xhigh' || field === 'minimal'
+        ? { reasoning_effort: field }
+        : { [field]: wire };
+      await send(extra);
+      const expectedWire = effortOf(requestedEffort(extra));
+      assert.equal(upstreamBody.reasoning_effort, expectedWire,
+        `${JSON.stringify(extra)} must reach DeepAI as ${expectedWire}`);
+    }
+
+    // No effort asked for is no field sent - not a default that changes what the model does.
+    await send({});
+    assert.equal(upstreamBody.reasoning_effort, undefined,
+      'an absent effort must not become a guess');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 await checkAsync('the account is polled only while the tab is on screen', async () => {
   /*
    * A dashboard left open in a background tab used to ask for the account every minute for as
