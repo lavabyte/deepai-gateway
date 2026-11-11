@@ -1,21 +1,22 @@
 /**
  * DeepAI Code model catalog.
  *
- * `GET /deepai_code/models` is readable without an account and is the single
- * source of truth for which models exist, what they cost and which upstream
- * API they use. The live answer is cached and an embedded snapshot keeps the
- * gateway usable when the network is down.
+ * `GET /deepai_code/models` is readable without an account and is **the** source of truth for
+ * which models exist, what they cost and which upstream API they use. This gateway keeps no
+ * copy of its own: no embedded list, no cache. A model exists because DeepAI says so on this
+ * request, which is the only way a catalog that changes under us stays correct - an embedded
+ * snapshot in a shipped build is wrong the moment DeepAI adds, renames or retires a model,
+ * and a cache makes it wrong for up to its lifetime for no benefit the network does not
+ * already give.
+ *
+ * The environment this runs in has a network; that is the premise. What it does *not* assume
+ * is that the network is always up at the moment of a call, so a failure is reported as a
+ * failure - never papered over with a stale or made-up model list. See `CatalogUnavailable`.
  *
  * @module deepai-gateway/deepai/catalog
  */
 
 import { API_ORIGIN, codeHeaders } from './wire.js';
-
-/** How long a successful catalog answer is reused. */
-const CACHE_TTL_MS = 10 * 60_000;
-
-/** Thinking levels DeepAI publishes rates for, cheapest-per-second last. */
-const LEVELS = ['none', 'low', 'medium', 'high'];
 
 /** Human labels for the thinking levels, in the order the API exposes them. */
 export const REASONING_LEVELS = Object.freeze([
@@ -25,41 +26,6 @@ export const REASONING_LEVELS = Object.freeze([
   { id: 'high', name: 'High', description: 'Deepest reasoning, slowest per token but cheapest per second.' },
 ]);
 
-/** Embedded snapshot (13 models) used before the first fetch and offline. */
-export const FALLBACK_MODELS = Object.freeze([
-  entry('glm-5.3-flash', 'GLM 5.3 Flash', { image: true, contextWindow: 1048576, maxTokens: 131072 }),
-  entry('deepseek-v4.1-flash', 'DeepSeek V4.1 Flash', { image: true, contextWindow: 1048576, maxTokens: 131072 }),
-  entry('mimo-2.6-flash', 'MiMo 2.6 Flash', { image: true, contextWindow: 1048576, maxTokens: 131072 }),
-  entry('solar-mini-4', 'Solar Mini 4', { contextWindow: 524288, maxTokens: 131072 }),
-  entry('gpt-6-luna', 'GPT-6 Luna', { image: true, contextWindow: 1048576, maxTokens: 128000 }),
-  entry('mimo-2.6-pro', 'MiMo 2.6 Pro', { image: true, contextWindow: 1048576, maxTokens: 131072 }),
-  entry('deepai-cyber', 'DeepAI Cyber', { contextWindow: 65536, maxTokens: 8192 }),
-  entry('gpt-6.1-sol', 'GPT-6.1 Sol', { image: true, premier: true, contextWindow: 1048576, maxTokens: 128000, rates: [0.05, 0.04, 0.025, 0.015] }),
-  entry('glm-5.3', 'GLM 5.3', { premier: true, contextWindow: 1048576, maxTokens: 131072, rates: [0.1, 0.06, 0.03, 0.02] }),
-  entry('kimi-k3', 'Kimi K3', { image: true, premier: true, contextWindow: 1048576, maxTokens: 131072, rates: [0.12, 0.1, 0.05, 0.03] }),
-  entry('claude-opus-5-5', 'Claude Opus 5.5', { image: true, premier: true, contextWindow: 1000000, maxTokens: 64000, rates: [0.15, 0.12, 0.08, 0.06] }),
-  entry('claude-fable-5-1', 'Claude Fable 5.1', { image: true, premier: true, contextWindow: 1000000, maxTokens: 64000, rates: [0.25, 0.2, 0.12, 0.1] }),
-  entry('gpt-6-astra', 'GPT-6 Astra', { image: true, premier: true, contextWindow: 1048576, maxTokens: 128000, api: 'openai-responses', rates: [0.3, 0.2, 0.12, 0.1] }),
-]);
-
-function entry(id, name, options = {}) {
-  const rates = {};
-  for (const [index, level] of LEVELS.entries()) {
-    rates[level] = String(options.rates?.[index] ?? 0);
-  }
-  return Object.freeze({
-    id,
-    name,
-    reasoning: true,
-    input: Object.freeze(options.image === true ? ['text', 'image'] : ['text']),
-    contextWindow: options.contextWindow ?? 131072,
-    maxTokens: options.maxTokens ?? 32768,
-    premier: options.premier === true,
-    api: options.api ?? 'openai-completions',
-    creditsPerSecond: Object.freeze(rates),
-  });
-}
-
 /**
  * Label shown wherever a model is named. Models the free tier can use are
  * marked so the tier is visible without opening the description.
@@ -68,41 +34,74 @@ export function displayName(model) {
   return model.premier === false ? `${model.name} Free` : model.name;
 }
 
-/** Credits per minute at one thinking level, or `Unmetered` when free. */
-export function rateLabel(model, level = 'none') {
-  const raw = model.creditsPerSecond?.[level] ?? model.creditsPerSecond?.none;
-  const value = Number(raw);
+/**
+ * What one request costs, or `Unmetered` when it is free.
+ *
+ * DeepAI bills a Premier model per request (`theosPerRequest`), a flat number of Credits
+ * for one completion. The per-second rates this used to read were replaced by the provider
+ * and the field no longer exists, so the label follows the price that is actually charged.
+ *
+ * The `level` argument is kept for the call sites that name a thinking level: the price is
+ * the same at every level now, and a caller passing one still gets the right answer.
+ *
+ * @param {{theosPerRequest?: string}} model
+ * @param {string} [level] - ignored; DeepAI no longer prices by level.
+ * @returns {string}
+ */
+export function rateLabel(model, level) {
+  void level;
+  const value = Number(model?.theosPerRequest);
   if (!Number.isFinite(value)) return 'Unknown';
   if (value === 0) return 'Unmetered';
-  return `${Math.round(value * 600) / 10} Credits/min`;
+  return `${value} Credits/request`;
 }
 
-/** Last successfully loaded catalog, if any. */
-let cached;
-let cachedAt = 0;
-let pending;
-
-/** The catalog we can serve right now. */
-export function catalogSnapshot() {
-  return cached ?? FALLBACK_MODELS;
+/**
+ * The catalog could not be read from DeepAI.
+ *
+ * Distinct from a bug: it means the network failed, DeepAI refused, or DeepAI answered with
+ * something that is not a catalog. Callers turn it into an upstream failure rather than a
+ * 500, because that is what it is - and never into an empty or invented model list, which
+ * would let a caller ask for a model that does not exist and get a confusing answer much
+ * further downstream.
+ */
+export class CatalogUnavailable extends Error {
+  /**
+   * @param {string} message - what happened, for the log and the caller.
+   * @param {{cause?: unknown}} [options]
+   */
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = 'CatalogUnavailable';
+    this.code = 'CATALOG_UNAVAILABLE';
+  }
 }
 
-/** Look one model up in the catalog we can serve right now. */
-export function findModel(id) {
-  return catalogSnapshot().find((model) => model.id === id);
+/** Look one model up in a catalog that was just fetched. */
+export function findModel(models, id) {
+  if (!Array.isArray(models)) return undefined;
+  return models.find((model) => model.id === id);
 }
 
-/** Shape one provider payload entry into a catalog record. */
-function normalize(raw, fallback) {
+/**
+ * Shape one provider payload entry into a catalog record.
+ *
+ * Every field comes from the payload. Nothing is filled in from a local table, so a field
+ * DeepAI stops sending reads as unknown rather than as a number this gateway made up.
+ *
+ * @param {unknown} raw
+ * @returns {object|undefined} undefined when the entry cannot be a model.
+ */
+function normalize(raw) {
   if (raw === null || typeof raw !== 'object' || typeof raw.id !== 'string' || raw.id === '') return undefined;
   const input = Array.isArray(raw.input)
     ? raw.input.filter((item) => item === 'text' || item === 'image')
     : [];
-  const rates = {};
-  for (const level of LEVELS) {
-    const value = raw.creditsPerSecond?.[level];
-    rates[level] = typeof value === 'string' ? value : (fallback?.creditsPerSecond?.[level] ?? '0');
-  }
+  // DeepAI bills a Premier model per request. A missing or unreadable price stays unknown
+  // rather than becoming zero, which would advertise a paid model as free.
+  const perRequest = typeof raw.theosPerRequest === 'string' || typeof raw.theosPerRequest === 'number'
+    ? String(raw.theosPerRequest)
+    : undefined;
   return {
     id: raw.id,
     name: typeof raw.name === 'string' && raw.name !== '' ? raw.name : raw.id,
@@ -110,64 +109,71 @@ function normalize(raw, fallback) {
     input: input.length > 0 ? input : ['text'],
     contextWindow: Number.isSafeInteger(raw.contextWindow) && raw.contextWindow > 0
       ? raw.contextWindow
-      : (fallback?.contextWindow ?? 131072),
-    maxTokens: Number.isSafeInteger(raw.maxTokens) && raw.maxTokens > 0
-      ? raw.maxTokens
-      : (fallback?.maxTokens ?? 32768),
+      : undefined,
+    maxTokens: Number.isSafeInteger(raw.maxTokens) && raw.maxTokens > 0 ? raw.maxTokens : undefined,
     premier: raw.premier === true,
     api: typeof raw.api === 'string' && raw.api !== '' ? raw.api : 'openai-completions',
-    creditsPerSecond: rates,
+    theosPerRequest: perRequest,
   };
 }
 
-/** Fetch the live catalog; rejects on any transport or shape problem. */
+/**
+ * Read the catalog from DeepAI. No cache: every call is a real read.
+ *
+ * A failure is a `CatalogUnavailable`, with the reason kept in the message so the caller can
+ * say what went wrong instead of "something failed".
+ *
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<Array<object>>}
+ */
 export async function fetchCatalog(signal) {
-  const response = await fetch(`${API_ORIGIN}/deepai_code/models`, {
-    headers: codeHeaders({ accept: 'application/json' }),
-    signal,
-  });
-  if (!response.ok) throw new Error(`DeepAI model catalog: HTTP ${response.status}`);
-  const data = await response.json();
+  let response;
+  try {
+    response = await fetch(`${API_ORIGIN}/deepai_code/models`, {
+      headers: codeHeaders({ accept: 'application/json' }),
+      signal: signal ?? AbortSignal.timeout(10_000),
+    });
+  } catch (error) {
+    // No network, DNS failure, a timeout: the environment assumes a network, and this is the
+    // case where it is not there. Reported as what it is rather than as an empty catalog.
+    if (signal?.aborted) throw new CatalogUnavailable('DeepAI model catalog: request aborted');
+    throw new CatalogUnavailable(`DeepAI model catalog: unreachable (${error?.message ?? error})`);
+  }
+  if (!response.ok) {
+    throw new CatalogUnavailable(`DeepAI model catalog: HTTP ${response.status}`);
+  }
+  const data = await response.json().catch(() => undefined);
   const list = Array.isArray(data?.models) ? data.models : [];
   const models = [];
   const seen = new Set();
   for (const raw of list) {
-    const model = normalize(raw, findModel(raw?.id));
+    const model = normalize(raw);
     if (model === undefined || seen.has(model.id)) continue;
     seen.add(model.id);
     models.push(model);
   }
-  if (models.length === 0) throw new Error('DeepAI model catalog: empty answer');
+  if (models.length === 0) throw new CatalogUnavailable('DeepAI model catalog: empty answer');
   return models;
 }
 
-/** The catalog to advertise; a failed fetch falls back to the snapshot. */
-export async function loadCatalog(signal) {
-  if (cached !== undefined && Date.now() - cachedAt < CACHE_TTL_MS) return cached;
-  if (pending !== undefined) return pending;
-  pending = (async () => {
-    try {
-      const models = await fetchCatalog(signal ?? AbortSignal.timeout(10_000));
-      cached = models;
-      cachedAt = Date.now();
-      return models;
-    } catch {
-      return catalogSnapshot();
-    } finally {
-      pending = undefined;
-    }
-  })();
-  return pending;
-}
-
-/** Warm the cache without waiting for it. */
-export function prefetchCatalog() {
-  void loadCatalog().catch(() => {});
-}
-
-/** Shape one model for the JSON API. */
+/**
+ * Shape one model for the JSON API.
+ *
+ * The price is `theosPerRequest`, because that is what DeepAI charges. The thinking levels
+ * are still listed - a model that reasons exposes them - but they no longer change the price,
+ * and claiming otherwise would put a number on a page that DeepAI never asked for.
+ *
+ * @param {object} model
+ * @returns {object}
+ */
 export function publicModel(model) {
-  const rates = { ...model.creditsPerSecond };
+  const price = rateLabel(model);
+  const context = Number.isFinite(model.contextWindow)
+    ? `${model.contextWindow.toLocaleString('en-US')}-token context`
+    : null;
+  const output = Number.isFinite(model.maxTokens)
+    ? `up to ${model.maxTokens.toLocaleString('en-US')} output tokens`
+    : null;
   return {
     id: model.id,
     name: model.name,
@@ -182,17 +188,13 @@ export function publicModel(model) {
     contextWindow: model.contextWindow,
     maxTokens: model.maxTokens,
     api: model.api,
-    // Thinking levels, with the per-level rate so a client can price a call.
-    reasoningLevels: model.reasoning
-      ? REASONING_LEVELS.map((level) => ({
-          ...level,
-          creditsPerSecond: rates[level.id] ?? '0',
-          rateLabel: rateLabel(model, level.id),
-        }))
-      : [],
-    creditsPerSecond: rates,
-    rateLabel: rateLabel(model, 'none'),
-    // A ready-made one-liner for pickers and listings.
-    description: `${model.premier ? 'Premier' : 'Free'} tier - ${model.contextWindow.toLocaleString('en-US')}-token context - up to ${model.maxTokens.toLocaleString('en-US')} output tokens`,
+    reasoningLevels: model.reasoning ? REASONING_LEVELS.map((level) => ({ ...level })) : [],
+    // What one request costs, in Credits. `null` when DeepAI sent no price.
+    theosPerRequest: model.theosPerRequest ?? null,
+    rateLabel: price,
+    // A ready-made one-liner for pickers and listings, made only of what DeepAI sent.
+    description: [`${model.premier ? 'Premier' : 'Free'} tier`, context, output, price]
+      .filter((part) => part !== null && part !== undefined)
+      .join(' - '),
   };
 }

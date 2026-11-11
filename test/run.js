@@ -41,7 +41,7 @@ import {
   stopSequences,
 } from '../src/openai.js';
 import { completionsUsage, responsesUsage } from '../src/deepai/wire.js';
-import { FALLBACK_MODELS, REASONING_LEVELS, displayName, findModel, publicModel, rateLabel } from '../src/deepai/catalog.js';
+import { CatalogUnavailable, REASONING_LEVELS, displayName, fetchCatalog, findModel, publicModel, rateLabel } from '../src/deepai/catalog.js';
 import { findEventEnd } from '../src/deepai/wire.js';
 import {
   FALLBACK_PRICES,
@@ -585,21 +585,92 @@ check('responses usage subtracts cached input', () => {
 
 /* ----------------------------------------------------------------- catalog */
 
-check('fallback catalog is complete and well formed', () => {
-  assert.ok(FALLBACK_MODELS.length >= 13);
-  const ids = FALLBACK_MODELS.map((model) => model.id);
-  assert.equal(new Set(ids).size, ids.length);
-  for (const model of FALLBACK_MODELS) {
+/*
+ * The catalog is read from DeepAI, so these use a provider payload rather than a list in the
+ * source - which is the point: there is no list in the source any more.
+ */
+const CATALOG_PAYLOAD = {
+  models: [
+    { id: 'glm-5.3-flash', name: 'GLM 5.3 Flash', reasoning: true, input: ['text', 'image'],
+      contextWindow: 1048576, maxTokens: 131072, premier: false, theosPerRequest: '0' },
+    // Declares images and the backend refuses them anyway - the case the retry exists for.
+    { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', reasoning: true, input: ['text', 'image'],
+      contextWindow: 1048576, maxTokens: 131072, premier: false, theosPerRequest: '0' },
+    { id: 'glm-5.3', name: 'GLM 5.3', reasoning: true, input: ['text'],
+      contextWindow: 1048576, maxTokens: 131072, premier: true,
+      theosPerRequest: '3' },
+    { id: 'gpt-6-astra', name: 'GPT-6 Astra', reasoning: true, input: ['text', 'image'],
+      contextWindow: 1048576, maxTokens: 128000, premier: true, api: 'openai-responses',
+      theosPerRequest: '10' },
+  ],
+};
+
+/** Read a catalog from a stubbed provider answer. */
+async function catalogFrom(payload) {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => (String(url).includes('deepai_code/models')
+    ? new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })
+    : realFetch(url, init));
+  try {
+    return await fetchCatalog(AbortSignal.timeout(5_000));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+await checkAsync('the catalog is whatever DeepAI answers, and is never a copy in the source', async () => {
+  const models = await catalogFrom(CATALOG_PAYLOAD);
+  assert.equal(models.length, CATALOG_PAYLOAD.models.length,
+    'every model the provider sends is kept');
+  const ids = models.map((model) => model.id);
+  assert.equal(new Set(ids).size, ids.length, 'and no id appears twice');
+  for (const model of models) {
     assert.ok(model.contextWindow > 0);
     assert.ok(model.maxTokens > 0);
-    for (const level of ['none', 'low', 'medium', 'high']) {
-      assert.equal(typeof model.creditsPerSecond[level], 'string');
+    // The price is per request, which is the only pricing DeepAI sends.
+    assert.equal(typeof model.theosPerRequest, 'string');
+  }
+  // A model the provider adds later is served without a code change, which is the whole point.
+  const added = await catalogFrom({
+    models: [...CATALOG_PAYLOAD.models, { id: 'brand-new-1', name: 'Brand New', reasoning: true,
+      input: ['text'], contextWindow: 8000, maxTokens: 1000, premier: false, theosPerRequest: '0' }],
+  });
+  assert.ok(added.some((model) => model.id === 'brand-new-1'), 'a new model needs no code change');
+
+  // Malformed entries are dropped, not turned into half a model.
+  const cleaned = await catalogFrom({
+    models: [...CATALOG_PAYLOAD.models, { name: 'no id' }, null, { id: '' }],
+  });
+  assert.equal(cleaned.length, CATALOG_PAYLOAD.models.length, 'entries without a usable id are dropped');
+});
+
+await checkAsync('an unreachable catalog is an error, not an empty list', async () => {
+  /*
+   * The environment has a network, and this is the case where it is missing at the moment of
+   * a call. It must be reported, never replaced with an empty catalog or an invented one:
+   * a caller that asked for a model would be told it does not exist.
+   */
+  const realFetch = globalThis.fetch;
+  const cases = [
+    ['a transport failure', async () => { throw new Error('getaddrinfo ENOTFOUND api.deepai.org'); }],
+    ['a refused request', async () => new Response('no', { status: 503 })],
+    ['an answer that is not a catalog', async () => new Response('{"nope":true}', { status: 200, headers: { 'content-type': 'application/json' } })],
+    ['an empty catalog', async () => new Response('{"models":[]}', { status: 200, headers: { 'content-type': 'application/json' } })],
+  ];
+  try {
+    for (const [label, handler] of cases) {
+      globalThis.fetch = handler;
+      await assert.rejects(fetchCatalog(AbortSignal.timeout(5_000)),
+        (error) => error instanceof CatalogUnavailable,
+        `${label} must be a CatalogUnavailable`);
     }
+  } finally {
+    globalThis.fetch = realFetch;
   }
 });
 
-check('free models are labelled and Premier are not', () => {
-  for (const model of FALLBACK_MODELS) {
+await checkAsync('free models are labelled and Premier are not', async () => {
+  for (const model of await catalogFrom(CATALOG_PAYLOAD)) {
     if (model.premier) {
       assert.equal(displayName(model), model.name);
     } else {
@@ -608,10 +679,14 @@ check('free models are labelled and Premier are not', () => {
   }
 });
 
-check('rate labels distinguish unmetered from billed', () => {
-  assert.equal(rateLabel(findModel('glm-5.3-flash')), 'Unmetered');
-  assert.equal(rateLabel(findModel('glm-5.3'), 'high'), '1.2 Credits/min');
-  assert.equal(rateLabel(findModel('gpt-6-astra'), 'none'), '18 Credits/min');
+await checkAsync('rate labels price a request, which is how DeepAI bills', async () => {
+  const models = await catalogFrom(CATALOG_PAYLOAD);
+  assert.equal(rateLabel(findModel(models, 'glm-5.3-flash')), 'Unmetered');
+  assert.equal(rateLabel(findModel(models, 'glm-5.3')), '3 Credits/request');
+  assert.equal(rateLabel(findModel(models, 'gpt-6-astra')), '10 Credits/request');
+  assert.equal(findModel(models, 'does-not-exist'), undefined, 'and an unknown id is nothing');
+  // A price DeepAI did not send is unknown, never zero - a paid model must not read as free.
+  assert.equal(rateLabel({ id: 'x', theosPerRequest: undefined }), 'Unknown');
 });
 
 /* ------------------------------------------------------------------- server */
@@ -974,10 +1049,18 @@ await checkAsync('/v1/models carries modalities, reasoning levels and names', as
   fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models)
                  VALUES ('kv', 'v', ?, ?, ?, 'unlimited', '[]')`).run(key.prefix, key.hash, Date.now());
 
+  // The route reads the catalog from DeepAI, so the provider answer is what it gets.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => (String(url).includes('deepai_code/models')
+    ? new Response(JSON.stringify(CATALOG_PAYLOAD), { status: 200, headers: { 'content-type': 'application/json' } })
+    : realFetch(url, init));
   try {
-    const payload = await fetch(`http://127.0.0.1:${port}/v1/models`, {
+    const response = await realFetch(`http://127.0.0.1:${port}/v1/models`, {
       headers: { authorization: `Bearer ${key.plaintext}` },
-    }).then((res) => res.json());
+    });
+    const rawBody = await response.text();
+    assert.equal(response.status, 200, `the route answered: ${rawBody.slice(0, 200)}`);
+    const payload = JSON.parse(rawBody);
 
     const free = payload.data.find((model) => model.id === 'glm-5.3-flash');
     assert.equal(free.display_name, 'GLM 5.3 Flash Free');
@@ -989,28 +1072,44 @@ await checkAsync('/v1/models carries modalities, reasoning levels and names', as
     assert.deepEqual(free.reasoning_levels, ['none', 'low', 'medium', 'high']);
     assert.ok(free.context_window > 0);
     assert.ok(free.max_output_tokens > 0);
-    assert.equal(typeof free.credits_per_second.high, 'string');
+    assert.equal(free.theos_per_request, '0');
     assert.equal(free.rate_label, 'Unmetered');
     assert.ok(free.description.includes('Free tier'));
 
-    const textOnly = payload.data.find((model) => model.id === 'solar-mini-4');
+    /*
+     * A text-only model is the one the payload declares as such. The old test named
+     * `solar-mini-4`, which only existed because the gateway carried its own model list -
+     * that list is gone, so the assertion has to name a model DeepAI actually sent.
+     */
+    const textOnly = payload.data.find((model) => model.id === 'glm-5.3');
     assert.deepEqual(textOnly.input_modalities, ['text']);
 
     const premier = payload.data.find((model) => model.id === 'glm-5.3');
     assert.equal(premier.tier, 'premier');
-    assert.equal(premier.rate_label, '6 Credits/min');
+    assert.equal(premier.rate_label, '3 Credits/request');
   } finally {
+    globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));
   }
 });
 
-check('publicModel exposes per-level reasoning rates', () => {
-  const model = publicModel(findModel('glm-5.3'));
+await checkAsync('publicModel reports the price DeepAI charges, and the levels it exposes', async () => {
+  /*
+   * DeepAI bills per request now. The thinking levels are still listed - a model that
+   * reasons exposes them - but they no longer carry a rate of their own, and inventing one
+   * would put a number on the page that DeepAI never sent.
+   */
+  const models = await catalogFrom(CATALOG_PAYLOAD);
+  const model = publicModel(findModel(models, 'glm-5.3'));
   assert.equal(model.reasoningLevels.length, REASONING_LEVELS.length);
-  const high = model.reasoningLevels.find((level) => level.id === 'high');
-  assert.equal(high.rateLabel, '1.2 Credits/min');
-  assert.equal(high.name, 'High');
-  assert.deepEqual(publicModel(findModel('solar-mini-4')).reasoningLevels.length > 0, true);
+  assert.equal(model.reasoningLevels.find((level) => level.id === 'high').name, 'High');
+  assert.ok(!('creditsPerSecond' in model), 'no per-second rate is invented');
+  assert.equal(model.theosPerRequest, '3');
+  assert.equal(model.rateLabel, '3 Credits/request');
+
+  const free = publicModel(findModel(models, 'glm-5.3-flash'));
+  assert.equal(free.rateLabel, 'Unmetered');
+  assert.match(free.description, /Free tier/, 'the description is built from what DeepAI sent');
 });
 
 /* ------------------------------------------------------------- hour window */
@@ -1066,14 +1165,24 @@ check('findEventEnd handles LF, CRLF and partial buffers', () => {
 
 /* ------------------------------------------------------------------ pricing */
 
-check('every catalog model has a pricing decision', () => {
-  for (const model of FALLBACK_MODELS) {
-    // Either a mapping or an explicit null, never a silent gap.
-    assert.ok(model.id in MODEL_SOURCES, `no pricing decision for ${model.id}`);
+check('every priced model has a source, and no source is silently missing', () => {
+  /*
+   * `MODEL_SOURCES` maps a DeepAI id to the OpenRouter id whose price stands in for it, and
+   * this test used to compare it against the gateway's own model list. That list is gone -
+   * models come from DeepAI on every call - so the invariant is now about the map itself:
+   * every entry is either a source id or an explicit `null` meaning "no public equivalent",
+   * never a silent gap, and the public view has one row per entry.
+   */
+  const ids = Object.keys(MODEL_SOURCES);
+  assert.ok(ids.length > 0, 'the map must not be empty');
+  for (const id of ids) {
+    const source = MODEL_SOURCES[id];
+    assert.ok(source === null || (typeof source === 'string' && source.includes('/')),
+      `${id} must map to an OpenRouter id or null, saw ${JSON.stringify(source)}`);
   }
   assert.equal(MODEL_SOURCES['deepai-cyber'], null);
   assert.equal(isPriced('deepai-cyber'), false);
-  assert.equal(publicPrices().length, FALLBACK_MODELS.length);
+  assert.equal(publicPrices().length, ids.length, 'one public row per mapping');
 });
 
 check('parsePrice converts per-token USD to per-million without float noise', () => {
@@ -1262,7 +1371,8 @@ await checkAsync('the summary endpoint reports savings and pricing status', asyn
     assert.equal(typeof payload.savings.pricing.source, 'string');
 
     const pricing = (await call('/api/pricing')).body;
-    assert.equal(pricing.prices.length, FALLBACK_MODELS.length);
+    // One row per mapping: the price table is the map, not the catalog.
+    assert.equal(pricing.prices.length, Object.keys(MODEL_SOURCES).length);
     assert.equal(typeof pricing.status.capturedAt, 'string');
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -1764,11 +1874,23 @@ await checkAsync('a cache hit reaches the client in both streaming and not', asy
      * what makes DeepAI report usage at all - so both cases below stub an SSE stream. The
      * difference under test is only what the *caller* asked for.
      */
-    globalThis.fetch = async () => sse([
+    /*
+     * The handler reads the catalog before it resolves a model, so the stub answers that
+     * request with a catalog and everything else with the stream.
+     */
+    /*
+     * A `Response` body can be read once, so the catalog is built fresh for every call -
+     * a shared one works for the first request and silently yields nothing for the next.
+     */
+    const catalog = () => new Response(JSON.stringify(CATALOG_PAYLOAD),
+      { status: 200, headers: { 'content-type': 'application/json' } });
+    globalThis.fetch = async (url) => (String(url).includes('deepai_code/models')
+      ? catalog()
+      : sse([
       { choices: [{ index: 0, delta: { content: 'ok' } }] },
       { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
       { choices: [], usage: upstreamUsage },
-    ]);
+    ]));
 
     const plain = await (await call(false)).json();
     assert.equal(plain.usage.prompt_tokens_details.cached_tokens, 900,
@@ -1778,11 +1900,13 @@ await checkAsync('a cache hit reaches the client in both streaming and not', asy
     assert.equal(plain.usage.completion_tokens, 20);
 
     // --- Streaming: the only place usage can appear is the final chunk.
-    globalThis.fetch = async () => sse([
+    globalThis.fetch = async (url) => (String(url).includes('deepai_code/models')
+      ? catalog()
+      : sse([
       { choices: [{ index: 0, delta: { content: 'ok' } }] },
       { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
       { choices: [], usage: upstreamUsage },
-    ]);
+    ]));
 
     const body = await (await call(true)).text();
     const chunks = body.split('\n\n')
@@ -1797,23 +1921,27 @@ await checkAsync('a cache hit reaches the client in both streaming and not', asy
     assert.ok(body.includes('"content":"ok"'), 'the text still streams');
 
     // --- A prompt with no cache hit must not invent the field.
-    globalThis.fetch = async () => sse([
+    globalThis.fetch = async (url) => (String(url).includes('deepai_code/models')
+      ? catalog()
+      : sse([
       { choices: [{ index: 0, delta: { content: 'ok' } }] },
       { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
       { choices: [], usage: { prompt_tokens: 100, completion_tokens: 5 } },
-    ]);
+    ]));
     const miss = await (await call(false)).json();
     assert.equal(miss.usage.prompt_tokens_details, undefined,
       'no cache hit means no cached_tokens field, not a zero that looks like one');
 
     // --- The Responses transport reports it under input_tokens_details.
-    globalThis.fetch = async () => sse([
+    globalThis.fetch = async (url) => (String(url).includes('deepai_code/models')
+      ? catalog()
+      : sse([
       { type: 'response.output_text.delta', delta: 'ok' },
       { type: 'response.completed', response: {
         status: 'completed',
         usage: { input_tokens: 1000, output_tokens: 20, input_tokens_details: { cached_tokens: 900 } },
       } },
-    ]);
+    ]));
     const responsesBody = await (await http(`${base}/v1/chat/completions`, {
       method: 'POST',
       headers: { authorization: `Bearer ${plaintext}`, 'content-type': 'application/json' },
@@ -3564,6 +3692,11 @@ await checkAsync('an image is not sent to a model that cannot take one', async (
   try {
     globalThis.fetch = async (url, init) => {
       if (!String(url).includes('api.deepai.org')) return realFetch(url, init);
+      // The catalog is read first; text-only `glm-5.3` is what this test needs from it.
+      if (String(url).includes('deepai_code/models')) {
+        return new Response(JSON.stringify(CATALOG_PAYLOAD),
+          { status: 200, headers: { 'content-type': 'application/json' } });
+      }
       if (init?.body) upstreamBody = JSON.parse(init.body);
       // A model without vision: a completed answer with nothing in it.
       return new Response('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
@@ -3572,15 +3705,15 @@ await checkAsync('an image is not sent to a model that cannot take one', async (
     const response = await realFetch(`http://127.0.0.1:${server.address().port}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${key.plaintext}` },
-      // `solar-mini-4` is in the catalog and does not declare image input.
-      body: JSON.stringify({ model: 'solar-mini-4', messages: withImage() }),
+      // `glm-5.3` is text-only in the payload, so the image must not be sent to it.
+      body: JSON.stringify({ model: 'glm-5.3', messages: withImage() }),
     });
     const payload = await response.json();
     assert.equal(response.status, 502, 'an empty completion is a failure, not a 200');
     assert.equal(payload.error.code, 'image_not_supported');
     assert.match(payload.error.message, /does not accept images/,
       'and says which of the two causes it was');
-    assert.match(payload.error.message, /solar-mini-4/, 'naming the model');
+    assert.match(payload.error.message, /glm-5\.3/, 'naming the model');
     assert.ok(upstreamBody !== undefined, 'the request was still attempted');
     const parts = upstreamBody.messages[0].content;
     assert.ok(!parts.some((part) => part.type === 'image_url'),
@@ -3609,6 +3742,11 @@ await checkAsync('an image the backend refuses is retried as text, not reported 
    * answer instead of an error about somebody else's server flag.
    */
   const multimodal = await import('../src/deepai/multimodal.js');
+  /*
+   * The memory is per process, and an earlier test in this file records a refusal for the
+   * same model - so it is cleared first, or this test starts from a state no fresh gateway
+   * would have.
+   */
   multimodal.forgetRejections();
 
   assert.equal(multimodal.isMultimodalRejection(
@@ -3635,6 +3773,9 @@ await checkAsync('an image the backend refuses is retried as text, not reported 
   db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
     VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'mm-user')`).run(key.hash);
 
+  // Cleared again: the unit assertions above recorded and forgot entries of their own.
+  multimodal.forgetRejections();
+
   const realFetch = globalThis.fetch;
   /** What each upstream call carried: 'image' or 'text'. */
   const sent = [];
@@ -3660,6 +3801,11 @@ await checkAsync('an image the backend refuses is retried as text, not reported 
   try {
     globalThis.fetch = async (url, init) => {
       if (!String(url).includes('api.deepai.org')) return realFetch(url, init);
+      // The handler reads the catalog first; without this answer there is no model to look up.
+      if (String(url).includes('deepai_code/models')) {
+        return new Response(JSON.stringify(CATALOG_PAYLOAD),
+          { status: 200, headers: { 'content-type': 'application/json' } });
+      }
       const body = JSON.parse(init.body);
       const hasImage = body.messages.some((message) => Array.isArray(message.content)
         && message.content.some((part) => part.type === 'image_url'));

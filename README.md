@@ -202,6 +202,19 @@ Report a security problem by opening an issue, or privately if the repository of
 
 ### Models
 
+**The model list is read from DeepAI on every request, and the gateway keeps no copy of it.**
+There is no embedded table and no cache: `GET /v1/models`, `/v1/models/details` and every
+completion ask DeepAI what exists right now, so a model added, renamed, re-priced or retired
+upstream is correct here immediately. The price shown is `theosPerRequest`, which is what
+DeepAI charges per call.
+
+The environment has a network; that is the premise. It is not assumed to be up at the moment
+of a particular call, though, so a failure to read the catalog is answered plainly - `502` for
+the model routes, `503` for a completion, both `catalog_unavailable` with the reason - rather
+than by serving an empty or stale list. An empty list would let a caller ask for a model that
+does exist and be told it does not.
+
+
 Every catalog model with tier, context window, max output, reasoning levels,
 input modalities, Credits rate and this month's usage. Free models are marked
 `... Free`; **Premium** models draw on the Credits balance. (The provider calls

@@ -13,7 +13,15 @@
 
 import { randomUUID } from 'node:crypto';
 import express from 'express';
-import { REASONING_LEVELS, displayName, findModel, loadCatalog, publicModel, rateLabel } from '../deepai/catalog.js';
+import {
+  CatalogUnavailable,
+  REASONING_LEVELS,
+  displayName,
+  fetchCatalog,
+  findModel,
+  publicModel,
+  rateLabel,
+} from '../deepai/catalog.js';
 import { streamChatCompletion, streamResponsesCompletion } from '../deepai/client.js';
 import { UpstreamError } from '../deepai/wire.js';
 import { acceptsImages, countImages, withoutImages } from '../deepai/images.js';
@@ -46,7 +54,9 @@ export function v1Router(db) {
   // models it is allowed to call.
   router.get('/models', authenticate(db), async (req, res) => {
     try {
-      const models = await loadCatalog(AbortSignal.timeout(10_000));
+      // Read on every call: there is no cache and no embedded list, so a model exists
+      // because DeepAI says so now.
+      const models = await fetchCatalog(AbortSignal.timeout(10_000));
       const visible = models.filter((model) => allowsModel(req.gatewayKey, model.id));
       res.json({
         object: 'list',
@@ -70,24 +80,24 @@ export function v1Router(db) {
           context_window: model.contextWindow,
           max_output_tokens: model.maxTokens,
           api: model.api,
-          // Pricing, per thinking level
-          credits_per_second: { ...model.creditsPerSecond },
-          rate_label: rateLabel(model, 'none'),
+          // What one request costs, which is how DeepAI bills.
+          theos_per_request: model.theosPerRequest ?? null,
+          rate_label: rateLabel(model),
         })),
       });
     } catch (error) {
-      apiError(res, 502, String(error?.message ?? error), 'catalog_unavailable', 'api_error');
+      apiError(res, 502, catalogMessage(error), 'catalog_unavailable', 'api_error');
     }
   });
 
   // A richer view used by the dashboard's Models tab. Same scoping rules.
   router.get('/models/details', authenticate(db), async (req, res) => {
     try {
-      const models = await loadCatalog(AbortSignal.timeout(10_000));
+      const models = await fetchCatalog(AbortSignal.timeout(10_000));
       const visible = models.filter((model) => allowsModel(req.gatewayKey, model.id));
       res.json({ object: 'list', data: visible.map(publicModel) });
     } catch (error) {
-      apiError(res, 502, String(error?.message ?? error), 'catalog_unavailable', 'api_error');
+      apiError(res, 502, catalogMessage(error), 'catalog_unavailable', 'api_error');
     }
   });
 
@@ -127,7 +137,21 @@ async function handleChatCompletion(db, req, res) {
   }
 
   const requestedModel = typeof body.model === 'string' && body.model !== '' ? body.model : FALLBACK_MODEL;
-  const model = findModel(requestedModel);
+
+  /*
+   * The catalog is read before the model is resolved, because it is the only thing that
+   * knows what a model is: whether it exists, which upstream API it uses, and whether it
+   * can take an image. There is no copy to fall back on, so a network failure here stops the
+   * request with a clear answer instead of guessing - asking DeepAI for a model it may not
+   * have would fail later, with a message that explains nothing.
+   */
+  let models;
+  try {
+    models = await fetchCatalog(AbortSignal.timeout(10_000));
+  } catch (error) {
+    return apiError(res, 503, catalogMessage(error), 'catalog_unavailable', 'api_error');
+  }
+  const model = findModel(models, requestedModel);
   const upstreamModel = model?.id ?? requestedModel;
   const usesResponses = model?.api === 'openai-responses';
 
@@ -440,6 +464,21 @@ async function handleChatCompletion(db, req, res) {
     streamed,
     errorCode: errorCode ?? null,
   });
+}
+
+/**
+ * What to tell a caller when the catalog could not be read.
+ *
+ * `CatalogUnavailable` already says which of the three it was - unreachable, refused, or an
+ * answer that was not a catalog. Anything else is a bug in this gateway and is not described
+ * as a network problem.
+ *
+ * @param {unknown} error
+ * @returns {string}
+ */
+function catalogMessage(error) {
+  if (error instanceof CatalogUnavailable) return `${error.message}. The model list cannot be read, so the request cannot be routed.`;
+  return String(error?.message ?? error);
 }
 
 /**

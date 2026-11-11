@@ -21,7 +21,6 @@ import { createCallbackLogin } from './src/deepai/callback-login.js';
 import { installMachineIdFromDatabase } from './src/deepai/machine.js';
 import { initPricing, pricingStatus, startPricingRefresh } from './src/pricing.js';
 import { v1Router } from './src/api/v1.js';
-import { prefetchCatalog } from './src/deepai/catalog.js';
 import { attachSession } from './src/middleware/session.js';
 import { listAccounts, clearSessionCookie, destroySession, forgetInactiveAccounts, recordAuthEvent } from './src/store.js';
 import { DEFAULT_MAX_KEYS, parseMaxKeys, totalKeyCount } from './src/keys.js';
@@ -248,8 +247,6 @@ export function start(overrides = {}) {
   installMachineIdFromDatabase(db, log);
 
   const app = createApp(db, settings);
-
-  prefetchCatalog();
 
   // Reference prices come from OpenRouter and are cached on disk, so the
   // dashboard shows real market rates rather than a frozen table.

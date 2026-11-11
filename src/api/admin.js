@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto';
 import {
   checkKey,
 } from '../deepai/account.js';
-import { loadCatalog, publicModel } from '../deepai/catalog.js';
+import { fetchCatalog, publicModel } from '../deepai/catalog.js';
 import {
   DEFAULT_MAX_KEYS,
   WINDOWS,
@@ -444,7 +444,8 @@ export function adminRouter(db, runtime) {
   router.get('/models', allowKeyIdentity(db), async (req, res) => {
     try {
       const owner = req.account.username;
-      const models = await loadCatalog(AbortSignal.timeout(10_000));
+      // Read from DeepAI on every call; the gateway keeps no copy of the catalog.
+      const models = await fetchCatalog(AbortSignal.timeout(10_000));
       const monthSince = startOfMonth();
       const usageByModel = new Map(byModel(db, monthSince, owner).map((item) => [item.model, item]));
       const allUsage = new Map(byModel(db, 0, owner).map((item) => [item.model, item]));
@@ -456,7 +457,13 @@ export function adminRouter(db, runtime) {
         })),
       });
     } catch (error) {
-      res.status(502).json({ ok: false, error: String(error?.message ?? error) });
+      // The dashboard shows this, so it says the models could not be read rather than
+      // echoing whatever the failure was.
+      res.status(502).json({
+        ok: false,
+        error: `The model list could not be read from DeepAI: ${error?.message ?? error}`,
+        code: 'catalog_unavailable',
+      });
     }
   });
 
