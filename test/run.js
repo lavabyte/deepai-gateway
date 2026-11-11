@@ -3592,6 +3592,110 @@ await checkAsync('an image is not sent to a model that cannot take one', async (
   }
 });
 
+await checkAsync('an image the backend refuses is retried as text, not reported as a failure', async () => {
+  /*
+   * Reported from a live gateway: a request with an image came back as
+   *
+   *   DeepAI Code error: ValueError: Received multimodal data but multimodal processing is
+   *   not enabled. Use --enable-multimodal flag to enable multimodal processing.
+   *
+   * The model's catalog declares `input: ["text", "image"]`, so filtering by the catalog does
+   * not help - which is the case the DeepAI Code app names in its own source: "A backend may
+   * reject images even when its catalog advertises vision." The app remembers that across
+   * turns. A gateway has no turn, so the refusal is remembered across requests.
+   *
+   * Two behaviours follow, and the first is the one that matters to a caller: the prompt is
+   * asked again without the images, so a question that could be answered as text gets an
+   * answer instead of an error about somebody else's server flag.
+   */
+  const multimodal = await import('../src/deepai/multimodal.js');
+  multimodal.forgetRejections();
+
+  assert.equal(multimodal.isMultimodalRejection(
+    'DeepAI Code error: ValueError: Received multimodal data but multimodal processing is not enabled.'), true);
+  assert.equal(multimodal.isMultimodalRejection('RECEIVED MULTIMODAL DATA BUT MULTIMODAL PROCESSING IS NOT ENABLED'), true,
+    'case does not matter');
+  assert.equal(multimodal.isMultimodalRejection('rate limited'), false);
+  assert.equal(multimodal.isMultimodalRejection(undefined), false);
+
+  multimodal.noteMultimodalRejection('m1');
+  assert.equal(multimodal.rejectsImages('m1'), true);
+  assert.equal(multimodal.rejectsImages('m2'), false);
+  multimodal.forgetRejections();
+  assert.equal(multimodal.rejectsImages('m1'), false, 'and can be forgotten');
+
+  const { openDatabase } = await import('../src/db.js');
+  const { saveAccount } = await import('../src/store.js');
+  const { generateKey } = await import('../src/keys.js');
+  const { createApp } = await import('../server.js');
+
+  const db = openDatabase(':memory:');
+  saveAccount(db, { apiKey: 'upstream', username: 'mm-user', isPro: false });
+  const key = generateKey();
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'mm-user')`).run(key.hash);
+
+  const realFetch = globalThis.fetch;
+  /** What each upstream call carried: 'image' or 'text'. */
+  const sent = [];
+  const app = createApp(db, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const ask = () => realFetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${key.plaintext}` },
+    body: JSON.stringify({
+      model: 'deepseek-v4.1-flash',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'what is in this picture?' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,AA' } },
+        ],
+      }],
+    }),
+  }).then((response) => response.json());
+
+  try {
+    globalThis.fetch = async (url, init) => {
+      if (!String(url).includes('api.deepai.org')) return realFetch(url, init);
+      const body = JSON.parse(init.body);
+      const hasImage = body.messages.some((message) => Array.isArray(message.content)
+        && message.content.some((part) => part.type === 'image_url'));
+      sent.push(hasImage ? 'image' : 'text');
+      if (hasImage) {
+        const refusal = { error: {
+          message: 'DeepAI Code error: ValueError: Received multimodal data but multimodal processing is not enabled. Use --enable-multimodal flag to enable multimodal processing.',
+          type: 'api_error',
+          code: 'PROVIDER_ERROR',
+        } };
+        return new Response(`data: ${JSON.stringify(refusal)}\n\n`,
+          { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      }
+      return new Response('data: {"choices":[{"delta":{"content":"An answer in words."}}]}\n\n'
+        + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    };
+
+    // The first request is retried, and the caller sees an answer rather than the ValueError.
+    const first = await ask();
+    assert.deepEqual(sent, ['image', 'text'], 'the first request is retried without the image');
+    assert.equal(first.error, undefined, `the caller gets an answer, not an error: ${JSON.stringify(first.error)}`);
+    assert.equal(first.choices?.[0]?.message?.content, 'An answer in words.');
+
+    // And the model is known to refuse images now, so the next request never sends one.
+    sent.length = 0;
+    const second = await ask();
+    assert.deepEqual(sent, ['text'], 'a remembered refusal is filtered before the request');
+    assert.equal(second.choices?.[0]?.message?.content, 'An answer in words.');
+  } finally {
+    globalThis.fetch = realFetch;
+    multimodal.forgetRejections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 await checkAsync('the account is polled only while the tab is on screen', async () => {
   /*
    * A dashboard left open in a background tab used to ask for the account every minute for as

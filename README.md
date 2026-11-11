@@ -608,16 +608,24 @@ The sign-in the gateway uses is the one the Code app uses: DeepAI's own page, an
 
 ## Images
 
-An image is only sent to a model that declares `input: ["text", "image"]` in DeepAI's
-catalog. For any other model the image part is replaced with a short text note, and if the
-model then answers with nothing the caller gets a `502 image_not_supported` naming the model,
-rather than an empty `200` that reads as a completed turn.
+An image is only sent to a model that can actually take one, and there are two ways a model
+cannot:
 
-DeepAI forwards image parts to a worker that may not have been started with multimodal
-support, and the failure is not a clean refusal: one model answers successfully with no
-content, another passes `ValueError: Received multimodal data but multimodal processing is
-not enabled` through. The DeepAI Code app makes the same decision - its source swaps the part
-for a placeholder - so the gateway behaves the way the app does.
+1. **The catalog does not declare `input: ["text", "image"]`.** The image part is replaced
+   with a note in the text, so the rest of the prompt still reaches the model.
+2. **The catalog declares it and the backend refuses anyway** - the worker answers with
+   `ValueError: Received multimodal data but multimodal processing is not enabled`. The DeepAI
+   Code app names this case in its own source ("A backend may reject images even when its
+   catalog advertises vision") and remembers it across turns.
+
+The gateway has no turn to remember it in, so the refusal is remembered across requests.
+**The first request is retried without the images**, so a question that can be answered as
+text gets an answer instead of that error - you only pay one extra round trip, once per model
+per process. Every later request for that model is filtered before it is sent.
+
+A reply with no text, no reasoning and no tool call is reported as `502 empty_completion`
+whatever the model, because "completed, no content" is not an answer. `deepai-cyber` is
+exempt: it is a local model whose replies are not expected to carry text.
 
 A reply with no text, no reasoning and no tool call is reported as `502 empty_completion`
 whatever the model, because "completed, no content" is not an answer. `deepai-cyber` is

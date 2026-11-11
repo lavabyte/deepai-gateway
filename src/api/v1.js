@@ -17,6 +17,7 @@ import { REASONING_LEVELS, displayName, findModel, loadCatalog, publicModel, rat
 import { streamChatCompletion, streamResponsesCompletion } from '../deepai/client.js';
 import { UpstreamError } from '../deepai/wire.js';
 import { acceptsImages, countImages, withoutImages } from '../deepai/images.js';
+import { isMultimodalRejection, noteMultimodalRejection, rejectsImages } from '../deepai/multimodal.js';
 import { allowsModel } from '../keys.js';
 import { authenticate, enforceModel, apiError } from '../middleware/auth.js';
 import { readAccount } from '../store.js';
@@ -135,15 +136,21 @@ async function handleChatCompletion(db, req, res) {
   const sessionId = req.get('x-session-id') ?? req.gatewayKey.id;
 
   /*
-   * An image is only sent to a model that declares it takes one.
+   * An image is only sent to a model that can actually take one.
    *
-   * DeepAI forwards the parts to a worker that may not have been started with multimodal
-   * support, and the failure is not a clean refusal: a model without vision can answer
-   * successfully with no content at all, and others pass a backend ValueError through. The
-   * Code app makes the same decision, with a placeholder and a note in the text.
+   * Two ways a model cannot, and the catalog only knows the first:
+   *
+   *  - it does not declare `image` in its input, which is what the app checks too;
+   *  - it declares it, and the backend still refuses with "Received multimodal data but
+   *    multimodal processing is not enabled". The app's own source names this case and
+   *    remembers the refusal for later turns; a gateway has no turn, so it is remembered
+   *    across requests instead (`multimodal.js`).
+   *
+   * Either way the image is replaced by a note in the text, so the rest of the prompt still
+   * reaches the model.
    */
   const imageCount = countImages(body.messages);
-  const imagesSupported = acceptsImages(model);
+  const imagesSupported = acceptsImages(model) && !rejectsImages(upstreamModel);
   const messages = imageCount > 0 && !imagesSupported
     ? withoutImages(body.messages)
     : body.messages;
@@ -172,7 +179,6 @@ async function handleChatCompletion(db, req, res) {
     if (!res.writableEnded) controller.abort();
   });
 
-  const source = usesResponses ? streamResponsesCompletion(params) : streamChatCompletion(params);
   // One writer per request: it builds the SSE envelope once and reuses it.
   const write = streamed ? makeWriter(res, id, upstreamModel, created) : undefined;
 
@@ -186,7 +192,20 @@ async function handleChatCompletion(db, req, res) {
   let errorCode;
   let failure;
 
-  try {
+  /**
+   * Run one upstream attempt and collect it into the accumulators above.
+   *
+   * Pulled out of the handler so the multimodal refusal can be retried: a backend that
+   * rejects an image still answers the same prompt as text, and asking it again costs the
+   * caller nothing but a round trip.
+   *
+   * @param {object} attempt - the params to send.
+   * @returns {Promise<void>}
+   */
+  const attempt = async (attemptParams) => {
+    const source = usesResponses
+      ? streamResponsesCompletion(attemptParams)
+      : streamChatCompletion(attemptParams);
     for await (const event of source) {
       if (firstTokenMs === undefined) firstTokenMs = Date.now() - startedAt;
       if (event.type === 'text') {
@@ -241,6 +260,10 @@ async function handleChatCompletion(db, req, res) {
         finish = event.reason ?? 'stop';
       }
     }
+  };
+
+  try {
+    await attempt(params);
   } catch (error) {
     if (error?.code === 'ABORTED') {
       status = 499;
@@ -256,8 +279,56 @@ async function handleChatCompletion(db, req, res) {
     }
   }
 
+  /*
+   * Retried once without the images when the backend refuses multimodal input.
+   *
+   * The refusal is a property of the model's worker, not of this prompt, so the same
+   * question asked as text is answered normally. The caller gets that answer instead of an
+   * error about a flag on somebody else's server, and the model is remembered as unable so
+   * the next request is filtered before it is sent.
+   */
+  if (failure !== undefined && imageCount > 0 && isMultimodalRejection(failure.message)) {
+    noteMultimodalRejection(upstreamModel);
+    text.length = 0;
+    reasoning.length = 0;
+    calls.clear();
+    usage = undefined;
+    finish = 'stop';
+    firstTokenMs = undefined;
+    status = 200;
+    errorCode = undefined;
+    failure = undefined;
+    try {
+      await attempt({ ...params, messages: withoutImages(body.messages) });
+    } catch (retryError) {
+      status = retryError?.code === 'ABORTED' ? 499 : (retryError?.status ?? 502);
+      errorCode = retryError?.code === 'ABORTED' ? 'client_closed' : (retryError?.code ?? 'gateway_error');
+      failure = retryError;
+    }
+  }
+
   const toolCalls = [...calls.values()].filter((call) => call.name !== '');
   const effectiveFinish = toolCalls.length > 0 ? 'tool_calls' : finish;
+
+  /*
+   * The backend refusing multimodal input is its own failure, and it is instructive.
+   *
+   * It arrives as a provider error carrying the worker's `ValueError`, which tells a caller
+   * nothing about what to do and names a flag they cannot set. The model is recorded as
+   * unable to take images, so the next request for it is filtered before it is sent, and
+   * this caller is told that plainly.
+   */
+  if (failure !== undefined && imageCount > 0 && isMultimodalRejection(failure.message)) {
+    noteMultimodalRejection(upstreamModel);
+    status = 502;
+    errorCode = 'image_not_supported';
+    failure = new UpstreamError(
+      `DeepAI refused the ${imageCount === 1 ? 'image' : `${imageCount} images`} for "${upstreamModel}": the backend has no multimodal processing enabled for it, whatever its catalog says. `
+      + 'This model will be sent text only from now on; send the question as text, or use a model that takes images.',
+      'IMAGE_NOT_SUPPORTED',
+      { status: 502 },
+    );
+  }
 
   /*
    * A reply with no text and no tool call is not a completed turn.
