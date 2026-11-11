@@ -3612,6 +3612,49 @@ await checkAsync('the project presents one consistent identity', async () => {
   assert.match(dashboard, /DeepAI Gateway/);
 });
 
+await checkAsync('upstream traffic goes through one kept-alive pool', async () => {
+  /*
+   * Measured on the live deployment: `catalog=962ms` and `catalog=270ms` on consecutive
+   * turns. The difference was not DeepAI being slow, it was a fresh TCP handshake and TLS
+   * negotiation, because the built-in client closes an idle connection after four seconds
+   * and a gateway serves turns minutes apart. The pool is what removes that.
+   *
+   * The window is pinned rather than left to a default: the whole point is that it outlives
+   * the gap between turns, and a value of a few seconds would silently bring the handshake
+   * back while every other behaviour stayed correct.
+   */
+  const transport = await import('../src/deepai/transport.js');
+  const { getGlobalDispatcher, setGlobalDispatcher } = await import('undici');
+
+  const originalFetch = globalThis.fetch;
+  const originalDispatcher = getGlobalDispatcher();
+  try {
+    assert.ok(transport.KEEP_ALIVE_TIMEOUT_MS >= 60_000,
+      `the idle window must outlast a pause between turns (got ${transport.KEEP_ALIVE_TIMEOUT_MS}ms)`);
+
+    const lines = [];
+    const direct = transport.installUpstreamPool({ env: {}, log: (line) => lines.push(line) });
+    assert.equal(direct.constructor.name, 'Agent', 'a direct connection uses the plain agent');
+    assert.equal(typeof direct.dispatch, 'function', 'and it is an agent, not one request');
+    assert.notEqual(globalThis.fetch, originalFetch,
+      'the process fetches through the pool and nothing else');
+    assert.equal(typeof globalThis.fetch, 'function', 'which stays a working fetch');
+    assert.match(lines.join('\n'), /keep-alive pool/, 'and says so at boot');
+
+    // A deployment behind an egress proxy keeps that path: the agent follows the same
+    // variables the built-in client does, and the same switch turns it off.
+    const proxied = transport.installUpstreamPool({ env: { HTTPS_PROXY: 'http://127.0.0.1:3128' } });
+    assert.equal(proxied.constructor.name, 'EnvHttpProxyAgent', 'a proxy in the environment is used');
+    const off = transport.installUpstreamPool({
+      env: { HTTPS_PROXY: 'http://127.0.0.1:3128', NODE_USE_ENV_PROXY: '0' },
+    });
+    assert.equal(off.constructor.name, 'Agent', 'and NODE_USE_ENV_PROXY=0 turns it off, as upstream does');
+  } finally {
+    globalThis.fetch = originalFetch;
+    setGlobalDispatcher(originalDispatcher);
+  }
+});
+
 /* ------------------------------------------- deepai sign-in callback address */
 
 /*

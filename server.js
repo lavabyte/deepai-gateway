@@ -19,6 +19,7 @@ import { openDatabase } from './src/db.js';
 import { adminRouter } from './src/api/admin.js';
 import { createCallbackLogin } from './src/deepai/callback-login.js';
 import { installMachineIdFromDatabase } from './src/deepai/machine.js';
+import { installUpstreamPool } from './src/deepai/transport.js';
 import { initPricing, pricingStatus, startPricingRefresh } from './src/pricing.js';
 import { v1Router } from './src/api/v1.js';
 import { attachSession } from './src/middleware/session.js';
@@ -248,6 +249,15 @@ export function start(overrides = {}) {
    * matter here.
    */
   installMachineIdFromDatabase(db, log);
+
+  /*
+   * One pooled, kept-alive connection to DeepAI, before anything can be requested.
+   *
+   * The alternative - a fresh TCP and TLS handshake per request, which is what the built-in
+   * client's four-second idle timeout amounts to for a gateway - costs about 700 ms of every
+   * turn. See `src/deepai/transport.js`.
+   */
+  installUpstreamPool({ log });
 
   const app = createApp(db, settings);
 

@@ -761,13 +761,29 @@ belongs to this gateway:
 | Step | Cost | Whose |
 | --- | --- | --- |
 | caller to gateway | one network round trip | the path |
-| catalog read (`/deepai_code/models`) | ~0.1-0.2 s here | this gateway |
-| DeepAI accepts, then thinks | 0.9-1.9 s for a one-token reply, more for a reasoning turn | the model |
+| catalog read (`/deepai_code/models`) | ~0.2 s on a kept-alive connection | this gateway |
+| DeepAI accepts, then thinks | 0.1-1.5 s to accept, then the tokens | the model |
 
-Measured through the deployed gateway with a caller's own key: 1.3-2.4 s to the
+Measured through the deployed gateway with a caller's own key: 1.0-2.6 s to the
 first byte of a one-token reply, of which about half a second is the two hops
 and the catalog read. A 67 kB prompt answered with two tokens took 2.4-3.7 s, so
 that time is prompt processing and thinking, not transport.
+
+### The connection is kept, not reopened
+
+The catalog read and the completion after it share one kept-alive connection per
+process (see `src/deepai/transport.js`). That was not always true, and the
+difference was measured on this deployment, not assumed: the same catalog read
+cost **960 ms** on a fresh socket and **270 ms** on one that was still open, and
+the log showed exactly that split on consecutive turns (`catalog=962ms`, then
+`catalog=270ms`). The cause was the built-in client closing an idle connection
+after four seconds, so a gateway serving turns minutes apart paid a TCP
+handshake and a TLS negotiation on every one of them - roughly 700 ms of waiting
+for nothing, per turn.
+
+With the pool installed the same read costs 180-210 ms after a minute of idling,
+and the completion reuses that socket. It is the one runtime dependency besides
+Express, and it exists for this.
 
 The catalog is read on every request and never cached, which is deliberate; it
 is also the only round trip this gateway adds inside the request. What it costs
@@ -889,27 +905,34 @@ src/middleware/session.js  session cookie resolution, per browser
 scripts/backup.js       WAL-safe database backup
 src/api/v1.js           /v1 OpenAI surface
 src/api/admin.js        /api dashboard surface
-src/deepai/catalog.js   model catalog with cache and offline snapshot
+src/deepai/catalog.js   model catalog, read live from DeepAI on every request
 src/deepai/account.js   key check, owner derivation, account-JSON parsing
 src/deepai/client.js    the two upstream transports
+src/deepai/transport.js the kept-alive connection both of them use
 src/deepai/wire.js      shared headers, SSE parsing, usage normalization
 public/                 dashboard (no framework, no build step)
 public/locales/         UI strings, one JSON per language (en is the fallback)
 ```
 
 Storage is SQLite through Node's built-in `node:sqlite` - no native build step
-and no external database. The only runtime dependency is Express.
+and no external database. There are two runtime dependencies: Express, and
+`undici` for the kept-alive connection to DeepAI (Node's own `fetch` closes an
+idle connection after four seconds, which meant a TCP and TLS handshake on every
+turn - see [Performance](#performance)).
 
 ## DeepAI specifics
 
 - Traffic goes to the same account-authenticated OpenAI-compatible API the
   official DeepAI Code desktop app uses, so **tool calls are native**.
-- Models that declare `api: "openai-responses"` (`gpt-6-astra`) are routed to
-  `/deepai_code/responses` and converted automatically.
-- The model catalog is fetched from `GET /deepai_code/models` and cached for ten
-  minutes; an embedded snapshot keeps the gateway usable offline.
-- DeepAI's browser sign-in is **not** used by default: it always calls back to `127.0.0.1`,
-  which no setting can move. Sign-in is the account's API key - see [Signing in](#signing-in).
+- Models that declare `api: "openai-responses"` are routed to
+  `/deepai_code/responses` and converted automatically. No model in the current
+  catalog declares it; the routing exists because the field does.
+- The model catalog is read from `GET /deepai_code/models` on every request, with
+  no cache and no embedded copy: a model exists because DeepAI says so now. If the
+  read fails the request is refused with `catalog_unavailable`, never served from
+  a stale list.
+- Sign-in is DeepAI's own callback flow, finished by pasting back the address the
+  browser could not open - see [Signing in](#signing-in).
 
 ## Limits
 
