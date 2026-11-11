@@ -93,6 +93,20 @@ export async function* streamChatCompletion(params) {
     body.reasoning_effort = params.reasoningEffort;
   }
 
+  /*
+   * The outgoing body, when a deployment asks to see it.
+   *
+   * A field the provider silently ignores and a field this gateway never sends look
+   * identical from the answer, and the reasoning effort is exactly such a case. This logs the
+   * reasoning-related keys only - not the prompt, not the key - so the question "did we send
+   * it" can be answered from the log without exposing a conversation.
+   */
+  if (process.env.LOG_UPSTREAM_REASONING === '1') {
+    console.log('[deepai-gateway] upstream reasoning: '
+      + JSON.stringify({ model: body.model, thinking: body.thinking ?? null,
+        reasoning_effort: body.reasoning_effort ?? null, reasoning: body.reasoning ?? null }));
+  }
+
   let response;
   try {
     response = await fetch(`${API_ORIGIN}/deepai_code/chat/completions`, {
@@ -202,6 +216,11 @@ export async function* streamResponsesCompletion(params) {
   } else if (typeof params.reasoningEffort === 'string' && params.reasoningEffort !== '') {
     body.reasoning = { effort: params.reasoningEffort, summary: 'auto' };
     body.include = ['reasoning.encrypted_content'];
+  }
+
+  if (process.env.LOG_UPSTREAM_REASONING === '1') {
+    console.log('[deepai-gateway] upstream reasoning: '
+      + JSON.stringify({ model: body.model, reasoning: body.reasoning ?? null }));
   }
 
   let response;
