@@ -16,6 +16,7 @@ import express from 'express';
 import { REASONING_LEVELS, displayName, findModel, loadCatalog, publicModel, rateLabel } from '../deepai/catalog.js';
 import { streamChatCompletion, streamResponsesCompletion } from '../deepai/client.js';
 import { UpstreamError } from '../deepai/wire.js';
+import { acceptsImages, countImages, withoutImages } from '../deepai/images.js';
 import { allowsModel } from '../keys.js';
 import { authenticate, enforceModel, apiError } from '../middleware/auth.js';
 import { readAccount } from '../store.js';
@@ -133,10 +134,24 @@ async function handleChatCompletion(db, req, res) {
   // The session id groups a caller's requests for upstream prompt-cache affinity.
   const sessionId = req.get('x-session-id') ?? req.gatewayKey.id;
 
+  /*
+   * An image is only sent to a model that declares it takes one.
+   *
+   * DeepAI forwards the parts to a worker that may not have been started with multimodal
+   * support, and the failure is not a clean refusal: a model without vision can answer
+   * successfully with no content at all, and others pass a backend ValueError through. The
+   * Code app makes the same decision, with a placeholder and a note in the text.
+   */
+  const imageCount = countImages(body.messages);
+  const imagesSupported = acceptsImages(model);
+  const messages = imageCount > 0 && !imagesSupported
+    ? withoutImages(body.messages)
+    : body.messages;
+
   const params = {
     apiKey: account.apiKey,
     model: upstreamModel,
-    messages: body.messages,
+    messages,
     tools: body.tools,
     maxTokens: numberOrUndefined(body.max_completion_tokens ?? body.max_tokens),
     temperature: numberOrUndefined(body.temperature),
@@ -243,6 +258,27 @@ async function handleChatCompletion(db, req, res) {
 
   const toolCalls = [...calls.values()].filter((call) => call.name !== '');
   const effectiveFinish = toolCalls.length > 0 ? 'tool_calls' : finish;
+
+  /*
+   * A reply with no text and no tool call is not a completed turn.
+   *
+   * It is what a model returns when it cannot use its input - the multimodal image case is
+   * the one this was found on - and reporting it as `finish_reason: "stop"` with an empty
+   * message tells the caller the model had nothing to say. The two causes are named
+   * separately, because they need different fixes: an image the model cannot take, or an
+   * upstream that returned nothing for a reason only the caller can see.
+   */
+  if (status === 200 && upstreamModel !== 'deepai-cyber' && text.join('') === ''
+    && reasoning.length === 0 && toolCalls.length === 0) {
+    status = 502;
+    errorCode = imageCount > 0 && !imagesSupported ? 'image_not_supported' : 'empty_completion';
+    failure = new UpstreamError(
+      imageCount > 0 && !imagesSupported
+        ? `"${upstreamModel}" returned no content. It does not accept images, so the ${imageCount === 1 ? 'image was' : `${imageCount} images were`} left out of the request; send the question as text, or use a model that takes images.`
+        : `"${upstreamModel}" returned a completed response with no content.`,
+      errorCode,
+    );
+  }
 
   if (status === 200 && streamed) {
     write({}, openAIFinish(effectiveFinish));

@@ -8,6 +8,7 @@
  * @module deepai-gateway/deepai/wire
  */
 
+import { randomBytes } from 'node:crypto';
 import { machineHeaders } from './machine.js';
 
 export const API_ORIGIN = 'https://api.deepai.org';
@@ -27,10 +28,23 @@ export const API_ORIGIN = 'https://api.deepai.org';
  * lane answers `426 lane_version_unsupported` and a live one answers `401 auth_required`,
  * which makes the revision cheap to find again.
  */
-export const LANE_VERSION = '3';
+export const LANE_VERSION = '4';
 
-/** The lane revision alone. The app sends exactly this on its exchange call. */
-export const LANE_HEADERS = Object.freeze({ 'X-DeepAI-Code-Theos': LANE_VERSION });
+/**
+ * An identifier for this process, sent with every Code-lane request.
+ *
+ * Added by the app in 0.3.35 beside the lane revision, as 32 random hex characters -
+ * fresh per process, so it names this run rather than this installation. It is the
+ * counterpart of the machine digest: the machine says which host, this says which
+ * instance of the client on it.
+ */
+const LANE_INSTANCE = randomBytes(16).toString('hex');
+
+/** The lane headers alone. */
+export const LANE_HEADERS = Object.freeze({
+  'X-DeepAI-Code-Theos': LANE_VERSION,
+  'X-DeepAI-Code-Instance': LANE_INSTANCE,
+});
 
 /**
  * Headers for a request to `/deepai_code`: the lane revision and the machine digest.

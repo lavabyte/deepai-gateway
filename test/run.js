@@ -3494,6 +3494,104 @@ await checkAsync('the project presents one consistent identity', async () => {
  * `POST /api/login/complete`. These checks pin both halves of that.
  */
 
+await checkAsync('an image is not sent to a model that cannot take one', async () => {
+  /*
+   * Reported from two directions for the same request: one model answered "completed with no
+   * content", another passed DeepAI's backend error through -
+   *
+   *   ValueError: Received multimodal data but multimodal processing is not enabled.
+   *
+   * DeepAI itself forwards whatever parts it is given; the model that lacks vision then
+   * either says nothing or fails in its worker. The DeepAI Code app does not send an image to
+   * a model that does not declare one - its source replaces the part with a placeholder - and
+   * this makes the same decision before the request leaves the gateway.
+   *
+   * The empty reply is caught too, because "completed, no content" is not a completed turn:
+   * it is reported as a failure that names which of the two causes applied.
+   */
+  const { countImages, withoutImages, acceptsImages, OMITTED_IMAGE_TEXT } = await import('../src/deepai/images.js');
+
+  const withImage = (extra = []) => [
+    { role: 'user', content: [{ type: 'text', text: 'co jest na tym?' }, { type: 'image_url', image_url: { url: 'data:x' } }, ...extra] },
+  ];
+
+  // Counting both spellings a client may use.
+  assert.equal(countImages(withImage()), 1);
+  assert.equal(countImages([{ role: 'user', content: [{ type: 'input_image', image_url: 'u' }] }]), 1);
+  assert.equal(countImages([{ role: 'user', content: 'plain text' }]), 0);
+  assert.equal(countImages([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }]), 0);
+  assert.equal(countImages([]), 0);
+  // A malformed part is not an image, and must not throw.
+  assert.equal(countImages([{ role: 'user', content: [null, { type: 'nonsense' }] }]), 0);
+
+  // Removing: the image goes, a note takes its place, everything else keeps its order.
+  const filtered = withoutImages(withImage([{ type: 'text', text: 'a potem to' }]));
+  assert.equal(countImages(filtered), 0, 'no image survives the filter');
+  assert.deepEqual(filtered[0].content.map((part) => part.type), ['text', 'text', 'text']);
+  assert.equal(filtered[0].content[0].text, 'co jest na tym?', 'the prompt is untouched');
+  assert.equal(filtered[0].content[1].text, OMITTED_IMAGE_TEXT, 'and the gap is marked');
+  assert.equal(filtered[0].content[2].text, 'a potem to', 'in place');
+
+  // A message with no image is the same object, not a copy: nothing to rewrite.
+  const plain = [{ role: 'user', content: 'text' }];
+  assert.equal(withoutImages(plain)[0], plain[0]);
+
+  // The catalog decides, and an unknown model is treated as unable rather than guessed at.
+  assert.equal(acceptsImages({ input: ['text', 'image'] }), true);
+  assert.equal(acceptsImages({ input: ['text'] }), false);
+  assert.equal(acceptsImages(undefined), false, 'an unknown model must not be sent an image');
+
+  /*
+   * End to end: the request that leaves the gateway has no image part, and the reply that
+   * came back empty is reported as a failure rather than as a silent empty turn.
+   */
+  const { openDatabase } = await import('../src/db.js');
+  const { saveAccount } = await import('../src/store.js');
+  const { generateKey } = await import('../src/keys.js');
+  const { createApp } = await import('../server.js');
+
+  const db = openDatabase(':memory:');
+  saveAccount(db, { apiKey: 'upstream', username: 'img-user', isPro: false });
+  const key = generateKey();
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'img-user')`).run(key.hash);
+
+  const realFetch = globalThis.fetch;
+  let upstreamBody;
+  const app = createApp(db, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  try {
+    globalThis.fetch = async (url, init) => {
+      if (!String(url).includes('api.deepai.org')) return realFetch(url, init);
+      if (init?.body) upstreamBody = JSON.parse(init.body);
+      // A model without vision: a completed answer with nothing in it.
+      return new Response('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    };
+    const response = await realFetch(`http://127.0.0.1:${server.address().port}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${key.plaintext}` },
+      // `solar-mini-4` is in the catalog and does not declare image input.
+      body: JSON.stringify({ model: 'solar-mini-4', messages: withImage() }),
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 502, 'an empty completion is a failure, not a 200');
+    assert.equal(payload.error.code, 'image_not_supported');
+    assert.match(payload.error.message, /does not accept images/,
+      'and says which of the two causes it was');
+    assert.match(payload.error.message, /solar-mini-4/, 'naming the model');
+    assert.ok(upstreamBody !== undefined, 'the request was still attempted');
+    const parts = upstreamBody.messages[0].content;
+    assert.ok(!parts.some((part) => part.type === 'image_url'),
+      'but no image part left the gateway');
+    assert.ok(parts.some((part) => part.text === OMITTED_IMAGE_TEXT), 'with a note in its place');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 await checkAsync('the account is polled only while the tab is on screen', async () => {
   /*
    * A dashboard left open in a background tab used to ask for the account every minute for as

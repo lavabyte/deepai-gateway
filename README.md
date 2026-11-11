@@ -606,6 +606,23 @@ exactly as the server does.
 The sign-in the gateway uses is the one the Code app uses: DeepAI's own page, and the
 `desktop_auth` exchange behind it for an `api_key` - see [Signing in](#signing-in).
 
+## Images
+
+An image is only sent to a model that declares `input: ["text", "image"]` in DeepAI's
+catalog. For any other model the image part is replaced with a short text note, and if the
+model then answers with nothing the caller gets a `502 image_not_supported` naming the model,
+rather than an empty `200` that reads as a completed turn.
+
+DeepAI forwards image parts to a worker that may not have been started with multimodal
+support, and the failure is not a clean refusal: one model answers successfully with no
+content, another passes `ValueError: Received multimodal data but multimodal processing is
+not enabled` through. The DeepAI Code app makes the same decision - its source swaps the part
+for a placeholder - so the gateway behaves the way the app does.
+
+A reply with no text, no reasoning and no tool call is reported as `502 empty_completion`
+whatever the model, because "completed, no content" is not an answer. `deepai-cyber` is
+exempt: it is a local model whose replies are not expected to carry text.
+
 ## The machine header, and `machine_required`
 
 Every request to `/deepai_code` carries two identifying headers. The lane revision is one;
