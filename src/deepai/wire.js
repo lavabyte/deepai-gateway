@@ -119,6 +119,30 @@ function retryAfterMs(response) {
   return undefined;
 }
 
+/**
+ * The ways DeepAI says "there is no worker for this right now".
+ *
+ * It is not a fault in the request and it is not a rate limit on this key: the same request
+ * works a moment later, which is exactly what the body says. Measured on this lane as a
+ * `503` carrying "The model is busy right now. Try again in a moment.", and on the desktop
+ * app's own path as a `409` with `error.code: "session_busy"`, which the app answers by
+ * waiting `retry-after` and asking again.
+ */
+const CAPACITY = /(?:model is busy|session_busy|server is busy|at capacity|try again in a moment)/i;
+
+/**
+ * Whether a message is DeepAI asking to be asked again.
+ *
+ * Exported because the refusal arrives two ways: as an HTTP status, and as an `error` object
+ * inside an otherwise accepted stream. Both mean the same thing and both are worth a retry.
+ *
+ * @param {unknown} message
+ * @returns {boolean}
+ */
+export function isCapacityText(message) {
+  return typeof message === 'string' && CAPACITY.test(message);
+}
+
 /** Read an error body into a short message. */
 export async function errorMessage(response) {
   const body = await response.text().catch(() => '');
@@ -144,7 +168,28 @@ export async function errorFor(response, label) {
       { status, providerRetryAfterMs: after },
     );
   }
-  if (status === 429 || status === 409) {
+  if (status === 429) {
+    return new UpstreamError(
+      `DeepAI: rate limited (HTTP ${status})${detail}`,
+      'RATE_LIMIT',
+      { status, providerRetryAfterMs: after },
+    );
+  }
+  /*
+   * A worker that is not there yet, which is worth asking for again.
+   *
+   * A `503` is capacity by definition, and a `409` is it when the body says so - which is the
+   * shape the desktop app handles. Everything else keeps its own meaning: a 409 that is not
+   * about capacity is left as before, so this cannot turn an unrelated conflict into a retry.
+   */
+  if (status === 503 || (status === 409 && isCapacityText(message))) {
+    return new UpstreamError(
+      `DeepAI: the model is busy (HTTP ${status})${detail}`,
+      'CAPACITY',
+      { status, providerRetryAfterMs: after },
+    );
+  }
+  if (status === 409) {
     return new UpstreamError(
       `DeepAI: rate limited or at capacity (HTTP ${status})${detail}`,
       'RATE_LIMIT',

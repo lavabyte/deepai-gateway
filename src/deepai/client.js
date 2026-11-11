@@ -21,6 +21,7 @@ import {
   UpstreamError,
   completionsUsage,
   errorFor,
+  isCapacityText,
   mapFinishReason,
   readEvents,
   requestHeaders,
@@ -139,9 +140,16 @@ export async function* streamChatCompletion(params) {
 
   for await (const chunk of readEvents(response, params.signal)) {
     if (chunk?.error) {
+      /*
+       * A refusal can also arrive inside a stream this gateway already accepted, as an
+       * `error` object instead of a status. When it is DeepAI saying it is busy, it is the
+       * same condition and gets the same treatment - the handler retries it as long as
+       * nothing has been forwarded yet.
+       */
+      const message = String(chunk.error?.message ?? chunk.error);
       throw new UpstreamError(
-        `DeepAI Code error: ${String(chunk.error?.message ?? chunk.error)}`,
-        'PROVIDER_ERROR',
+        `DeepAI Code error: ${message}`,
+        isCapacityText(message) ? 'CAPACITY' : 'PROVIDER_ERROR',
         Number.isInteger(chunk.error?.status) ? { status: chunk.error.status } : {},
       );
     }

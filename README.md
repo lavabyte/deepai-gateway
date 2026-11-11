@@ -678,6 +678,43 @@ A reply with no text, no reasoning and no tool call is reported as `502 empty_co
 whatever the model, because "completed, no content" is not an answer. `deepai-cyber` is
 exempt: it is a local model whose replies are not expected to carry text.
 
+## When DeepAI says the model is busy
+
+A long conversation can come back as
+
+```
+503 {"error":{"message":"The model is busy right now. Try again in a moment."}}
+```
+
+Nothing in that request is wrong. The words are an instruction, and the desktop app follows
+it for the same refusal (it waits `retry-after` and asks again), so this gateway does too: up
+to three more attempts, waiting what DeepAI asked for or two seconds when it says nothing,
+inside a minute of total waiting. The caller gets its answer instead of an error telling it
+to write retry logic.
+
+Only a refusal is retried. Once any part of an answer has reached the caller, a failure is
+reported - appending a second answer to a partial one is worse than the error.
+
+If a worker stays busy, the retries run out and the caller gets the `503` with
+`code: CAPACITY`, plus one log line per wait:
+
+```
+v1 glm-5.3-flash capacity: the model is busy, waiting 2000ms (attempt 2 of 4)
+```
+
+### Session affinity, and parallel conversations
+
+DeepAI routes a turn by the session it belongs to (`X-Session-Affinity`), which is how the
+same conversation keeps its prompt cache. This gateway sends `x-session-id` from the request
+when the caller passes one, and otherwise uses a stable id per API key - so a client that
+runs several conversations or subagents in parallel through one key has all of them on the
+same session. Sending a distinct `x-session-id` per conversation spreads them and is what the
+desktop app does with its per-thread session id:
+
+```bash
+curl ... -H "x-session-id: conversation-42" ...
+```
+
 ## The machine header, and `machine_required`
 
 Every request to `/deepai_code` carries two identifying headers. The lane revision is one;

@@ -61,6 +61,20 @@ const KEEP_ALIVE_MS = 5_000;
 const KEEP_ALIVE_TICK_MS = 1_000;
 
 /**
+ * How hard to try when DeepAI says the model is busy.
+ *
+ * It is not a fault in the request: the same request works a moment later, and that is what
+ * the answer says. The desktop app waits `retry-after` and asks again for the same reason. A
+ * caller that gets this as an error is being told to do retry logic the gateway can do for
+ * it, so it does: three more attempts, inside a minute of waiting.
+ */
+const CAPACITY_ATTEMPTS = 3;
+const CAPACITY_DEFAULT_WAIT_MS = 2_000;
+const CAPACITY_MIN_WAIT_MS = 250;
+const CAPACITY_MAX_WAIT_MS = 30_000;
+const CAPACITY_TOTAL_WAIT_MS = 60_000;
+
+/**
  * Mount the OpenAI-compatible routes.
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {{log?: (message: string) => void, logRequests?: boolean}} [options]
@@ -336,8 +350,43 @@ async function handleChatCompletion(db, req, res, options = {}) {
     }
   };
 
+  const log = options.logRequests !== false
+    ? (options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`)))
+    : undefined;
+
+  /*
+   * One attempt, and then as many more as a busy worker is worth.
+   *
+   * Retried only while nothing has reached the caller: a refusal is retried, a half-written
+   * answer never is, because a second answer appended to a partial one is worse than the
+   * error it replaces.
+   */
+  let waitedMs = 0;
+  const runAttempt = async (attemptParams) => {
+    for (let tries = 1; ; tries += 1) {
+      try {
+        await attempt(attemptParams);
+        return;
+      } catch (error) {
+        /*
+         * Nothing of the answer itself has been forwarded. The role delta does not count: it
+         * carries no content, so a retry after it still produces one well-formed message
+         * (role, then the answer). A retry after any text, reasoning or tool call does not,
+         * because the caller would be reading two answers spliced together.
+         */
+        const untouched = text.length === 0 && reasoning.length === 0 && calls.size === 0;
+        const wait = capacityWait(error, tries, untouched);
+        if (wait === undefined || waitedMs + wait > CAPACITY_TOTAL_WAIT_MS) throw error;
+        waitedMs += wait;
+        log?.(`v1 ${upstreamModel} capacity: the model is busy, waiting ${wait}ms `
+          + `(attempt ${tries + 1} of ${CAPACITY_ATTEMPTS + 1})`);
+        await pause(wait, controller.signal);
+      }
+    }
+  };
+
   try {
-    await attempt(params);
+    await runAttempt(params);
   } catch (error) {
     if (error?.code === 'ABORTED') {
       status = 499;
@@ -386,7 +435,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
     errorCode = undefined;
     failure = undefined;
     try {
-      await attempt({ ...params, messages: withoutImages(body.messages) });
+      await runAttempt({ ...params, messages: withoutImages(body.messages) });
     } catch (retryError) {
       status = retryError?.code === 'ABORTED' ? 499 : (retryError?.status ?? 502);
       errorCode = retryError?.code === 'ABORTED' ? 'client_closed' : (retryError?.code ?? 'gateway_error');
@@ -517,12 +566,9 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * first token (the model's work). Reading them together is what tells a gateway problem
    * from a slow model instead of guessing at both.
    */
-  if (options.logRequests !== false) {
-    const log = options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`));
-    log(`v1 chat/completions ${upstreamModel} stream=${streamed ? 'yes' : 'no'} status=${status} `
-      + `catalog=${catalogMs}ms first-event=${firstEventMs ?? '-'}ms first-token=${firstTokenMs ?? '-'}ms `
-      + `total=${Date.now() - startedAt}ms`);
-  }
+  log?.(`v1 chat/completions ${upstreamModel} stream=${streamed ? 'yes' : 'no'} status=${status} `
+    + `catalog=${catalogMs}ms first-event=${firstEventMs ?? '-'}ms first-token=${firstTokenMs ?? '-'}ms `
+    + `total=${Date.now() - startedAt}ms${waitedMs > 0 ? ` waited=${waitedMs}ms` : ''}`);
 
   record(db, {
     keyId: req.gatewayKey.id,
@@ -622,6 +668,47 @@ function makeWriter(res, id, model, created) {
     lastWrite = Date.now();
     res.write(`${envelope}${JSON.stringify(delta)},"finish_reason":${finishReason === null ? 'null' : JSON.stringify(finishReason)}}]}\n\n`);
   };
+}
+
+/**
+ * How long to wait before asking a busy worker again, or undefined to stop trying.
+ *
+ * `retry-after` is what DeepAI asked for when it sends one; otherwise a couple of seconds,
+ * which is what the app uses. The bounds keep a hostile or mistaken header from parking a
+ * caller's request for minutes or from retrying in a tight loop.
+ *
+ * @param {unknown} error
+ * @param {number} tries - attempts made so far, counting the one that failed.
+ * @param {boolean} untouched - whether anything has reached the caller.
+ * @returns {number|undefined}
+ */
+function capacityWait(error, tries, untouched) {
+  if (!untouched) return undefined;
+  if (!(error instanceof UpstreamError) || error.code !== 'CAPACITY') return undefined;
+  if (tries > CAPACITY_ATTEMPTS) return undefined;
+  const asked = Number.isFinite(error.providerRetryAfterMs) ? error.providerRetryAfterMs : CAPACITY_DEFAULT_WAIT_MS;
+  return Math.min(Math.max(asked, CAPACITY_MIN_WAIT_MS), CAPACITY_MAX_WAIT_MS);
+}
+
+/** Wait, unless the caller goes away first. */
+function pause(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new UpstreamError('request aborted', 'ABORTED'));
+      return;
+    }
+    const abort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      reject(new UpstreamError('request aborted', 'ABORTED'));
+    };
+    // eslint-disable-next-line no-use-before-define -- assigned before the timer can fire.
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', abort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', abort, { once: true });
+  });
 }
 
 /** Accept only finite numbers. */

@@ -4251,6 +4251,128 @@ await checkAsync('the stream opens before the model has said anything', async ()
   }
 });
 
+await checkAsync('a busy model is waited out instead of reported', async () => {
+  /*
+   * Reported live on longer conversations:
+   *
+   *   503 {"error":{"message":"DeepAI Code HTTP 503: The model is busy right now. Try again in
+   *   a moment."}}
+   *
+   * Nothing in that request is wrong, and DeepAI's own words say what to do about it: try
+   * again in a moment. The desktop app does exactly that (it waits `retry-after` on the same
+   * refusal). A gateway that passes it through tells the caller to write retry logic for a
+   * condition it can handle itself, so it waits and asks again.
+   *
+   * The second half pins the ceiling: a worker that stays busy must still fail, and must fail
+   * after a bounded number of tries rather than holding the caller.
+   */
+  const { openDatabase } = await import('../src/db.js');
+  const { saveAccount } = await import('../src/store.js');
+  const { generateKey } = await import('../src/keys.js');
+  const { createApp } = await import('../server.js');
+
+  const db = openDatabase(':memory:');
+  saveAccount(db, { apiKey: 'upstream', username: 'busy-user', isPro: false });
+  const key = generateKey();
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'busy-user')`).run(key.hash);
+
+  const realFetch = globalThis.fetch;
+  const app = createApp(db, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  /** The refusal DeepAI actually sent, as an HTTP response. */
+  const busy = () => new Response(
+    JSON.stringify({ error: { message: 'The model is busy right now. Try again in a moment.' } }),
+    { status: 503, headers: { 'content-type': 'application/json', 'retry-after': '0' } },
+  );
+  const answer = () => new Response(
+    'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+      + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  );
+
+  const call = (stream) => realFetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key.plaintext}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'glm-5.3-flash', stream, messages: [{ role: 'user', content: 'hi' }] }),
+  });
+
+  try {
+    let posts = 0;
+    globalThis.fetch = async (url, init) => {
+      if (String(url).includes('deepai_code/models')) {
+        return new Response(JSON.stringify(CATALOG_PAYLOAD),
+          { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      posts += 1;
+      return posts === 1 ? busy() : answer();
+    };
+
+    const streamed = await call(true);
+    assert.equal(streamed.status, 200, 'the caller gets an answer, not the refusal');
+    assert.match(await streamed.text(), /"content":"ok"/, 'and it is the answer that was asked for');
+    assert.equal(posts, 2, 'the refusal was asked once more, not passed on');
+
+    // Non-streaming goes through the same path, so it is worth one check of its own.
+    posts = 0;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('deepai_code/models')) {
+        return new Response(JSON.stringify(CATALOG_PAYLOAD),
+          { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      posts += 1;
+      return posts === 1 ? busy() : answer();
+    };
+    const plain = await (await call(false)).json();
+    assert.equal(plain.choices[0].message.content, 'ok', 'a non-streaming caller is waited out too');
+
+    /*
+     * The same refusal can arrive inside an accepted stream, as an `error` object rather than
+     * a status. It is one condition, so it gets one behaviour: nothing has been forwarded
+     * yet, so asking again is still possible and still the right thing to do.
+     */
+    posts = 0;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('deepai_code/models')) {
+        return new Response(JSON.stringify(CATALOG_PAYLOAD),
+          { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      posts += 1;
+      if (posts > 1) return answer();
+      return new Response(
+        'data: {"error":{"message":"The model is busy right now. Try again in a moment."}}\n\ndata: [DONE]\n\n',
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      );
+    };
+    const inside = await call(true);
+    assert.equal(inside.status, 200, 'a refusal inside the stream is not the caller\'s problem either');
+    assert.match(await inside.text(), /"content":"ok"/, 'and the retried answer arrives');
+    assert.equal(posts, 2, 'asked exactly once more');
+
+    // --- A worker that never frees up must still fail, and stop trying.
+    let stuck = 0;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('deepai_code/models')) {
+        return new Response(JSON.stringify(CATALOG_PAYLOAD),
+          { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      stuck += 1;
+      return busy();
+    };
+    const failed = await call(false);
+    assert.equal(failed.status, 503, 'a model that stays busy is reported as busy');
+    assert.equal(stuck, 4, 'after the first attempt and three more, not forever');
+    const body = await failed.json();
+    assert.match(body.error.message, /busy/i, 'and the message says what happened');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 await checkAsync('a 400 on a request carrying an image is retried as text', async () => {
   /*
    * Reported live: attaching an image always failed with
