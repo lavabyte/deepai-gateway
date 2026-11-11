@@ -3936,6 +3936,28 @@ await checkAsync('the reasoning effort reaches DeepAI however the caller spells 
     await send({});
     assert.equal(upstreamBody.reasoning_effort, undefined,
       'an absent effort must not become a guess');
+
+    /*
+     * "off" is a switch, not a level. Reported live: with effort on off the answer still
+     * carried thinking. `reasoning_effort: "none"` selects a level the model does not have
+     * for this purpose, and a model that always thinks reads it as "think anyway".
+     *
+     * The DeepAI Code app says what turns it off (`thinkingFormat: "deepseek"`):
+     *   params.thinking = { type: "disabled" }
+     * so that is what is sent, and no effort field with it.
+     */
+    for (const off of ['off', 'none', 'OFF', '  None  ']) {
+      await send({ reasoning_effort: off });
+      assert.deepEqual(upstreamBody.thinking, { type: 'disabled' },
+        `${JSON.stringify(off)} must disable thinking on the wire`);
+      assert.equal(upstreamBody.reasoning_effort, undefined,
+        'and must not also carry a level');
+    }
+
+    // A level that thinks enables it explicitly, which is what the app does too.
+    await send({ reasoning_effort: 'high' });
+    assert.deepEqual(upstreamBody.thinking, { type: 'enabled' });
+    assert.equal(upstreamBody.reasoning_effort, 'high');
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));

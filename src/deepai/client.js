@@ -70,7 +70,26 @@ export async function* streamChatCompletion(params) {
   if (Number.isFinite(params.temperature)) body.temperature = params.temperature;
   if (Number.isFinite(params.topP)) body.top_p = params.topP;
   if (Array.isArray(params.stop) && params.stop.length > 0) body.stop = params.stop;
-  if (typeof params.reasoningEffort === 'string' && params.reasoningEffort !== '') {
+  /*
+   * Turning thinking off is not an effort level on this wire, it is a switch.
+   *
+   * The DeepAI Code app shows what the field is for: when reasoning is off it sends no
+   * `reasoning_effort` and no `reasoning` at all, which lets the model fall back to its own
+   * default - and their default thinks. So "off" has to be said explicitly, and
+   * `reasoning_effort: "none"` is not the way it is said: the effort field selects a level,
+   * and a model that always thinks treats an unknown or absent level as "think anyway".
+   *
+   * Measured from the app's own source (`thinkingFormat: "deepseek"` branch):
+   *
+   *   if (options?.reasoningEffort) params.thinking = { type: "enabled" };
+   *   else if (model.thinkingLevelMap?.off !== null) params.thinking = { type: "disabled" };
+   *
+   * `thinking: { type: "disabled" }` is what actually stops it.
+   */
+  if (params.reasoningEffort === 'none') {
+    body.thinking = { type: 'disabled' };
+  } else if (typeof params.reasoningEffort === 'string' && params.reasoningEffort !== '') {
+    body.thinking = { type: 'enabled' };
     body.reasoning_effort = params.reasoningEffort;
   }
 
@@ -174,7 +193,13 @@ export async function* streamResponsesCompletion(params) {
     body.tools = tools;
     body.tool_choice = 'auto';
   }
-  if (typeof params.reasoningEffort === 'string' && params.reasoningEffort !== '') {
+  /*
+   * `none` stays a level on the Responses wire - it is a switch in that dialect - and the
+   * summary is not requested for it, because there is nothing to summarise.
+   */
+  if (params.reasoningEffort === 'none') {
+    body.reasoning = { effort: 'none' };
+  } else if (typeof params.reasoningEffort === 'string' && params.reasoningEffort !== '') {
     body.reasoning = { effort: params.reasoningEffort, summary: 'auto' };
     body.include = ['reasoning.encrypted_content'];
   }
