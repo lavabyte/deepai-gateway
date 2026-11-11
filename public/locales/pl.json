@@ -180,7 +180,7 @@
   "metric.modelsAvailable": "Dostępne modele",
   "metric.owner": "Właściciel",
   "metric.perWindow": "na {window}",
-  "metric.rate": "Kredyty/req",
+  "metric.rate": "Kredyty / req",
   "metric.reasoning": "Rozumowanie",
   "metric.requests": "Żądania",
   "metric.requestsCount": {

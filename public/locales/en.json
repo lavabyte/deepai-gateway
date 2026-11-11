@@ -171,7 +171,7 @@
   "metric.modelsAvailable": "Models available",
   "metric.owner": "Owner",
   "metric.perWindow": "per {window}",
-  "metric.rate": "Credits/req",
+  "metric.rate": "Credits / req",
   "metric.reasoning": "Reasoning",
   "metric.requests": "Requests",
   "metric.requestsCount": {
