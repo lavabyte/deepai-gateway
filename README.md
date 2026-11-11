@@ -619,6 +619,21 @@ exactly as the server does.
 The sign-in the gateway uses is the one the Code app uses: DeepAI's own page, and the
 `desktop_auth` exchange behind it for an `api_key` - see [Signing in](#signing-in).
 
+## Reasoning levels
+
+`reasoning_effort` (and `thinking_level`, `reasoning.effort`, `thinking.effort`) is mapped
+onto the value DeepAI takes, the way the DeepAI Code app maps it: `none|off` becomes `none`,
+`minimal` becomes `low`, and `high|xhigh|max` collapse onto `high`.
+
+**DeepAI answers with its reasoning whatever level it is sent.** That was measured on every
+level - `off` and `none` included - and on a request with no level at all: the amount of
+reasoning is the same in each case. So the request still carries the level for a backend that
+honours it, and the answer is filtered here: when the caller asked for `none`, the reasoning
+is dropped where it is read, and never reaches the stream, the response body or the usage row.
+
+`LOG_UPSTREAM_REASONING=1` logs the reasoning fields of the outgoing request, which is how
+"we never sent it" is told apart from "they ignore it". No prompt and no key is logged.
+
 ## Images
 
 An image is only sent to a model that can actually take one, and there are two ways a model

@@ -3917,8 +3917,10 @@ await checkAsync('the reasoning effort reaches DeepAI however the caller spells 
       if (!String(url).includes('api.deepai.org')) return realFetch(url, init);
       if (String(url).includes('deepai_code/models')) return catalog();
       upstreamBody = JSON.parse(init.body);
-      return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-        { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      // The backend reasons whatever it is sent - which is the reported behaviour.
+      return new Response('data: {"choices":[{"delta":{"reasoning_content":"thinking..."}}]}\n\n'
+        + 'data: {"choices":[{"delta":{"content":"the answer"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream' } });
     };
 
     for (const [field, wire] of [['reasoning_effort', 'high'], ['thinking_level', 'medium'],
@@ -3950,14 +3952,52 @@ await checkAsync('the reasoning effort reaches DeepAI however the caller spells 
       await send({ reasoning_effort: off });
       assert.deepEqual(upstreamBody.thinking, { type: 'disabled' },
         `${JSON.stringify(off)} must disable thinking on the wire`);
-      assert.equal(upstreamBody.reasoning_effort, undefined,
-        'and must not also carry a level');
+      // The effort field carries the level the app maps "off" onto. It used to be omitted
+      // here, which was wrong: the app sends it, and a backend that honours the field needs
+      // to be told.
+      assert.equal(upstreamBody.reasoning_effort, 'none',
+        'and the level the app uses for off');
     }
 
     // A level that thinks enables it explicitly, which is what the app does too.
     await send({ reasoning_effort: 'high' });
     assert.deepEqual(upstreamBody.thinking, { type: 'enabled' });
     assert.equal(upstreamBody.reasoning_effort, 'high');
+
+    /*
+     * And the level itself is sent the way the DeepAI Code app sends it.
+     *
+     * DeepAI is an OpenAI-format provider there with `thinkingLevelMap: { off: "none" }`, so
+     * its OpenAI branch applies and "off" is `reasoning_effort: "none"` - not the
+     * `thinking: { type: "disabled" }` this gateway sent for a while, which is that file's
+     * *deepseek* branch and does not apply here.
+     */
+    await send({ reasoning_effort: 'off' });
+    assert.equal(upstreamBody.reasoning_effort, 'none',
+      'the app maps off onto the effort field, not onto a thinking switch');
+
+    /*
+     * DeepAI answers with reasoning whatever level it is sent - measured on every level,
+     * `off` and `none` included, and with no level at all. So a caller who asked for none
+     * gets none: the reasoning is dropped where it is read, before it can reach the stream,
+     * the response body or the usage row. Without this, `off` changes the request and not
+     * the answer, which is what was reported.
+     */
+    for (const [effort, wantsReasoning] of [['off', false], ['none', false], ['high', true]]) {
+      await send({ reasoning_effort: effort });
+      assert.equal(upstreamBody.reasoning_effort, effort === 'off' ? 'none' : effort);
+      const response = await realFetch(`${base}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${key.plaintext}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'glm-5.3-flash', stream: false,
+          messages: [{ role: 'user', content: 'hi' }], reasoning_effort: effort }),
+      });
+      const payload = await response.json();
+      const message = payload.choices?.[0]?.message ?? {};
+      assert.equal(Boolean(message.reasoning_content), wantsReasoning,
+        `effort ${effort} must ${wantsReasoning ? '' : 'not '}show reasoning`);
+      assert.equal(message.content, 'the answer', 'and the answer itself survives');
+    }
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));

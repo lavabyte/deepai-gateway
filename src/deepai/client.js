@@ -71,26 +71,28 @@ export async function* streamChatCompletion(params) {
   if (Number.isFinite(params.topP)) body.top_p = params.topP;
   if (Array.isArray(params.stop) && params.stop.length > 0) body.stop = params.stop;
   /*
-   * Turning thinking off is not an effort level on this wire, it is a switch.
+   * What DeepAI is sent for a reasoning level, taken from the app itself.
    *
-   * The DeepAI Code app shows what the field is for: when reasoning is off it sends no
-   * `reasoning_effort` and no `reasoning` at all, which lets the model fall back to its own
-   * default - and their default thinks. So "off" has to be said explicitly, and
-   * `reasoning_effort: "none"` is not the way it is said: the effort field selects a level,
-   * and a model that always thinks treats an unknown or absent level as "think anyway".
+   * DeepAI is an OpenAI-format provider there, with `thinkingLevelMap: { off: "none" }` and
+   * `supportsReasoningEffort` true, so the app's OpenAI branch is what applies:
    *
-   * Measured from the app's own source (`thinkingFormat: "deepseek"` branch):
+   *   if (options?.reasoningEffort) {
+   *     params.reasoning_effort = model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
+   *   } else if (model.reasoning) {
+   *     const offValue = model.thinkingLevelMap?.off;      // "none"
+   *     if (typeof offValue === "string") params.reasoning_effort = offValue;
+   *   }
    *
-   *   if (options?.reasoningEffort) params.thinking = { type: "enabled" };
-   *   else if (model.thinkingLevelMap?.off !== null) params.thinking = { type: "disabled" };
+   * So "off" is `reasoning_effort: "none"`, and there is no `thinking` object at all. An
+   * earlier revision here sent `thinking: { type: "disabled" }`, which is the *deepseek*
+   * branch of that same file and does not apply to this provider.
    *
-   * `thinking: { type: "disabled" }` is what actually stops it.
+   * `thinking` is sent as well, because it costs nothing and some backends read it. It is not
+   * what the app does, and it has been measured not to change DeepAI's answer.
    */
-  if (params.reasoningEffort === 'none') {
-    body.thinking = { type: 'disabled' };
-  } else if (typeof params.reasoningEffort === 'string' && params.reasoningEffort !== '') {
-    body.thinking = { type: 'enabled' };
+  if (typeof params.reasoningEffort === 'string' && params.reasoningEffort !== '') {
     body.reasoning_effort = params.reasoningEffort;
+    body.thinking = { type: params.reasoningEffort === 'none' ? 'disabled' : 'enabled' };
   }
 
   /*
