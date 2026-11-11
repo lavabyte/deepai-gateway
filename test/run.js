@@ -682,8 +682,8 @@ await checkAsync('free models are labelled and Premier are not', async () => {
 await checkAsync('rate labels price a request, which is how DeepAI bills', async () => {
   const models = await catalogFrom(CATALOG_PAYLOAD);
   assert.equal(rateLabel(findModel(models, 'glm-5.3-flash')), 'Unmetered');
-  assert.equal(rateLabel(findModel(models, 'glm-5.3')), '3 Credits/request');
-  assert.equal(rateLabel(findModel(models, 'gpt-6-astra')), '10 Credits/request');
+  assert.equal(rateLabel(findModel(models, 'glm-5.3')), '3 req');
+  assert.equal(rateLabel(findModel(models, 'gpt-6-astra')), '10 req');
   assert.equal(findModel(models, 'does-not-exist'), undefined, 'and an unknown id is nothing');
   // A price DeepAI did not send is unknown, never zero - a paid model must not read as free.
   assert.equal(rateLabel({ id: 'x', theosPerRequest: undefined }), 'Unknown');
@@ -1086,7 +1086,7 @@ await checkAsync('/v1/models carries modalities, reasoning levels and names', as
 
     const premier = payload.data.find((model) => model.id === 'glm-5.3');
     assert.equal(premier.tier, 'premier');
-    assert.equal(premier.rate_label, '3 Credits/request');
+    assert.equal(premier.rate_label, '3 req');
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));
@@ -1105,7 +1105,7 @@ await checkAsync('publicModel reports the price DeepAI charges, and the levels i
   assert.equal(model.reasoningLevels.find((level) => level.id === 'high').name, 'High');
   assert.ok(!('creditsPerSecond' in model), 'no per-second rate is invented');
   assert.equal(model.theosPerRequest, '3');
-  assert.equal(model.rateLabel, '3 Credits/request');
+  assert.equal(model.rateLabel, '3 req');
 
   const free = publicModel(findModel(models, 'glm-5.3-flash'));
   assert.equal(free.rateLabel, 'Unmetered');

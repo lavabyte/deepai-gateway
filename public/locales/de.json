@@ -171,7 +171,7 @@
   "metric.modelsAvailable": "Verfügbare Modelle",
   "metric.owner": "Inhaber",
   "metric.perWindow": "pro {window}",
-  "metric.rate": "Preis",
+  "metric.rate": "Credits/req",
   "metric.reasoning": "Reasoning",
   "metric.requests": "Anfragen",
   "metric.requestsCount": {

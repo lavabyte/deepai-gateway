@@ -41,6 +41,11 @@ export function displayName(model) {
  * for one completion. The per-second rates this used to read were replaced by the provider
  * and the field no longer exists, so the label follows the price that is actually charged.
  *
+ * The unit is short - `3 req`, not `3 Credits/request` - because the column it sits in is
+ * already headed with the unit, and the long form pushed the row wider than the table could
+ * hold. The column header carries `Credits`, so the number alone would be ambiguous; `req`
+ * says it is per request.
+ *
  * The `level` argument is kept for the call sites that name a thinking level: the price is
  * the same at every level now, and a caller passing one still gets the right answer.
  *
@@ -53,7 +58,7 @@ export function rateLabel(model, level) {
   const value = Number(model?.theosPerRequest);
   if (!Number.isFinite(value)) return 'Unknown';
   if (value === 0) return 'Unmetered';
-  return `${value} Credits/request`;
+  return `${value} req`;
 }
 
 /**

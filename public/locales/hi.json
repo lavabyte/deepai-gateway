@@ -165,7 +165,7 @@
   "metric.modelsAvailable": "उपलब्ध मॉडल",
   "metric.owner": "स्वामी",
   "metric.perWindow": "प्रति {window}",
-  "metric.rate": "दर",
+  "metric.rate": "क्रेडिट/req",
   "metric.reasoning": "तर्क",
   "metric.requests": "अनुरोध",
   "metric.requestsCount": "{formatted} अनुरोध",
