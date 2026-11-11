@@ -627,9 +627,12 @@ onto the value DeepAI takes, the way the DeepAI Code app maps it: `none|off` bec
 
 **DeepAI answers with its reasoning whatever level it is sent.** That was measured on every
 level - `off` and `none` included - and on a request with no level at all: the amount of
-reasoning is the same in each case. So the request still carries the level for a backend that
-honours it, and the answer is filtered here: when the caller asked for `none`, the reasoning
-is dropped where it is read, and never reaches the stream, the response body or the usage row.
+reasoning is the same in each case. The level is still sent, for a backend that honours it.
+
+The reasoning is **passed through**, not hidden. A model's thinking is part of its answer, and
+a gateway that deleted it would be deciding what the caller may see - and would hide the very
+thing that explains a wrong result. `reasoning_content` reaches the client in the stream and in
+the response body, whatever level was asked for.
 
 `LOG_UPSTREAM_REASONING=1` logs the reasoning fields of the outgoing request, which is how
 "we never sent it" is told apart from "they ignore it". No prompt and no key is logged.

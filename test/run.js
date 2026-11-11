@@ -3978,12 +3978,11 @@ await checkAsync('the reasoning effort reaches DeepAI however the caller spells 
 
     /*
      * DeepAI answers with reasoning whatever level it is sent - measured on every level,
-     * `off` and `none` included, and with no level at all. So a caller who asked for none
-     * gets none: the reasoning is dropped where it is read, before it can reach the stream,
-     * the response body or the usage row. Without this, `off` changes the request and not
-     * the answer, which is what was reported.
+     * `off` and `none` included, and with no level at all. The gateway passes that through:
+     * the reasoner's own thinking is part of the answer, and hiding it would be the gateway
+     * deciding what the caller may see.
      */
-    for (const [effort, wantsReasoning] of [['off', false], ['none', false], ['high', true]]) {
+    for (const effort of ['off', 'none', 'high']) {
       await send({ reasoning_effort: effort });
       assert.equal(upstreamBody.reasoning_effort, effort === 'off' ? 'none' : effort);
       const response = await realFetch(`${base}/v1/chat/completions`, {
@@ -3994,10 +3993,108 @@ await checkAsync('the reasoning effort reaches DeepAI however the caller spells 
       });
       const payload = await response.json();
       const message = payload.choices?.[0]?.message ?? {};
-      assert.equal(Boolean(message.reasoning_content), wantsReasoning,
-        `effort ${effort} must ${wantsReasoning ? '' : 'not '}show reasoning`);
+      assert.equal(message.reasoning_content, 'thinking...',
+        `effort ${effort} must still show the reasoning DeepAI sent`);
       assert.equal(message.content, 'the answer', 'and the answer itself survives');
     }
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('a stream reaches the client as it arrives, not after it is complete', async () => {
+  /*
+   * A gateway that reads the whole upstream answer and then writes it in one go still
+   * produces a correct body - and is useless for streaming, because the caller waits for the
+   * slowest token before seeing the first. The only way to tell the two apart from outside is
+   * when the pieces arrive, so that is what is measured here.
+   *
+   * The upstream sends five chunks 120 ms apart. If they are relayed as they come, the
+   * arrival times spread over roughly that interval; if they are buffered, they all land
+   * together at the end.
+   */
+  const { openDatabase } = await import('../src/db.js');
+  const { saveAccount } = await import('../src/store.js');
+  const { generateKey } = await import('../src/keys.js');
+  const { createApp } = await import('../server.js');
+
+  const db = openDatabase(':memory:');
+  saveAccount(db, { apiKey: 'upstream', username: 'stream-user', isPro: false });
+  const key = generateKey();
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'stream-user')`).run(key.hash);
+
+  const realFetch = globalThis.fetch;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const app = createApp(db, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    globalThis.fetch = async (url, init) => {
+      if (!String(url).includes('api.deepai.org')) return realFetch(url, init);
+      // The handler reads the catalog before it resolves a model.
+      if (String(url).includes('deepai_code/models')) {
+        return new Response(JSON.stringify(CATALOG_PAYLOAD),
+          { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      // Five deltas, each held back by 120 ms, then the terminator.
+      const stream = new ReadableStream({
+        async start(controller) {
+          const encoder = new TextEncoder();
+          for (let i = 1; i <= 5; i += 1) {
+            await sleep(120);
+            controller.enqueue(encoder.encode(`data: {"choices":[{"delta":{"content":"part${i} "}}]}\n\n`));
+          }
+          controller.enqueue(encoder.encode('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'));
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    };
+
+    const started = Date.now();
+    const response = await realFetch(`${base}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${key.plaintext}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'glm-5.3-flash', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type') ?? '', /text\/event-stream/,
+      'a stream is announced as one');
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const arrivals = [];
+    let buffer = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() ?? '';
+      for (const part of parts) {
+        if (!part.startsWith('data:') || part.includes('[DONE]')) continue;
+        try {
+          const payload = JSON.parse(part.slice(5));
+          if (payload.choices?.[0]?.delta?.content) arrivals.push(Date.now() - started);
+        } catch { /* a partial line, ignored */ }
+      }
+    }
+
+    assert.equal(arrivals.length, 5, 'every delta arrived');
+    const spread = arrivals.at(-1) - arrivals[0];
+    /*
+     * Buffered relaying puts the whole spread at zero: every delta lands in the same tick,
+     * once the upstream has finished. Relayed streaming keeps roughly the upstream cadence,
+     * so the first and last are 4 x 120 ms apart. The threshold sits far from both.
+     */
+    assert.ok(spread > 300,
+      `the deltas must arrive over time, not together (spread ${spread}ms)`);
+    assert.ok(arrivals[0] < 400,
+      `the first delta must not wait for the last (first at ${arrivals[0]}ms)`);
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));

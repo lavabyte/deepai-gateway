@@ -180,16 +180,6 @@ async function handleChatCompletion(db, req, res) {
     ? withoutImages(body.messages)
     : body.messages;
 
-  /*
-   * Whether the caller asked for no reasoning at all.
-   *
-   * DeepAI answers with its reasoning regardless of the level it is sent - measured on every
-   * level, `off` and `none` included, and on a request with no level at all. The header is
-   * still sent, because a backend that does honour it will; but the answer is filtered when
-   * the caller asked not to see it, which is the only part this gateway can control.
-   */
-  const askedForNoReasoning = effortOf(requestedEffort(body)) === 'none';
-
   const params = {
     apiKey: account.apiKey,
     model: upstreamModel,
@@ -251,12 +241,8 @@ async function handleChatCompletion(db, req, res) {
         continue;
       }
       if (event.type === 'reasoning') {
-        // Dropped at the source when the caller asked for none: it never reaches the
-        // stream, the response body, or the usage row.
-        if (!askedForNoReasoning) {
-          reasoning.push(event.text);
-          if (write !== undefined) write({ reasoning_content: event.text });
-        }
+        reasoning.push(event.text);
+        if (write !== undefined) write({ reasoning_content: event.text });
         continue;
       }
       if (event.type === 'tool-start') {
