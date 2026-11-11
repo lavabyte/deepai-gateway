@@ -4101,6 +4101,91 @@ await checkAsync('a stream reaches the client as it arrives, not after it is com
   }
 });
 
+await checkAsync('a 400 on a request carrying an image is retried as text', async () => {
+  /*
+   * Reported live: attaching an image always failed with
+   *
+   *   400 DeepAI Code HTTP 400: The model provider rejected this request. Try reducing the
+   *   conversation or attachments, or choose another model.
+   *
+   * Measured against the deployed gateway with the caller's own key: the same prompt as text
+   * is answered by every model, and *no* model accepts an image - five shapes of image part,
+   * four models, every one a 400. So the catalog advertises `image` and the backend cannot
+   * take one, exactly as the app's own comment says ("A backend may reject images even when
+   * its catalog advertises vision").
+   *
+   * Nothing here can make DeepAI accept the image. What it can do is not leave the caller
+   * with an error: the prompt is asked again as text, and the model is remembered so the next
+   * request never carries an image at all.
+   */
+  const multimodal = await import('../src/deepai/multimodal.js');
+  multimodal.forgetRejections();
+
+  const { openDatabase } = await import('../src/db.js');
+  const { saveAccount } = await import('../src/store.js');
+  const { generateKey } = await import('../src/keys.js');
+  const { createApp } = await import('../server.js');
+
+  const db = openDatabase(':memory:');
+  saveAccount(db, { apiKey: 'upstream', username: 'img400-user', isPro: false });
+  const key = generateKey();
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'img400-user')`).run(key.hash);
+
+  const realFetch = globalThis.fetch;
+  const sent = [];
+  const app = createApp(db, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const ask = () => realFetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key.plaintext}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'glm-5.3-flash', stream: false, messages: [{ role: 'user', content: [
+      { type: 'text', text: 'what colour is it?' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,AA' } },
+    ] }] }),
+  }).then((response) => response.json());
+
+  try {
+    globalThis.fetch = async (url, init) => {
+      if (!String(url).includes('api.deepai.org')) return realFetch(url, init);
+      if (String(url).includes('deepai_code/models')) {
+        return new Response(JSON.stringify(CATALOG_PAYLOAD),
+          { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      const body = JSON.parse(init.body);
+      const hasImage = body.messages.some((message) => Array.isArray(message.content)
+        && message.content.some((part) => part.type === 'image_url'));
+      sent.push(hasImage ? 'image' : 'text');
+      if (hasImage) {
+        // What the live gateway returns for an image, verbatim.
+        return new Response(JSON.stringify({ error: {
+          message: 'The model provider rejected this request. Try reducing the conversation or attachments, or choose another model.',
+        } }), { status: 400, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('data: {"choices":[{"delta":{"content":"red"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    };
+
+    // The first request is retried, and the caller sees the answer rather than the 400.
+    const first = await ask();
+    assert.deepEqual(sent, ['image', 'text'], 'the request is retried without the image');
+    assert.equal(first.error, undefined, `the caller gets an answer, not the 400: ${JSON.stringify(first.error)}`);
+    assert.equal(first.choices?.[0]?.message?.content, 'red');
+
+    // The model is known to refuse images now, so nothing is sent with one again.
+    sent.length = 0;
+    const second = await ask();
+    assert.deepEqual(sent, ['text'], 'a remembered refusal is filtered before the request');
+    assert.equal(second.choices?.[0]?.message?.content, 'red');
+  } finally {
+    globalThis.fetch = realFetch;
+    multimodal.forgetRejections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 await checkAsync('the account is polled only while the tab is on screen', async () => {
   /*
    * A dashboard left open in a background tab used to ask for the account every minute for as

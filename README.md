@@ -654,6 +654,17 @@ The gateway has no turn to remember it in, so the refusal is remembered across r
 text gets an answer instead of that error - you only pay one extra round trip, once per model
 per process. Every later request for that model is filtered before it is sent.
 
+Two refusals are recognised, because DeepAI has answered with both and neither names the
+image as its cause: the worker's `Received multimodal data but multimodal processing is not
+enabled`, and a plain `HTTP 400` whose body says only "The model provider rejected this
+request. Try reducing the conversation or attachments, or choose another model."
+
+**Measured, 2026-11-11:** no model on this deployment accepts an image. The same prompt as
+text is answered by every model that was tried; an image produces that 400 with five
+different shapes of image part and four different models that advertise `image` in the
+catalog. So images do not work here, and the retry is what keeps that from being an error in
+the caller's face.
+
 A reply with no text, no reasoning and no tool call is reported as `502 empty_completion`
 whatever the model, because "completed, no content" is not an answer. `deepai-cyber` is
 exempt: it is a local model whose replies are not expected to carry text.

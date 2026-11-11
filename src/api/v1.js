@@ -313,8 +313,20 @@ async function handleChatCompletion(db, req, res) {
    * question asked as text is answered normally. The caller gets that answer instead of an
    * error about a flag on somebody else's server, and the model is remembered as unable so
    * the next request is filtered before it is sent.
+   *
+   * Two refusals are recognised, because DeepAI has answered with both and neither names the
+   * image as the cause:
+   *
+   *  - the worker's own `Received multimodal data but multimodal processing is not enabled`;
+   *  - a plain `HTTP 400` whose body says only "The model provider rejected this request. Try
+   *    reducing the conversation or attachments, or choose another model." Measured against a
+   *    live gateway, every image shape and every model that advertises `image` produces this,
+   *    while the same prompt as text is answered - so on a request that carried an image, a
+   *    400 is the image.
    */
-  if (failure !== undefined && imageCount > 0 && isMultimodalRejection(failure.message)) {
+  const imageRefused = failure !== undefined && imageCount > 0
+    && (isMultimodalRejection(failure.message) || failure.status === 400);
+  if (imageRefused) {
     noteMultimodalRejection(upstreamModel);
     text.length = 0;
     reasoning.length = 0;
