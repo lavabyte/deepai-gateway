@@ -4458,6 +4458,98 @@ await checkAsync('a 400 on a request carrying an image is retried as text', asyn
   }
 });
 
+await checkAsync('the log says what happened to an image, and why', async () => {
+  /*
+   * An image that never reached the model and an image the model saw but ignored look
+   * identical from the answer: both come back as text that does not mention it. Without a
+   * line saying which, "images do not work" cannot be diagnosed from outside - which is
+   * exactly the question asked, and the reason this exists.
+   *
+   * The four cases are kept apart because each has a different fix: a model the catalog gives
+   * no vision is DeepAI's decision, `refused-recently` is this gateway's own memory (it
+   * expires), `sent` means the image left here and anything after is upstream.
+   */
+  const multimodal = await import('../src/deepai/multimodal.js');
+  multimodal.forgetRejections();
+
+  const { openDatabase } = await import('../src/db.js');
+  const { saveAccount } = await import('../src/store.js');
+  const { generateKey } = await import('../src/keys.js');
+  const { createApp } = await import('../server.js');
+
+  const db = openDatabase(':memory:');
+  saveAccount(db, { apiKey: 'upstream', username: 'img-log', isPro: false });
+  const key = generateKey();
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'img-log')`).run(key.hash);
+
+  const realFetch = globalThis.fetch;
+  const lines = [];
+  const app = createApp(db, { log: (message) => lines.push(message), logRequests: true });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const ask = (model, withImage) => realFetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key.plaintext}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model, stream: false, messages: [{ role: 'user', content: withImage
+      ? [{ type: 'text', text: 'x' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AA' } }]
+      : 'x' }] }),
+  });
+
+  try {
+    globalThis.fetch = async (url, init) => {
+      if (!String(url).includes('api.deepai.org')) return realFetch(url, init);
+      // Two models: one the catalog gives vision, one it does not.
+      if (String(url).includes('deepai_code/models')) {
+        return new Response(JSON.stringify({ models: [
+          { id: 'sees-images', name: 'S', reasoning: true, input: ['text', 'image'],
+            contextWindow: 100000, maxTokens: 1000, premier: false, theosPerRequest: '0' },
+          { id: 'text-only', name: 'T', reasoning: true, input: ['text'],
+            contextWindow: 100000, maxTokens: 1000, premier: false, theosPerRequest: '0' },
+        ] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    };
+
+    const noteOf = (model) => {
+      const line = lines.filter((entry) => entry.includes(`v1 chat/completions ${model}`)).at(-1) ?? '';
+      // Everything from `images=` to the end of the line: the reason may contain a hyphen.
+      const at = line.indexOf('images=');
+      return at === -1 ? `no images= in: ${line}` : line.slice(at);
+    };
+
+    // No image at all.
+    await ask('sees-images', false);
+    assert.equal(noteOf('sees-images'), 'images=0');
+
+    // An image, and a model the catalog says has vision: it is sent.
+    await ask('sees-images', true);
+    assert.equal(noteOf('sees-images'), 'images=1 sent',
+      'a model with vision gets the image, and the log says so');
+
+    // A model the catalog gives no vision: dropped before the request, and said why.
+    await ask('text-only', true);
+    assert.equal(noteOf('text-only'), 'images=1 dropped:catalog');
+
+    // A model that refused recently: dropped, with the other reason.
+    multimodal.noteMultimodalRejection('sees-images');
+    await ask('sees-images', true);
+    assert.equal(noteOf('sees-images'), 'images=1 dropped:refused-recently',
+      'a remembered refusal is named as such, not confused with the catalog');
+
+    // And the memory expiring puts the image back on the wire.
+    multimodal.forgetRejections();
+    await ask('sees-images', true);
+    assert.equal(noteOf('sees-images'), 'images=1 sent', 'forgetting a refusal restores the image');
+  } finally {
+    globalThis.fetch = realFetch;
+    multimodal.forgetRejections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 await checkAsync('the account is polled only while the tab is on screen', async () => {
   /*
    * A dashboard left open in a background tab used to ask for the account every minute for as

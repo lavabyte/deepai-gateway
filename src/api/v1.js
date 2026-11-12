@@ -216,10 +216,29 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * reaches the model.
    */
   const imageCount = countImages(body.messages);
-  const imagesSupported = acceptsImages(model) && !rejectsImages(upstreamModel);
+  const catalogAcceptsImages = acceptsImages(model);
+  const recentlyRefused = imageCount > 0 && catalogAcceptsImages && rejectsImages(upstreamModel);
+  const imagesSupported = catalogAcceptsImages && !recentlyRefused;
   const messages = imageCount > 0 && !imagesSupported
     ? withoutImages(body.messages)
     : body.messages;
+
+  /*
+   * What happened to the images, for the log.
+   *
+   * Without this an image that never reached the model and an image the model saw but
+   * ignored look exactly the same from the answer - both come back as text that does not
+   * mention it. The reason is kept separate because each has a different fix: `catalog` is
+   * DeepAI saying the model has no vision, `refused-recently` is this gateway's own memory
+   * of a refusal (it expires), and `sent` means the image left the gateway.
+   */
+  const imageNote = imageCount === 0
+    ? 'images=0'
+    : !catalogAcceptsImages
+      ? `images=${imageCount} dropped:catalog`
+      : recentlyRefused
+        ? `images=${imageCount} dropped:refused-recently`
+        : `images=${imageCount} sent`;
 
   const params = {
     apiKey: account.apiKey,
@@ -568,7 +587,8 @@ async function handleChatCompletion(db, req, res, options = {}) {
    */
   log?.(`v1 chat/completions ${upstreamModel} stream=${streamed ? 'yes' : 'no'} status=${status} `
     + `catalog=${catalogMs}ms first-event=${firstEventMs ?? '-'}ms first-token=${firstTokenMs ?? '-'}ms `
-    + `total=${Date.now() - startedAt}ms${waitedMs > 0 ? ` waited=${waitedMs}ms` : ''}`);
+    + `total=${Date.now() - startedAt}ms${waitedMs > 0 ? ` waited=${waitedMs}ms` : ''} `
+    + imageNote);
 
   record(db, {
     keyId: req.gatewayKey.id,

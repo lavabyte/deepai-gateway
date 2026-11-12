@@ -668,6 +668,21 @@ image as its cause: the worker's `Received multimodal data but multimodal proces
 enabled`, and a plain `HTTP 400` whose body says only "The model provider rejected this
 request. Try reducing the conversation or attachments, or choose another model."
 
+### What happens to an image, in one log field
+
+Every completion logs one line ending in `images=`, and it is the answer to "did the image go
+anywhere":
+
+| Log | Meaning |
+| --- | --- |
+| `images=0` | the request carried no image |
+| `images=1 sent` | the image left this gateway; anything after that is DeepAI's |
+| `images=1 dropped:catalog` | DeepAI's catalog does not give that model vision |
+| `images=1 dropped:refused-recently` | this model refused an image in the last 15 minutes |
+
+An image is never deleted from the caller's messages and never stored: the filtered list is a
+copy built for one call, so nothing is lost by raising a limit, restarting, or waiting.
+
 **Measured, 2026-11-11:** no model on this deployment accepts an image. The same prompt as
 text is answered by every model that was tried; an image produces that 400 with five
 different shapes of image part and four different models that advertise `image` in the
