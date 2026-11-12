@@ -659,23 +659,17 @@ await checkAsync('the catalog is whatever DeepAI answers, and is never a copy in
   });
   assert.ok(added.some((model) => model.id === 'brand-new-1'), 'a new model needs no code change');
   /*
-   * The window the catalog declares is clamped to what the wire serves.
+   * The window the catalog declares is passed through unchanged, because it is real.
    *
-   * Every model declares 1,048,576; measured live, 63,149 tokens pass intact and 63,372 are
-   * silently shortened - the middle cut out, `usage` reporting the shortened prompt as if
-   * nothing happened. A client planning compaction against a 1M window grows past the real
-   * limit, loses the middle, and is then told its context is ~2.8k tokens: usage looks stuck
-   * near zero and compaction never fires. Advertising the real window is what lets a client
-   * stay under it.
+   * A revision here once clamped it to 63,000 on the strength of a synthetic probe: one
+   * giant message of repeated filler collapsed at that size, so it looked like the wire's
+   * limit. Real conversations then disproved the clamp - a live session through this very
+   * gateway was served whole at 841,502 tokens, and the desktop app's provider at 1,033,848.
+   * The probe's collapse is a property of massively repeated content in one message, not of
+   * the wire; clamping on it made clients compact at a sixteenth of the window they had.
    */
-  const { INPUT_TOKEN_LIMIT } = await import('../src/deepai/catalog.js');
-  for (const model of models) {
-    assert.ok(model.contextWindow <= INPUT_TOKEN_LIMIT,
-      `${model.id} must not claim a window the wire will not serve`);
-  }
-  assert.equal(models[0].contextWindow, INPUT_TOKEN_LIMIT,
-    'a declared 1,048,576 becomes the served window');
-  // A model that genuinely has less keeps its own number: the clamp is an upper bound.
+  assert.equal(models[0].contextWindow, 1_048_576,
+    'the declared window is served, not clamped to a synthetic probe');
   assert.equal(added.find((model) => model.id === 'brand-new-1').contextWindow, 8_000,
     'a smaller declared window is its own limit');
 
@@ -1114,8 +1108,10 @@ await checkAsync('/v1/models carries modalities, reasoning levels and names', as
     assert.deepEqual(free.output_modalities, ['text']);
     assert.deepEqual(free.reasoning_levels, ['none', 'low', 'medium', 'high']);
     assert.ok(free.context_window > 0);
-  // The served window, not the catalog's claim (see `INPUT_TOKEN_LIMIT`).
-  assert.ok(free.context_window <= 63_000, 'the advertised window is one the wire serves');
+  // The declared window passes through: measured live, a request of 841,502 tokens was
+  // served whole through this gateway (see catalog.js).
+  assert.equal(free.context_window, 1_048_576,
+    'the advertised window is the one the wire serves');
     assert.ok(free.max_output_tokens > 0);
     assert.equal(free.theos_per_request, '0');
     assert.equal(free.rate_label, 'Unmetered');
