@@ -202,11 +202,20 @@ Report a security problem by opening an issue, or privately if the repository of
 
 ### Models
 
-**The model list is read from DeepAI on every request, and the gateway keeps no copy of it.**
-There is no embedded table and no cache: `GET /v1/models`, `/v1/models/details` and every
-completion ask DeepAI what exists right now, so a model added, renamed, re-priced or retired
-upstream is correct here immediately. The price shown is `theosPerRequest`, which is what
-DeepAI charges per call.
+**No model is written into the source.** The list exists only because DeepAI sent it, and the
+gateway re-reads it **every ten to twenty minutes, at a random point in that window**. The
+random window is deliberate: a fixed interval would put every deployment of this gateway in
+the same minute forever.
+
+`GET /v1/models`, `/v1/models/details`, the dashboard's model list and every completion answer
+from that kept list, so the panel and the API can never disagree about which models exist. A
+failed re-read keeps the previous list, logs it, and tries again on the next tick - it does
+not empty the catalog.
+
+`/v1/models` shows fewer models than `/api/models` for one reason that is not staleness: it is
+scoped to the key, and a key restricted to free models does not see the Premier ones.
+
+The price shown is `theosPerRequest`, which is what DeepAI charges per call.
 
 The environment has a network; that is the premise. It is not assumed to be up at the moment
 of a particular call, though, so a failure to read the catalog is answered plainly - `502` for

@@ -41,7 +41,16 @@ import {
   stopSequences,
 } from '../src/openai.js';
 import { completionsUsage, responsesUsage } from '../src/deepai/wire.js';
-import { CatalogUnavailable, REASONING_LEVELS, displayName, fetchCatalog, findModel, publicModel, rateLabel } from '../src/deepai/catalog.js';
+import {
+  CatalogUnavailable,
+  REASONING_LEVELS,
+  displayName,
+  fetchCatalog,
+  findModel,
+  publicModel,
+  rateLabel,
+  resetCatalog,
+} from '../src/deepai/catalog.js';
 import { findEventEnd } from '../src/deepai/wire.js';
 import {
   FALLBACK_PRICES,
@@ -92,7 +101,19 @@ function localeResponse(code = 'en') {
 }
 
 const results = [];
+/**
+ * Forget the kept model catalog.
+ *
+ * The catalog is now held in memory and refreshed on a schedule, so a case that stubs DeepAI
+ * would otherwise be answered from the list an earlier case left behind. Each case starts
+ * from nothing, which is also the state a freshly started gateway is in.
+ */
+function freshCatalog() {
+  resetCatalog();
+}
+
 function check(name, fn) {
+  freshCatalog();
   /*
    * A synchronous check cannot await an async test. The assertions inside still run, but
    * a failure becomes an unhandled rejection that kills the whole run - so instead of a
@@ -113,6 +134,7 @@ function check(name, fn) {
   }
 }
 async function checkAsync(name, fn) {
+  freshCatalog();
   try {
     await fn();
     results.push(`  ok   ${name}`);
@@ -4547,6 +4569,87 @@ await checkAsync('the log says what happened to an image, and why', async () => 
     globalThis.fetch = realFetch;
     multimodal.forgetRejections();
     await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('the catalog is read on a random ten to twenty minute schedule', async () => {
+  /*
+   * Asked for directly: the server reads the models every ten to twenty minutes, at a random
+   * point in that window, and everything answers from what was last read. No model is written
+   * into the source; the list exists only because DeepAI sent it.
+   *
+   * Random rather than fixed so that deployments of this gateway do not all read the catalog
+   * in the same minute forever.
+   */
+  const catalog = await import('../src/deepai/catalog.js');
+  const realFetch = globalThis.fetch;
+  const realSetTimeout = globalThis.setTimeout;
+  let reads = 0;
+  let payloadCount = 1;
+
+  globalThis.fetch = async (url, init) => {
+    if (!String(url).includes('deepai_code/models')) return realFetch(url, init);
+    reads += 1;
+    const models = Array.from({ length: payloadCount }, (_, index) => ({
+      id: `model-${index}`, name: `Model ${index}`, reasoning: true, input: ['text'],
+      contextWindow: 1000, maxTokens: 100, premier: false, theosPerRequest: '0',
+    }));
+    return new Response(JSON.stringify({ models }),
+      { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    // --- One read shared by every caller, and the rest answer from memory.
+    const first = await Promise.all([catalog.ensureCatalog(), catalog.ensureCatalog(), catalog.ensureCatalog()]);
+    assert.equal(reads, 1, 'concurrent callers share one read');
+    assert.equal(first[0].length, 1);
+    assert.equal(catalog.catalogSnapshot().length, 1, 'and it is kept');
+    await catalog.ensureCatalog();
+    assert.equal(reads, 1, 'a later call answers from the kept copy, not a new read');
+    assert.ok(catalog.catalogAge() >= 0, 'and its age is known');
+
+    /*
+     * --- The window itself.
+     *
+     * The wait is a pure function of the random source, so the rule is checked without
+     * pretending to be the clock - and without stubbing `setTimeout`, which undici also uses.
+     */
+    const TEN = 10 * 60_000;
+    const TWENTY = 20 * 60_000;
+    const delayAt = (r) => catalog.nextRefreshDelay({ minMs: TEN, maxMs: TWENTY, random: () => r });
+    assert.equal(delayAt(0), TEN, 'the window starts at ten minutes');
+    assert.equal(delayAt(1), TWENTY, 'and ends at twenty');
+    assert.equal(delayAt(0.5), TEN + (TWENTY - TEN) / 2, 'halfway is halfway');
+    for (let i = 0; i <= 100; i += 1) {
+      const delay = delayAt(i / 100);
+      assert.ok(delay >= TEN && delay <= TWENTY, `a delay must stay inside the window, saw ${delay}`);
+    }
+    // Different points, not one fixed value: that is what keeps deployments out of step.
+    assert.ok(new Set([0.1, 0.4, 0.7, 0.95].map(delayAt)).size === 4,
+      'the random source moves the read inside the window');
+    // A default with nothing configured still lands in the documented window.
+    for (const r of [0, 0.33, 0.99]) {
+      const delay = catalog.nextRefreshDelay({ random: () => r });
+      assert.ok(delay >= TEN && delay <= TWENTY, `the default window is ten to twenty, saw ${delay}`);
+    }
+
+    // --- And the schedule starts one, stopping cleanly.
+    const stop = catalog.startCatalogRefresh({ log: () => {} });
+    assert.equal(typeof stop, 'function', 'starting returns something that stops it');
+    stop();
+
+    // --- A failed refresh keeps the list that was correct a moment ago.
+    payloadCount = 2;
+    assert.equal(await catalog.refreshCatalog({ log: () => {} }), true);
+    assert.equal(catalog.catalogSnapshot().length, 2, 'a good read replaces the list');
+    globalThis.fetch = async () => { throw new Error('getaddrinfo ENOTFOUND api.deepai.org'); };
+    assert.equal(await catalog.refreshCatalog({ log: () => {} }), false, 'a failed read is reported');
+    assert.equal(catalog.catalogSnapshot().length, 2,
+      'and does not empty a catalog that was working');
+  } finally {
+    globalThis.fetch = realFetch;
+    globalThis.setTimeout = realSetTimeout;
+    catalog.stopCatalogRefresh();
   }
 });
 

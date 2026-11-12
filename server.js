@@ -19,6 +19,7 @@ import { openDatabase } from './src/db.js';
 import { adminRouter } from './src/api/admin.js';
 import { createCallbackLogin } from './src/deepai/callback-login.js';
 import { installMachineIdFromDatabase } from './src/deepai/machine.js';
+import { startCatalogRefresh } from './src/deepai/catalog.js';
 import { installUpstreamPool } from './src/deepai/transport.js';
 import { initPricing, pricingStatus, startPricingRefresh } from './src/pricing.js';
 import { v1Router } from './src/api/v1.js';
@@ -27,6 +28,10 @@ import { listAccounts, clearSessionCookie, destroySession, forgetInactiveAccount
 import { DEFAULT_MAX_KEYS, parseMaxKeys, totalKeyCount } from './src/keys.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+
+/** The window in which the model catalog is re-read, chosen at random between the two. */
+const CATALOG_REFRESH_MIN_MS = 10 * 60_000;
+const CATALOG_REFRESH_MAX_MS = 20 * 60_000;
 
 /** Resolve runtime configuration. */
 export function config(env = process.env) {
@@ -260,6 +265,19 @@ export function start(overrides = {}) {
   installUpstreamPool({ log });
 
   const app = createApp(db, settings);
+
+  /*
+   * Keep the model catalog current on a random ten to twenty minute schedule.
+   *
+   * Random rather than fixed so that two deployments of this gateway do not read it in the
+   * same minute forever. The first read happens right away; a failed one keeps the previous
+   * list and is logged rather than emptying the catalog.
+   */
+  startCatalogRefresh({
+    log,
+    minMs: CATALOG_REFRESH_MIN_MS,
+    maxMs: CATALOG_REFRESH_MAX_MS,
+  });
 
   // Reference prices come from OpenRouter and are cached on disk, so the
   // dashboard shows real market rates rather than a frozen table.

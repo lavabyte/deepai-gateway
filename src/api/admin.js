@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto';
 import {
   checkKey,
 } from '../deepai/account.js';
-import { fetchCatalog, publicModel } from '../deepai/catalog.js';
+import { ensureCatalog, publicModel } from '../deepai/catalog.js';
 import {
   DEFAULT_MAX_KEYS,
   WINDOWS,
@@ -444,8 +444,9 @@ export function adminRouter(db, runtime) {
   router.get('/models', allowKeyIdentity(db), async (req, res) => {
     try {
       const owner = req.account.username;
-      // Read from DeepAI on every call; the gateway keeps no copy of the catalog.
-      const models = await fetchCatalog(AbortSignal.timeout(10_000));
+      // The same copy the scheduled refresh keeps current, so the dashboard and /v1/models
+      // can never disagree about which models exist.
+      const models = await ensureCatalog(AbortSignal.timeout(10_000));
       const monthSince = startOfMonth();
       const usageByModel = new Map(byModel(db, monthSince, owner).map((item) => [item.model, item]));
       const allUsage = new Map(byModel(db, 0, owner).map((item) => [item.model, item]));

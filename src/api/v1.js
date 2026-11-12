@@ -17,7 +17,7 @@ import {
   CatalogUnavailable,
   REASONING_LEVELS,
   displayName,
-  fetchCatalog,
+  ensureCatalog,
   findModel,
   publicModel,
   rateLabel,
@@ -87,9 +87,9 @@ export function v1Router(db, options = {}) {
   // models it is allowed to call.
   router.get('/models', authenticate(db), async (req, res) => {
     try {
-      // Read on every call: there is no cache and no embedded list, so a model exists
-      // because DeepAI says so now.
-      const models = await fetchCatalog(AbortSignal.timeout(10_000));
+      // Served from the copy the scheduled refresh keeps current. It is read from DeepAI
+      // every ten to twenty minutes, at a random point in that window.
+      const models = await ensureCatalog(AbortSignal.timeout(10_000));
       const visible = models.filter((model) => allowsModel(req.gatewayKey, model.id));
       res.json({
         object: 'list',
@@ -126,7 +126,7 @@ export function v1Router(db, options = {}) {
   // A richer view used by the dashboard's Models tab. Same scoping rules.
   router.get('/models/details', authenticate(db), async (req, res) => {
     try {
-      const models = await fetchCatalog(AbortSignal.timeout(10_000));
+      const models = await ensureCatalog(AbortSignal.timeout(10_000));
       const visible = models.filter((model) => allowsModel(req.gatewayKey, model.id));
       res.json({ object: 'list', data: visible.map(publicModel) });
     } catch (error) {
@@ -181,7 +181,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
   let models;
   const catalogStart = Date.now();
   try {
-    models = await fetchCatalog(AbortSignal.timeout(10_000));
+    models = await ensureCatalog(AbortSignal.timeout(10_000));
   } catch (error) {
     return apiError(res, 503, catalogMessage(error), 'catalog_unavailable', 'api_error');
   }

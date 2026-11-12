@@ -160,6 +160,168 @@ export async function fetchCatalog(signal) {
   return models;
 }
 
+/*
+ * The catalog the gateway is serving, refreshed on its own schedule.
+ *
+ * Reading it on every request made the list as fresh as possible and cost a round trip on
+ * every call - measured at 0.9 s cold and 0.2 s on a kept-alive connection, on a path that had
+ * nothing else to do with the request. The operator asked for the opposite arrangement: read
+ * it every ten to twenty minutes, at a random point in that window, and answer everything
+ * from what was last read. No model is written into this file; the list exists only because
+ * DeepAI sent it.
+ *
+ * The random window matters for more than tidiness. A fixed interval across every deployment
+ * of this gateway would put them all in the same minute, and DeepAI would see a spike of
+ * catalog reads once every ten minutes and nothing in between.
+ */
+let served = null;
+let servedAt = 0;
+let loading = null;
+let timer = null;
+
+/** The catalog last read from DeepAI, or null before the first read. */
+export function catalogSnapshot() {
+  return served;
+}
+
+/**
+ * Forget the kept catalog, so the next call reads one.
+ *
+ * For tests, which stub DeepAI per case and must not inherit the list an earlier case left
+ * behind. A deployment has no reason to call it: the schedule replaces the list on its own.
+ */
+export function resetCatalog() {
+  served = null;
+  servedAt = 0;
+  loading = null;
+}
+
+/** How old the served catalog is, in ms, or null when there is none. */
+export function catalogAge() {
+  return served === null ? null : Date.now() - servedAt;
+}
+
+/**
+ * The catalog to answer from.
+ *
+ * The first call reads it, and every call after that gets the copy the refresher keeps
+ * current. Concurrent callers during that first read share one request.
+ *
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<Array<object>>}
+ */
+export async function ensureCatalog(signal) {
+  if (served !== null) return served;
+  if (loading !== null) return loading;
+  loading = fetchCatalog(signal)
+    .then((models) => {
+      served = models;
+      servedAt = Date.now();
+      return models;
+    })
+    .finally(() => { loading = null; });
+  return loading;
+}
+
+/**
+ * Read the catalog again, keeping the previous list if the read fails.
+ *
+ * A failed refresh is not a reason to lose a list that was correct five minutes ago: the
+ * gateway keeps answering from it and tries again on the next tick. The failure is logged
+ * once per attempt so an operator can see it without a request failing.
+ *
+ * @param {{log?: (message: string) => void, signal?: AbortSignal}} [options]
+ * @returns {Promise<boolean>} whether it was replaced.
+ */
+export async function refreshCatalog(options = {}) {
+  const log = options.log ?? (() => {});
+  try {
+    const models = await fetchCatalog(options.signal ?? AbortSignal.timeout(15_000));
+    const previous = served?.length ?? 0;
+    served = models;
+    servedAt = Date.now();
+    if (previous !== models.length) {
+      log(`model catalog: ${models.length} models (was ${previous})`);
+    }
+    return true;
+  } catch (error) {
+    log(`model catalog: refresh failed, still serving ${served?.length ?? 0} models (${error?.message ?? error})`);
+    return false;
+  }
+}
+
+/**
+ * The wait before the next read, chosen at random inside the window.
+ *
+ * A function of its inputs rather than of the clock, so the window can be tested without
+ * pretending to be time - and so a deployment can see the rule instead of inferring it.
+ *
+ * @param {object} [options]
+ * @param {number} [options.minMs]
+ * @param {number} [options.maxMs]
+ * @param {() => number} [options.random] - something in `[0, 1)`, as `Math.random` is.
+ * @returns {number}
+ */
+export function nextRefreshDelay(options = {}) {
+  const minMs = Number.isFinite(options.minMs) ? options.minMs : 10 * 60_000;
+  const maxMs = Number.isFinite(options.maxMs) ? options.maxMs : 20 * 60_000;
+  const random = options.random ?? Math.random;
+  const span = Math.max(0, maxMs - minMs);
+  // Clamped, so a random source that returns exactly 1 still lands inside the window rather
+  // than one millisecond past it.
+  return Math.min(maxMs, minMs + Math.floor(random() * (span + 1)));
+}
+
+/**
+ * Keep the catalog current on a random schedule.
+ *
+ * @param {object} [options]
+ * @param {number} [options.minMs] - shortest wait between reads.
+ * @param {number} [options.maxMs] - longest wait, exclusive of `minMs`.
+ * @param {(message: string) => void} [options.log]
+ * @param {() => number} [options.random] - the source of the random point in the window.
+ * @returns {() => void} a function that stops the schedule.
+ */
+export function startCatalogRefresh(options = {}) {
+  const log = options.log ?? (() => {});
+  const nextDelay = () => nextRefreshDelay(options);
+
+  const stop = () => {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+  };
+
+  const schedule = (delay) => {
+    stop();
+    timer = setTimeout(run, delay);
+    // A refresh schedule must not be the reason a process stays alive.
+    timer.unref?.();
+  };
+
+  const run = () => {
+    void refreshCatalog({ log }).finally(() => {
+      schedule(nextDelay());
+    });
+  };
+
+  // The first read happens now; the timer only covers the ones after it.
+  void ensureCatalog()
+    .catch((error) => {
+      log(`model catalog: first read failed (${error?.message ?? error})`);
+    })
+    .finally(() => {
+      schedule(nextDelay());
+    });
+
+  return stop;
+}
+
+/** Stop the refresh schedule, for tests and for a clean shutdown. */
+export function stopCatalogRefresh() {
+  if (timer !== null) clearTimeout(timer);
+  timer = null;
+}
+
 /**
  * Shape one model for the JSON API.
  *
