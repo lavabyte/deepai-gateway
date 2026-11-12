@@ -2,21 +2,52 @@
  * DeepAI Code model catalog.
  *
  * `GET /deepai_code/models` is readable without an account and is **the** source of truth for
- * which models exist, what they cost and which upstream API they use. This gateway keeps no
- * copy of its own: no embedded list, no cache. A model exists because DeepAI says so on this
- * request, which is the only way a catalog that changes under us stays correct - an embedded
- * snapshot in a shipped build is wrong the moment DeepAI adds, renames or retires a model,
- * and a cache makes it wrong for up to its lifetime for no benefit the network does not
- * already give.
+ * which models exist, what they cost and which upstream API they use. No model is written
+ * into the source: a model exists because DeepAI said so, and the list is re-read on a
+ * schedule (ten to twenty minutes, at a random point in the window) rather than on every
+ * request - an embedded snapshot in a shipped build is wrong the moment DeepAI adds, renames
+ * or retires a model, and reading on every call cost a round trip no request needed.
  *
  * The environment this runs in has a network; that is the premise. What it does *not* assume
- * is that the network is always up at the moment of a call, so a failure is reported as a
- * failure - never papered over with a stale or made-up model list. See `CatalogUnavailable`.
+ * is that the network is always up at the moment of a call, so a failed re-read keeps the
+ * previous list, logs itself, and is retried on the next tick - it never replaces a working
+ * catalog with an empty one, and never invents one. See `CatalogUnavailable`.
+ *
+ * What the catalog *claims* about a model is not repeated blindly: `contextWindow` is
+ * clamped to the limit the wire actually serves (`INPUT_TOKEN_LIMIT` below, measured).
  *
  * @module deepai-gateway/deepai/catalog
  */
 
 import { API_ORIGIN, codeHeaders } from './wire.js';
+
+/*
+ * The input limit the wire actually serves, whatever the catalog claims.
+ *
+ * Every model in the catalog declares `contextWindow: 1048576`, and that number is a lie
+ * measured on the live API: a prompt of 63,149 tokens is served intact, and one of 63,372
+ * comes back silently shortened. The middle of the conversation is cut out - head and tail
+ * kept, roughly 2,800 tokens between them - and the `usage` in the answer reports the
+ * shortened prompt as if nothing had happened. No error, no warning, nothing a client can
+ * see. Measured on `deepseek-v4.1-flash` and `glm-5.3-flash` at the same point, so it is the
+ * property of the wire, not of one model; and measured as tokens, not bytes - 300,000
+ * characters of `a` (1,325 tokens) pass whole, so a client cannot accidentally stay under
+ * the limit by being verbose in bytes.
+ *
+ * The consequences of repeating the catalog's claim are not cosmetic. A client that plans
+ * compaction against a 1M window lets its history grow past 63k, the wire cuts the middle,
+ * and the reported usage then says ~2.8k tokens - so the client believes its context is
+ * nearly empty, never compacts, and keeps losing the middle on every turn. That is the whole
+ * "usage never goes above a few percent, and the agent forgets the chat" failure in one
+ * number. The desktop app does not show it because it counts its context with its own
+ * estimator and compacts on that, not on what the API reports.
+ *
+ * 63,000 rather than the last value that passed (63,149): the boundary sits between that
+ * and 63,372, and a client filling the window to the brim must still be under it.
+ *
+ * @constant
+ */
+export const INPUT_TOKEN_LIMIT = 63_000;
 
 /** Human labels for the thinking levels, in the order the API exposes them. */
 export const REASONING_LEVELS = Object.freeze([
@@ -111,8 +142,13 @@ function normalize(raw) {
     name: typeof raw.name === 'string' && raw.name !== '' ? raw.name : raw.id,
     reasoning: raw.reasoning === true,
     input: input.length > 0 ? input : ['text'],
+    /*
+     * Clamped to what the wire serves. The declared window is aspirational (see
+     * `INPUT_TOKEN_LIMIT`); a client that plans against it plans against a wall it cannot
+     * see. A model declaring less than the limit keeps its own, smaller number.
+     */
     contextWindow: Number.isSafeInteger(raw.contextWindow) && raw.contextWindow > 0
-      ? raw.contextWindow
+      ? Math.min(raw.contextWindow, INPUT_TOKEN_LIMIT)
       : undefined,
     maxTokens: Number.isSafeInteger(raw.maxTokens) && raw.maxTokens > 0 ? raw.maxTokens : undefined,
     premier: raw.premier === true,

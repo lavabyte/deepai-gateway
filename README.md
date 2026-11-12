@@ -217,6 +217,24 @@ scoped to the key, and a key restricted to free models does not see the Premier 
 
 The price shown is `theosPerRequest`, which is what DeepAI charges per call.
 
+### The context window the catalog claims, and the one the wire serves
+
+Every model in the catalog declares `contextWindow: 1048576`. Measured on the live API, the
+wire does not serve that: **a prompt of 63,149 tokens is answered intact, and one of 63,372
+comes back silently shortened** - the middle of the conversation cut out, head and tail kept
+(~2,800 tokens between them), and the `usage` in the answer reporting the shortened prompt
+as if nothing had happened. No error, no warning. Measured identically on
+`deepseek-v4.1-flash` and `glm-5.3-flash`, so it is the property of the wire; and measured
+as tokens, not bytes - 300,000 characters of `a` (1,325 tokens) passes whole.
+
+The gateway advertises **63,000** as the context window (`INPUT_TOKEN_LIMIT`), not the
+catalog's claim. A client that plans compaction against 1M lets its history grow past the
+real limit, the wire cuts the middle, and the reported usage then says ~2.8k tokens - so the
+client believes its context is nearly empty, never compacts, and loses the middle on every
+turn. That is the whole "usage never goes above a few percent, and the agent forgets the
+chat" failure, in one wrong number. Against 63,000 the same client sees its usage climb to
+the truth and compacts before the cut ever happens.
+
 The environment has a network; that is the premise. It is not assumed to be up at the moment
 of a particular call, though, so a failure to read the catalog is answered plainly - `502` for
 the model routes, `503` for a completion, both `catalog_unavailable` with the reason - rather
