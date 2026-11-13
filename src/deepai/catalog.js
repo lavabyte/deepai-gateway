@@ -63,7 +63,7 @@ export function rateLabel(model, level) {
   const value = Number(model?.theosPerRequest);
   if (!Number.isFinite(value)) return 'Unknown';
   if (value === 0) return 'Unmetered';
-  return `${value} Credits / req`;
+  return `~ ${value} Credits`;
 }
 
 /**
