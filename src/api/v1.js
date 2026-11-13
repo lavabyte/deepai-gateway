@@ -43,6 +43,52 @@ import {
 /** Model used when a request omits one. */
 const FALLBACK_MODEL = 'glm-5.3-flash';
 
+/** Characters per token for the fixed-density heuristic (matches DSH token-meter). */
+const CHARS_PER_TOKEN = 4;
+/** Per-message structural overhead for role framing and JSON framing. */
+const MESSAGE_OVERHEAD = 10;
+
+/**
+ * Estimate token usage when DeepAI does not send `usage` in the stream.
+ *
+ * DeepAI does not include `usage` in streamed chat-completions chunks, so the
+ * gateway would otherwise emit `prompt_tokens: 0, completion_tokens: 0` - which
+ * makes every client (including the harness context meter) report ~0% context
+ * usage. As a fallback, estimate from the request messages and the generated
+ * answer. It is deliberately approximate: better than zeros, never presented as
+ * exact upstream accounting.
+ *
+ * @param {Array<object>} messages - the request messages (OpenAI shape).
+ * @param {string[]} text - accumulated answer text deltas.
+ * @param {string[]} reasoning - accumulated reasoning deltas.
+ * @returns {{inputTokens:number, outputTokens:number, totalTokens:number, cacheReadTokens:number, cacheWriteTokens:number, reasoningTokens:number}}
+ */
+function estimateUsage(messages, text, reasoning) {
+    let chars = 0;
+    for (const m of messages) {
+        if (typeof m.content === 'string') chars += m.content.length;
+        else if (Array.isArray(m.content)) {
+            for (const part of m.content) {
+                if (part.type === 'text') chars += part.text.length;
+                else if (part.type === 'image_url') chars += 1024;
+            }
+        }
+        chars += MESSAGE_OVERHEAD;
+    }
+    const inputTokens = Math.max(0, Math.floor(chars / CHARS_PER_TOKEN));
+    const outputText = text.join('');
+    const outputReasoning = reasoning.join('');
+    const outputTokens = Math.max(0, Math.floor((outputText.length + outputReasoning.length) / CHARS_PER_TOKEN));
+    return {
+        inputTokens,
+        outputTokens,
+        totalTokens: inputTokens + outputTokens,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: Math.max(0, Math.floor(outputReasoning.length / CHARS_PER_TOKEN)),
+    };
+}
+
 /**
  * How long a stream may stay silent before a keep-alive comment is written.
  *
@@ -508,16 +554,15 @@ async function handleChatCompletion(db, req, res, options = {}) {
 
   if (status === 200 && streamed) {
     write({}, openAIFinish(effectiveFinish));
-    if (usage !== undefined) {
-      res.write(`data: ${JSON.stringify({
-        id,
-        object: 'chat.completion.chunk',
-        created,
-        model: upstreamModel,
-        choices: [],
-        usage: openAIUsage(usage),
-      })}\n\n`);
-    }
+    const finalUsage = usage ?? estimateUsage(body.messages, text, reasoning);
+    res.write(`data: ${JSON.stringify({
+      id,
+      object: 'chat.completion.chunk',
+      created,
+      model: upstreamModel,
+      choices: [],
+      usage: openAIUsage(finalUsage),
+    })}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
   } else if (status === 200) {
@@ -545,11 +590,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
           : {}),
       },
       finishReason: openAIFinish(effectiveFinish),
-      usage: openAIUsage(usage) ?? {
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        total_tokens: 0,
-      },
+      usage: openAIUsage(usage ?? estimateUsage(body.messages, text, reasoning)),
     }));
   } else {
     if (streamed) {
