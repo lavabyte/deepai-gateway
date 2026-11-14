@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto';
 import {
   checkKey,
 } from '../deepai/account.js';
-import { ensureCatalog, publicModel } from '../deepai/catalog.js';
+import { CATALOG_KEY_REFUSED, ensureCatalog, publicModel } from '../deepai/catalog.js';
 import {
   DEFAULT_MAX_KEYS,
   WINDOWS,
@@ -42,7 +42,6 @@ import {
   setSetting,
 } from '../store.js';
 import { requireSession, publicAccount } from '../middleware/session.js';
-import { allowKeyIdentity } from '../middleware/auth.js';
 import {
   estimateSavings,
   pricingStatus,
@@ -454,10 +453,24 @@ export function adminRouter(db, runtime) {
         models: models.map((model) => ({
           ...publicModel(model),
           usageMonth: usageByModel.get(model.id) ?? null,
-          usageAll: usageAll.get(model.id) ?? null,
+          usageAll: allUsage.get(model.id) ?? null,
         })),
       });
     } catch (error) {
+      /*
+       * A key DeepAI no longer accepts is the session ending, not a catalog fault, and the
+       * dashboard can act on that: it re-reads the account and shows the sign-in card. Left as
+       * a 502 it was a dead end - and a proxy in front is free to replace a 502 with its own
+       * HTML page, which is how "the models could not be read" arrived as "Unexpected non-JSON
+       * answer (HTTP 502)" with nothing an operator could act on.
+       */
+      if (error?.code === CATALOG_KEY_REFUSED) {
+        return res.status(401).json({
+          ok: false,
+          error: 'DeepAI no longer accepts this account\'s key. Sign in again.',
+          code: 'deepai_signed_out',
+        });
+      }
       // The dashboard shows this, so it says the models could not be read rather than
       // echoing whatever the failure was.
       res.status(502).json({

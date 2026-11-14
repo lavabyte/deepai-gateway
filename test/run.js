@@ -728,6 +728,25 @@ await checkAsync('rate labels show approximate Credits, not per-request', async 
 
 /* ------------------------------------------------------------------- server */
 
+/**
+ * Answer the catalog read from a fixture, leaving everything else to `upstream`.
+ *
+ * The catalog is read with a DeepAI account key - lane 6 refuses an unauthenticated read - so
+ * a case that let this read go upstream was testing DeepAI's authentication rather than this
+ * gateway: it passed only while the catalog happened to be public. A route case installs this
+ * so it is about the gateway, and offline.
+ *
+ * @param {(url: string, init: object) => Promise<Response>} [upstream] - defaults to the real fetch.
+ * @returns {() => void} restores the real fetch.
+ */
+function stubCatalog(upstream) {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => (String(url).includes('deepai_code/models')
+    ? new Response(JSON.stringify(CATALOG_PAYLOAD), { status: 200, headers: { 'content-type': 'application/json' } })
+    : (upstream ?? realFetch)(url, init));
+  return () => { globalThis.fetch = realFetch; };
+}
+
 await checkAsync('app mounts; /healthz is minimal and /v1/models requires a key', async () => {
   const { createApp } = await import('../server.js');
   const session = sessionFor(db, 'http-user');
@@ -744,41 +763,46 @@ await checkAsync('app mounts; /healthz is minimal and /v1/models requires a key'
     .run(key.prefix, key.hash, Date.now());
 
   try {
-    // /healthz is a liveness probe: unauthenticated, and it must not disclose
-    // who is signed in, how many accounts exist, or their names.
-    const health = await fetch(`${base}/healthz`).then((res) => res.json());
-    assert.deepEqual(Object.keys(health).sort(), ['ok']);
-    assert.equal(health.ok, true);
+    const restore = stubCatalog();
+    try {
+      // /healthz is a liveness probe: unauthenticated, and it must not disclose
+      // who is signed in, how many accounts exist, or their names.
+      const health = await fetch(`${base}/healthz`).then((res) => res.json());
+      assert.deepEqual(Object.keys(health).sort(), ['ok']);
+      assert.equal(health.ok, true);
 
-    // Without a key the catalog is refused.
-    const anon = await fetch(`${base}/v1/models`);
-    assert.equal(anon.status, 401);
-    assert.equal((await anon.json()).error.code, 'missing_api_key');
+      // Without a key the catalog is refused.
+      const anon = await fetch(`${base}/v1/models`);
+      assert.equal(anon.status, 401);
+      assert.equal((await anon.json()).error.code, 'missing_api_key');
 
-    const models = await fetch(`${base}/v1/models`, {
-      headers: { authorization: `Bearer ${key.plaintext}` },
-    }).then((res) => res.json());
-    assert.equal(models.object, 'list');
-    assert.ok(models.data.length >= 13);
-    assert.ok(models.data.some((model) => model.id === 'deepseek-v4.1-flash'));
+      const models = await fetch(`${base}/v1/models`, {
+        headers: { authorization: `Bearer ${key.plaintext}` },
+      }).then((res) => res.json());
+      assert.equal(models.object, 'list');
+      assert.ok(models.data.length >= CATALOG_PAYLOAD.models.length);
+      assert.ok(models.data.some((model) => model.id === 'deepseek-v4.1-flash'));
 
-    const details = await fetch(`${base}/v1/models/details`, {
-      headers: { authorization: `Bearer ${key.plaintext}` },
-    }).then((res) => res.json());
-    const free = details.data.find((model) => model.id === 'glm-5.3-flash');
-    assert.equal(free.tier, 'free');
-    assert.equal(free.displayName, 'GLM 5.3 Flash Free');
+      const details = await fetch(`${base}/v1/models/details`, {
+        headers: { authorization: `Bearer ${key.plaintext}` },
+      }).then((res) => res.json());
+      const free = details.data.find((model) => model.id === 'glm-5.3-flash');
+      assert.equal(free.tier, 'free');
+      assert.equal(free.displayName, 'GLM 5.3 Flash Free');
 
-    const unauthorized = await fetch(`${base}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'hi' }] }),
-    });
-    assert.equal(unauthorized.status, 401);
+      const unauthorized = await fetch(`${base}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'hi' }] }),
+      });
+      assert.equal(unauthorized.status, 401);
 
-    const unknown = await fetch(`${base}/v1/nope`);
-    assert.equal(unknown.status, 404);
-    assert.equal((await unknown.json()).error.code, 'not_found');
+      const unknown = await fetch(`${base}/v1/nope`);
+      assert.equal(unknown.status, 404);
+      assert.equal((await unknown.json()).error.code, 'not_found');
+    } finally {
+      restore();
+    }
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -809,36 +833,98 @@ await checkAsync('/v1/models only advertises the models a restricted key may use
     .run(empty.prefix, empty.hash, Date.now());
 
   try {
-    const visible = await fetch(`${base}/v1/models`, {
-      headers: { authorization: `Bearer ${restricted.plaintext}` },
-    }).then((res) => res.json());
-    assert.deepEqual(visible.data.map((model) => model.id).sort(), [...allowed].sort());
+    const restore = stubCatalog();
+    try {
+      const visible = await fetch(`${base}/v1/models`, {
+        headers: { authorization: `Bearer ${restricted.plaintext}` },
+      }).then((res) => res.json());
+      assert.deepEqual(visible.data.map((model) => model.id).sort(), [...allowed].sort());
 
-    const none = await fetch(`${base}/v1/models`, {
-      headers: { authorization: `Bearer ${empty.plaintext}` },
-    }).then((res) => res.json());
-    assert.equal(none.data.length, 0);
+      const none = await fetch(`${base}/v1/models`, {
+        headers: { authorization: `Bearer ${empty.plaintext}` },
+      }).then((res) => res.json());
+      assert.equal(none.data.length, 0);
 
-    // The usage figures beside the catalog are per account, so an identity is
-    // required - but never *nothing*, which would scope to every account.
-    assert.equal((await fetch(`${base}/api/models`)).status, 401);
-    // A key identity is accepted, and scoped to that key's owner.
-    const viaKey = await fetch(`${base}/api/models`, { headers: { authorization: `Bearer ${restricted.plaintext}` } });
-    assert.equal(viaKey.status, 200);
-    assert.ok((await viaKey.json()).models.length >= 13);
-    // A session identity also works.
-    const session = sessionFor(fresh, 'catalog-viewer');
-    const dashboard = await asUser(base, session)('/api/models');
-    assert.ok(dashboard.body.models.length >= 13);
-    // An unknown key is refused.
-    assert.equal((await fetch(`${base}/api/models`, { headers: { authorization: 'Bearer sk-nope' } })).status, 401);
+      /*
+       * The dashboard route reads the catalog as the session's DeepAI account and attaches
+       * that account's usage, so a session is what it requires. A gateway key alone has no
+       * DeepAI account behind it on this route, so it is refused rather than served
+       * unscoped - the usage query would otherwise cover every account.
+       */
+      assert.equal((await fetch(`${base}/api/models`)).status, 401);
+      assert.equal((await fetch(`${base}/api/models`, {
+        headers: { authorization: `Bearer ${restricted.plaintext}` },
+      })).status, 401);
+      // A session identity works, and the usage figures are scoped to it.
+      const session = sessionFor(fresh, 'catalog-viewer');
+      const dashboard = await asUser(base, session)('/api/models');
+      assert.equal(dashboard.body.models.length, CATALOG_PAYLOAD.models.length,
+        `the catalog is served whole: ${JSON.stringify(dashboard.body).slice(0, 200)}`);
+      // An unknown key is refused.
+      assert.equal((await fetch(`${base}/api/models`, { headers: { authorization: 'Bearer sk-nope' } })).status, 401);
+    } finally {
+      restore();
+    }
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
 });
 
-await checkAsync('/ serves the dashboard shell and nothing else is browser-navigable', async () => {
+await checkAsync('a key DeepAI refuses sends the models tab to the sign-in card, not to a 502', async () => {
+  /*
+   * DeepAI mints a fresh key on every sign-in, so a stored one stops working on its own. The
+   * models tab used to answer that with `502 catalog_unavailable` - a dead end for the visitor,
+   * and something a proxy in front is free to replace with its own HTML page. It is the
+   * session ending, so it answers 401 and the dashboard asks for a sign-in, exactly as it does
+   * when the gateway session itself expires.
+   */
   const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  const session = sessionFor(fresh, 'stale-key-user');
+
+  /*
+   * The stub answers the catalog with a chosen status and hands every other request - the test
+   * client's own - to the real fetch, so only the catalog read is faked.
+   */
+  const withCatalogStatus = (status) => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => (String(url).includes('deepai_code/models')
+      ? new Response(JSON.stringify({ error: { code: 'auth_required' } }),
+        { status, headers: { 'content-type': 'application/json' } })
+      : realFetch(url, init));
+    return () => { globalThis.fetch = realFetch; };
+  };
+
+  try {
+    const restore = withCatalogStatus(401);
+    try {
+      const response = await asUser(base, session)('/api/models');
+      assert.equal(response.status, 401, 'a refused DeepAI key is not a catalog failure');
+      assert.equal(response.body.code, 'deepai_signed_out');
+    } finally {
+      restore();
+    }
+
+    // And a genuine upstream failure is still reported as one rather than as a sign-out.
+    const broken = withCatalogStatus(503);
+    try {
+      const failed = await asUser(base, session)('/api/models');
+      assert.equal(failed.status, 502);
+      assert.equal(failed.body.code, 'catalog_unavailable');
+    } finally {
+      broken();
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('/ serves the dashboard shell and nothing else is browser-navigable', async () => {  const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
   const app = createApp(fresh, { log: () => {}, logRequests: false });
   const server = app.listen(0, '127.0.0.1');
@@ -1127,7 +1213,7 @@ await checkAsync('/v1/models carries modalities, reasoning levels and names', as
 
     const premier = payload.data.find((model) => model.id === 'glm-5.3');
     assert.equal(premier.tier, 'premier');
-    assert.equal(premier.rate_label, '3 Credits / req');
+    assert.equal(premier.rate_label, '~ 3 Credits');
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));
@@ -2016,6 +2102,9 @@ await checkAsync('a streaming failure is still framed as an event stream', async
   const base = `http://127.0.0.1:${port}`;
 
   try {
+    // The catalog read is stubbed: it now needs an account key, and letting it go upstream
+    // meant this case failed at the catalog - before the stream it is about was opened.
+    const restore = stubCatalog();
     // This reaches DeepAI, which rejects the unknown model. The point under test
     // is the response framing, not the upstream verdict, so any non-2xx proves
     // the failure path was taken.
@@ -2037,6 +2126,7 @@ await checkAsync('a streaming failure is still framed as an event stream', async
     );
     assert.match(String(response.headers.get('cache-control')), /no-cache/);
     const body = await response.text();
+    restore();
     assert.match(body, /^data: /, 'the body is SSE');
     assert.match(body, /"error"/);
   } finally {

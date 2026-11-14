@@ -135,7 +135,7 @@ export function v1Router(db, options = {}) {
     try {
       // Served from the copy the scheduled refresh keeps current. It is read from DeepAI
       // every ten to twenty minutes, at a random point in that window.
-      const models = await ensureCatalog(AbortSignal.timeout(10_000), req.gatewayKey.api_key);
+      const models = await ensureCatalog(AbortSignal.timeout(10_000), catalogKeyFor(db, req.gatewayKey));
       const visible = models.filter((model) => allowsModel(req.gatewayKey, model.id));
       res.json({
         object: 'list',
@@ -172,7 +172,7 @@ export function v1Router(db, options = {}) {
   // A richer view used by the dashboard's Models tab. Same scoping rules.
   router.get('/models/details', authenticate(db), async (req, res) => {
     try {
-      const models = await ensureCatalog(AbortSignal.timeout(10_000), req.gatewayKey.api_key);
+      const models = await ensureCatalog(AbortSignal.timeout(10_000), catalogKeyFor(db, req.gatewayKey));
       const visible = models.filter((model) => allowsModel(req.gatewayKey, model.id));
       res.json({ object: 'list', data: visible.map(publicModel) });
     } catch (error) {
@@ -227,7 +227,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
   let models;
   const catalogStart = Date.now();
   try {
-    models = await ensureCatalog(AbortSignal.timeout(10_000), req.gatewayKey.api_key);
+    models = await ensureCatalog(AbortSignal.timeout(10_000), account.apiKey);
   } catch (error) {
     return apiError(res, 503, catalogMessage(error), 'catalog_unavailable', 'api_error');
   }
@@ -668,6 +668,23 @@ async function handleChatCompletion(db, req, res, options = {}) {
 function catalogMessage(error) {
   if (error instanceof CatalogUnavailable) return `${error.message}. The model list cannot be read, so the request cannot be routed.`;
   return String(error?.message ?? error);
+}
+
+/**
+ * The DeepAI key a catalog read is authenticated with.
+ *
+ * The catalog is read as the account that owns the gateway key: `os GATEWAY` rows in
+ * `api_keys` hold only a hash of the caller's `sk-` key, never a DeepAI credential, so
+ * `gatewayKey.api_key` was always `undefined` - and lane 6 answers that with 401, which
+ * surfaced as a catalog failure on `/v1/models` and on every completion that needed the
+ * catalog. The DeepAI key lives on the owning account.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {{owner_username?: string}} gatewayKey
+ * @returns {string|undefined}
+ */
+function catalogKeyFor(db, gatewayKey) {
+  return readAccount(db, gatewayKey?.owner_username ?? '')?.apiKey;
 }
 
 /**

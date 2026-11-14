@@ -424,6 +424,21 @@ function wireSignInForms(prefix = '') {
  */
 function needsLogin() {
   if (state.account?.signedIn === true) return false;
+  renderSignInCard(t('signin.lead'));
+  return true;
+}
+
+/**
+ * Draw the sign-in card, with a line explaining why it is being shown.
+ *
+ * The session and the DeepAI login behind it end separately: a browser can still hold a
+ * valid gateway session while DeepAI has stopped accepting the account's key. That case is not
+ * `signedIn: false`, so it has no way into this card through `needsLogin` - and without it the
+ * visitor is told to sign in again with nothing to click.
+ *
+ * @param {string} detail - one line, already translated.
+ */
+function renderSignInCard(detail) {
   view.innerHTML = `
     <div class="page__head">
       <h1 class="page__title">${t('signin.title')}</h1>
@@ -431,12 +446,11 @@ function needsLogin() {
     </div>
     <div class="card">
       <div class="card__title">${t('signin.notLoggedIn')}</div>
-      <div class="card__sub mt-2">${t('signin.lead')}</div>
+      <div class="card__sub mt-2">${esc(detail)}</div>
       ${signInRoutes()}
     </div>`;
 
   wireSignInForms();
-  return true;
 }
 
 
@@ -1710,6 +1724,17 @@ async function renderModels() {
   try {
     payload = await api('/models');
   } catch (error) {
+    // A 401 here is the account, not the catalog: the gateway session ended, or DeepAI
+    // stopped accepting this account's key. Both are fixed by signing in, so the view asks
+    // for that instead of showing an error nobody can act on.
+    if (isAuthFailure(error)) {
+      await loadAccount();
+      if (needsLogin()) return;
+    }
+    if (error.code === 'deepai_signed_out') {
+      renderSignInCard(error.message);
+      return;
+    }
     view.innerHTML = `<div class="note note--error">${esc(t('error.models', { message: error.message }))}</div>`;
     return;
   }

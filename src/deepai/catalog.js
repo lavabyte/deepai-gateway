@@ -1,12 +1,14 @@
 /**
  * DeepAI Code model catalog.
  *
- * `GET /deepai_code/models` is readable without an account and is **the** source of truth for
- * which models exist, what they cost and which upstream API they use. No model is written
- * into the source: a model exists because DeepAI said so, and the list is re-read on a
- * schedule (ten to twenty minutes, at a random point in the window) rather than on every
- * request - an embedded snapshot in a shipped build is wrong the moment DeepAI adds, renames
- * or retires a model, and reading on every call cost a round trip no request needed.
+ * `GET /deepai_code/models` is **the** source of truth for which models exist, what they cost
+ * and which upstream API they use. Lane 6 requires an account key on it, so a read is
+ * authenticated as a DeepAI account (`Api-Key`); the catalog itself is the same for every
+ * account. No model is written into the source: a model exists because DeepAI said so, and
+ * the list is re-read on a schedule (ten to twenty minutes, at a random point in the window)
+ * rather than on every request - an embedded snapshot in a shipped build is wrong the moment
+ * DeepAI adds, renames or retires a model, and reading on every call cost a round trip no
+ * request needed.
  *
  * The environment this runs in has a network; that is the premise. What it does *not* assume
  * is that the network is always up at the moment of a call, so a failed re-read keeps the
@@ -78,14 +80,23 @@ export function rateLabel(model, level) {
 export class CatalogUnavailable extends Error {
   /**
    * @param {string} message - what happened, for the log and the caller.
-   * @param {{cause?: unknown}} [options]
+   * @param {{cause?: unknown, code?: string}} [options]
    */
   constructor(message, options = {}) {
     super(message, options);
     this.name = 'CatalogUnavailable';
-    this.code = 'CATALOG_UNAVAILABLE';
+    this.code = options.code ?? 'CATALOG_UNAVAILABLE';
   }
 }
+
+/**
+ * The account key the read carried was refused, rather than the read itself failing.
+ *
+ * Worth naming apart from every other catalog failure: nothing about the network or the
+ * upstream is wrong, and the one thing that fixes it is signing in again. A caller can act on
+ * that where it cannot act on "HTTP 401".
+ */
+export const CATALOG_KEY_REFUSED = 'CATALOG_KEY_REFUSED';
 
 /** Look one model up in a catalog that was just fetched. */
 export function findModel(models, id) {
@@ -151,6 +162,18 @@ export async function fetchCatalog(signal, apiKey) {
     if (signal?.aborted) throw new CatalogUnavailable('DeepAI model catalog: request aborted');
     throw new CatalogUnavailable(`DeepAI model catalog: unreachable (${error?.message ?? error})`);
   }
+  if (response.status === 401 || response.status === 403) {
+    /*
+     * The catalog read is authenticated as a DeepAI account, and DeepAI mints a fresh key on
+     * every sign-in - so a stored key stops working on its own, with nothing in this gateway
+     * having changed. Saying "HTTP 401" made that look like a network or catalog fault; the
+     * one action that fixes it is signing in again, so the message says so.
+     */
+    throw new CatalogUnavailable(
+      `DeepAI model catalog: DeepAI refused this account's key (HTTP ${response.status}) - sign in again from the dashboard`,
+      { code: CATALOG_KEY_REFUSED },
+    );
+  }
   if (!response.ok) {
     throw new CatalogUnavailable(`DeepAI model catalog: HTTP ${response.status}`);
   }
@@ -204,6 +227,26 @@ export function resetCatalog() {
   loading = null;
 }
 
+/**
+ * Resolve the catalog key an option holds, when it is a supplier rather than a value.
+ *
+ * The scheduled refresh outlives any one account: it must read the key at the moment of the
+ * read, because that is when the account may have signed in again - and it must survive a
+ * supplier that throws, which is a failed read rather than a crashed schedule.
+ *
+ * @param {string|(() => string|undefined)|undefined} option
+ * @returns {string|undefined}
+ */
+function apiKeyOf(option) {
+  if (typeof option !== 'function') return option;
+  try {
+    const value = option();
+    return typeof value === 'string' && value !== '' ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** How old the served catalog is, in ms, or null when there is none. */
 export function catalogAge() {
   return served === null ? null : Date.now() - servedAt;
@@ -239,13 +282,16 @@ export async function ensureCatalog(signal, apiKey) {
  * gateway keeps answering from it and tries again on the next tick. The failure is logged
  * once per attempt so an operator can see it without a request failing.
  *
- * @param {{log?: (message: string) => void, signal?: AbortSignal}} [options]
+ * @param {{log?: (message: string) => void, signal?: AbortSignal,
+ *   apiKey?: string|(() => string|undefined)}} [options] `apiKey` is read at the moment of
+ *   the read, because the account behind it may have signed in again since the schedule was
+ *   started.
  * @returns {Promise<boolean>} whether it was replaced.
  */
 export async function refreshCatalog(options = {}) {
   const log = options.log ?? (() => {});
   try {
-    const models = await fetchCatalog(options.signal ?? AbortSignal.timeout(15_000));
+    const models = await fetchCatalog(options.signal ?? AbortSignal.timeout(15_000), apiKeyOf(options.apiKey));
     const previous = served?.length ?? 0;
     served = models;
     servedAt = Date.now();
@@ -289,6 +335,8 @@ export function nextRefreshDelay(options = {}) {
  * @param {number} [options.maxMs] - longest wait, exclusive of `minMs`.
  * @param {(message: string) => void} [options.log]
  * @param {() => number} [options.random] - the source of the random point in the window.
+ * @param {string|(() => string|undefined)} [options.apiKey] - the DeepAI key the read is
+ *   authenticated with; a function is called before each read.
  * @returns {() => void} a function that stops the schedule.
  */
 export function startCatalogRefresh(options = {}) {
@@ -308,13 +356,13 @@ export function startCatalogRefresh(options = {}) {
   };
 
   const run = () => {
-    void refreshCatalog({ log }).finally(() => {
+    void refreshCatalog({ log, apiKey: options.apiKey }).finally(() => {
       schedule(nextDelay());
     });
   };
 
   // The first read happens now; the timer only covers the ones after it.
-  void ensureCatalog()
+  void ensureCatalog(undefined, apiKeyOf(options.apiKey))
     .catch((error) => {
       log(`model catalog: first read failed (${error?.message ?? error})`);
     })

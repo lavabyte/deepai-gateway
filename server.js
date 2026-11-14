@@ -277,6 +277,16 @@ export function start(overrides = {}) {
     log,
     minMs: CATALOG_REFRESH_MIN_MS,
     maxMs: CATALOG_REFRESH_MAX_MS,
+    /*
+     * Lane 6 requires an account key on the catalog read, so the schedule has to send one -
+     * without it every refresh was answered 401 and the catalog only ever loaded when a
+     * dashboard request happened to arrive. The catalog is the same for every account, so
+     * any live key answers it; the most recently used account is the likeliest to still be
+     * signed in. Read at each refresh rather than captured here, so signing in again is
+     * picked up without a restart.
+     */
+    apiKey: () => listAccounts(db)
+      .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))[0]?.apiKey,
   });
 
   // Reference prices come from OpenRouter and are cached on disk, so the
