@@ -87,6 +87,7 @@
   "form.requestLimit": "Request limit",
   "form.requestLimitHint": "Leave empty for no request cap.",
   "form.selectFree": "Select free",
+  "form.selectPaid": "Select paid",
   "form.tokenLimit": "Token limit",
   "form.tokenLimitHint": "Leave empty for no token cap.",
   "form.unrestricted": "Unrestricted: allows every model, including future ones",

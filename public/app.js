@@ -2018,6 +2018,7 @@ function openKeyModal(existing, onDone) {
       node,
     }));
   const freeIds = catalog.filter((model) => !model.premier).map((model) => model.id);
+  const paidIds = catalog.filter((model) => model.premier).map((model) => model.id);
 
   let unrestricted = existing !== undefined && existing.modelsRestricted !== true;
   const selected = new Set(
@@ -2063,6 +2064,10 @@ function openKeyModal(existing, onDone) {
   freeButton.type = 'button';
   freeButton.className = 'btn btn--secondary btn--sm';
   freeButton.textContent = t('form.selectFree');
+  const paidButton = document.createElement('button');
+  paidButton.type = 'button';
+  paidButton.className = 'btn btn--secondary btn--sm';
+  paidButton.textContent = t('form.selectPaid');
   const allButton = document.createElement('button');
   allButton.type = 'button';
   allButton.className = 'btn btn--secondary btn--sm';
@@ -2072,7 +2077,7 @@ function openKeyModal(existing, onDone) {
   noneButton.type = 'button';
   noneButton.className = 'btn btn--secondary btn--sm';
   noneButton.textContent = t('common.clear');
-  quickPicks.append(freeButton, allButton, noneButton);
+  quickPicks.append(freeButton, paidButton, allButton, noneButton);
 
   const setSelection = (ids) => {
     selected.clear();
@@ -2080,6 +2085,9 @@ function openKeyModal(existing, onDone) {
     for (const [id, pill] of pills) pill.dataset.on = String(selected.has(id));
   };
   freeButton.addEventListener('click', () => { unrestricted = false; setSelection(freeIds); });
+  // The mirror of "select free": an explicitly billed key, for a caller that is meant to use
+  // the Premier models and should not silently fall back to a free one.
+  paidButton.addEventListener('click', () => { unrestricted = false; setSelection(paidIds); });
   noneButton.addEventListener('click', () => { unrestricted = false; setSelection([]); });
   // "All models" is the unrestricted key: it keeps working when DeepAI adds a
   // model, which is what the old checkbox expressed.

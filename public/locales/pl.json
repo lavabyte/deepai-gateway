@@ -87,6 +87,7 @@
   "form.requestLimit": "Limit żądań",
   "form.requestLimitHint": "Zostaw puste, aby nie ograniczać liczby żądań.",
   "form.selectFree": "Wybierz darmowe",
+  "form.selectPaid": "Wybierz płatne",
   "form.tokenLimit": "Limit tokenów",
   "form.tokenLimitHint": "Zostaw puste, aby nie ograniczać tokenów.",
   "form.unrestricted": "Bez ograniczeń: pozwala na każdy model, także przyszły",

@@ -87,6 +87,7 @@
   "form.requestLimit": "Anfragenlimit",
   "form.requestLimitHint": "Leer lassen für kein Anfragenlimit.",
   "form.selectFree": "Kostenlose auswählen",
+  "form.selectPaid": "Kostenpflichtige auswählen",
   "form.tokenLimit": "Token-Limit",
   "form.tokenLimitHint": "Leer lassen für kein Token-Limit.",
   "form.unrestricted": "Uneingeschränkt: erlaubt jedes Modell, auch zukünftige",

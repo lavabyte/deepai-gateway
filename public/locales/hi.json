@@ -87,6 +87,7 @@
   "form.requestLimit": "अनुरोध सीमा",
   "form.requestLimitHint": "अनुरोधों पर सीमा न लगाने के लिए खाली छोड़ें।",
   "form.selectFree": "मुफ़्त चुनें",
+  "form.selectPaid": "सशुल्क चुनें",
   "form.tokenLimit": "टोकन सीमा",
   "form.tokenLimitHint": "टोकन पर सीमा न लगाने के लिए खाली छोड़ें।",
   "form.unrestricted": "बिना रोक: हर मॉडल की अनुमति, भविष्य के मॉडल भी",

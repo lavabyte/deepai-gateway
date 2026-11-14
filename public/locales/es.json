@@ -87,6 +87,7 @@
   "form.requestLimit": "Límite de solicitudes",
   "form.requestLimitHint": "Déjalo vacío para no poner tope de solicitudes.",
   "form.selectFree": "Seleccionar gratuitos",
+  "form.selectPaid": "Seleccionar de pago",
   "form.tokenLimit": "Límite de tokens",
   "form.tokenLimitHint": "Déjalo vacío para no poner tope de tokens.",
   "form.unrestricted": "Sin restricciones: permite todos los modelos, incluidos los futuros",
