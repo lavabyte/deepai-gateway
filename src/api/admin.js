@@ -434,27 +434,28 @@ export function adminRouter(db, runtime) {
   /* ----------------------------------------------------------------- models */
 
   /**
-   * The model catalog with this account's usage beside it.
+   * The public model catalog.
    *
-   * The catalog itself is public; the usage figures are not, so the identity is
-   * required. Either credential works: a dashboard session, or one of the
-   * caller's own `sk-` keys (scoped to that key's owner). What is never allowed
-   * is no identity at all - that would mean an unscoped usage query.
+   * No identity is required: a wylogowany visitor can see which models exist.
+   * Usage figures (`usageMonth`, `usageAll`) are only attached when a session
+   * is active — otherwise they are `null`.
    */
-  router.get('/models', allowKeyIdentity(db), async (req, res) => {
+  router.get('/models', async (req, res) => {
     try {
-      const owner = req.account.username;
-      // The same copy the scheduled refresh keeps current, so the dashboard and /v1/models
-      // can never disagree about which models exist.
       const models = await ensureCatalog(AbortSignal.timeout(10_000));
-      const monthSince = startOfMonth();
-      const usageByModel = new Map(byModel(db, monthSince, owner).map((item) => [item.model, item]));
-      const allUsage = new Map(byModel(db, 0, owner).map((item) => [item.model, item]));
+      const owner = req.account?.username;
+      let usageMonth = null;
+      let usageAll = null;
+      if (owner !== undefined) {
+        const monthSince = startOfMonth();
+        usageMonth = new Map(byModel(db, monthSince, owner).map((item) => [item.model, item]));
+        usageAll = new Map(byModel(db, 0, owner).map((item) => [item.model, item]));
+      }
       res.json({
         models: models.map((model) => ({
           ...publicModel(model),
-          usageMonth: usageByModel.get(model.id) ?? null,
-          usageAll: allUsage.get(model.id) ?? null,
+          usageMonth: usageMonth === null ? null : usageMonth.get(model.id) ?? null,
+          usageAll: usageAll === null ? null : usageAll.get(model.id) ?? null,
         })),
       });
     } catch (error) {
