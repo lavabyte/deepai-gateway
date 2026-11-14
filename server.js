@@ -19,13 +19,15 @@ import { openDatabase } from './src/db.js';
 import { adminRouter } from './src/api/admin.js';
 import { createCallbackLogin } from './src/deepai/callback-login.js';
 import { installMachineIdFromDatabase } from './src/deepai/machine.js';
-import { startCatalogRefresh } from './src/deepai/catalog.js';
+import { startCatalogRefresh, catalogSnapshot, ensureCatalog, CATALOG_KEY_REFUSED, publicModel } from './src/deepai/catalog.js';
 import { installUpstreamPool } from './src/deepai/transport.js';
 import { initPricing, pricingStatus, startPricingRefresh } from './src/pricing.js';
 import { v1Router } from './src/api/v1.js';
 import { attachSession } from './src/middleware/session.js';
-import { listAccounts, clearSessionCookie, destroySession, forgetInactiveAccounts, recordAuthEvent } from './src/store.js';
+import { listAccounts, clearSessionCookie, destroySession, forgetInactiveAccounts, newestAccountApiKey, recordAuthEvent } from './src/store.js';
 import { DEFAULT_MAX_KEYS, parseMaxKeys, totalKeyCount } from './src/keys.js';
+import { byModel, startOfMonth } from './src/usage.js';
+import { modelPills, modelsUnavailableView, modelsView, localeFor, translator } from './src/web/render.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -188,18 +190,89 @@ export function createApp(db, options = {}) {
       return file;
     }
   };
-  const shell = () => readFileSync(join(HERE, 'public', 'index.html'), 'utf8')
-    .replace('href="/app.css"', `href="/${assetVersion('app.css')}"`)
-    .replace('src="/app.js"', `src="/${assetVersion('app.js')}"`);
-  const sendShell = (res, status = 200) => res
+  /**
+   * The dashboard shell, optionally with a page already drawn into it.
+   *
+   * `page` names the view the server rendered and `html` is its markup. A rendered page also
+   * carries the model picker, so the key form needs no catalog call of its own - the catalog
+   * comes in with the document or not at all.
+   *
+   * @param {{page?: string, html?: string, pills?: Array<object>}} [drawn]
+   */
+  const shell = (drawn = {}) => {
+    let html = readFileSync(join(HERE, 'public', 'index.html'), 'utf8')
+      .replace('href="/app.css"', `href="/${assetVersion('app.css')}"`)
+      .replace('src="/app.js"', `src="/${assetVersion('app.js')}"`)
+      .replace('<!--model-pills-->', modelPills(drawn.pills ?? catalogSnapshot() ?? []))
+      .replace('<!--view-->', drawn.html ?? '');
+    if (drawn.page !== undefined) {
+      html = html.replace('<body>', `<body data-page="${drawn.page}">`);
+    }
+    return html;
+  };
+  const sendShell = (res, status = 200, drawn = {}) => res
     .status(status)
     .type('html')
     // The shell must never be stale: it is what names the versioned assets.
     .set('cache-control', 'no-store')
-    .send(shell());
+    .send(shell(drawn));
 
   app.use(express.static(join(HERE, 'public'), { index: false, extensions: ['html'] }));
   app.get('/', (req, res) => sendShell(res));
+
+  /**
+   * The model catalog as a page.
+   *
+   * Public on purpose: which models exist is DeepAI's published list, and asking a visitor to
+   * sign in before showing it made the tab useless to exactly the people comparing a gateway
+   * before they use it. What is not public is the traffic beside it - the usage column is
+   * drawn only for a signed-in session.
+   *
+   * Served as a document rather than as JSON, and there is deliberately no model endpoint: an
+   * API that hands out the catalog is one somebody else can build their own front end on, which
+   * is the thing this gateway exists to be for its callers, not to have done to it.
+   */
+  app.get('/models', async (req, res) => {
+    const t = translator(localeFor(req));
+    // The catalog the schedule keeps current, read once if it has never been read.
+    let models = null;
+    let reason = '';
+    const apiKey = newestAccountApiKey(db);
+    if (apiKey === undefined) {
+      // No account on this deployment, so there is no key to read the catalog with. Saying so
+      // beats asking DeepAI with an empty header and reporting its refusal as a key problem.
+      reason = 'no DeepAI account is signed in on this gateway yet';
+    } else {
+      try {
+        models = catalogSnapshot() ?? await ensureCatalog(AbortSignal.timeout(10_000), apiKey);
+      } catch (error) {
+        reason = error?.message ?? String(error);
+        if (error?.code === CATALOG_KEY_REFUSED) {
+          // The stored DeepAI key is the deployment's, not the visitor's, so the page says what
+          // an operator has to do rather than asking the reader to sign in for something they
+          // did not cause.
+          runtime.log('models page: the stored DeepAI key was refused - sign in again in the dashboard');
+        }
+      }
+    }
+    if (models === null) {
+      /*
+       * `200`, deliberately. The document is what was asked for and it says what happened; a
+       * 5xx would only invite a proxy in front to replace this page with its own, which is how
+       * the same failure once reached a browser as a bare "Bad gateway" with no explanation.
+       */
+      return sendShell(res, 200, { page: 'models', html: modelsUnavailableView({ t, reason }) });
+    }
+
+    const usage = req.account === undefined
+      ? null
+      : new Map(byModel(db, startOfMonth(), req.account.username).map((item) => [item.model, item]));
+    return sendShell(res, 200, {
+      page: 'models',
+      html: modelsView({ models: models.map(publicModel), usage, t }),
+      pills: models,
+    });
+  });
 
   app.use((req, res) => {
     const wantsJson = req.path === '/v1' || req.path.startsWith('/v1/')
@@ -285,8 +358,7 @@ export function start(overrides = {}) {
      * signed in. Read at each refresh rather than captured here, so signing in again is
      * picked up without a restart.
      */
-    apiKey: () => listAccounts(db)
-      .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))[0]?.apiKey,
+    apiKey: () => newestAccountApiKey(db),
   });
 
   // Reference prices come from OpenRouter and are cached on disk, so the

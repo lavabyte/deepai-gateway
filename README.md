@@ -97,7 +97,7 @@ Only what genuinely has to be:
 | `/healthz` | Public, and returns **only** `{"ok":true}` - a liveness probe must not become a directory of users |
 | `/api/pricing` | Public: OpenRouter publishes these rates. The status is projected so upstream error detail stays internal |
 | `/v1/models` | Requires an API key, scoped to what that key may use |
-| `/api/models` | The catalog is public, the usage figures beside it are per account, so an identity is required: **a session cookie or one of your own `sk-` keys** |
+| `/models` | Public **page**: the catalog drawn as HTML. There is no model endpoint - see below |
 | everything else under `/api` | Requires a session |
 | `/api/pricing/refresh` | Requires a session: it performs an outbound network call |
 
@@ -207,13 +207,20 @@ gateway re-reads it **every ten to twenty minutes, at a random point in that win
 random window is deliberate: a fixed interval would put every deployment of this gateway in
 the same minute forever.
 
-`GET /v1/models`, `/v1/models/details`, the dashboard's model list and every completion answer
-from that kept list, so the panel and the API can never disagree about which models exist. A
-failed re-read keeps the previous list, logs it, and tries again on the next tick - it does
-not empty the catalog.
+`GET /v1/models`, `/v1/models/details`, the Models page and every completion answer from that
+kept list, so the panel and the API can never disagree about which models exist. A failed
+re-read keeps the previous list, logs it, and tries again on the next tick - it does not empty
+the catalog.
 
-`/v1/models` shows fewer models than `/api/models` for one reason that is not staleness: it is
-scoped to the key, and a key restricted to free models does not see the Premier ones.
+`/v1/models` shows fewer models than the Models page for one reason that is not staleness: it
+is scoped to the key, and a key restricted to free models does not see the Premier ones.
+
+The catalog is drawn into the page rather than served as JSON, deliberately. The dashboard is
+what this gateway offers its own callers; an endpoint handing out the model list is what
+somebody else builds their own front end on, and there is no reason to offer one. The page is
+public - which models exist is DeepAI's published list - and the usage column beside it is
+drawn only for a signed-in session. The key form's model picker rides along in the same
+document, so the browser never asks for the catalog at all.
 
 The price shown is `theosPerRequest`, which is what DeepAI charges per call.
 
@@ -542,7 +549,7 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 | `GET` | `/api/usage/models` | Per-model breakdown (`?range=today\|month\|all`) |
 | `GET` | `/api/usage/recent` | Recent requests (`?limit`, `?keyId`) |
 | `GET` | `/api/usage/keys/:id` | One key's usage and history |
-| `GET` | `/api/models` | Catalog with usage attached |
+| `GET` | `/models` | The catalog as a page (HTML, public). No JSON twin exists |
 | `GET` | `/healthz` | Liveness only: `{"ok":true}` |
 
 ## Money saved

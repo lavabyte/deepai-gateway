@@ -846,22 +846,24 @@ await checkAsync('/v1/models only advertises the models a restricted key may use
       assert.equal(none.data.length, 0);
 
       /*
-       * The dashboard route reads the catalog as the session's DeepAI account and attaches
-       * that account's usage, so a session is what it requires. A gateway key alone has no
-       * DeepAI account behind it on this route, so it is refused rather than served
-       * unscoped - the usage query would otherwise cover every account.
+       * The dashboard no longer has a model endpoint at all: the catalog is drawn into a page
+       * and into the key picker, so there is nothing here to consume as JSON. What it must not
+       * do is leak the per-account usage to a caller without an identity, so the page shows the
+       * usage column only for a session.
        */
-      assert.equal((await fetch(`${base}/api/models`)).status, 401);
-      assert.equal((await fetch(`${base}/api/models`, {
-        headers: { authorization: `Bearer ${restricted.plaintext}` },
-      })).status, 401);
-      // A session identity works, and the usage figures are scoped to it.
+      assert.equal((await fetch(`${base}/api/models`)).status, 404, 'no model endpoint is left');
+      const anonymous = await fetch(`${base}/models`);
+      assert.equal(anonymous.status, 200, 'the catalog page is public');
+      const anonymousHtml = await anonymous.text();
+      assert.ok(anonymousHtml.includes('deepseek-v4.1-flash'), 'and lists the models');
+      assert.ok(!anonymousHtml.includes(`>${LOCALES.en['metric.used']}<`),
+        'with no usage column for a signed-out visitor');
       const session = sessionFor(fresh, 'catalog-viewer');
-      const dashboard = await asUser(base, session)('/api/models');
-      assert.equal(dashboard.body.models.length, CATALOG_PAYLOAD.models.length,
-        `the catalog is served whole: ${JSON.stringify(dashboard.body).slice(0, 200)}`);
-      // An unknown key is refused.
-      assert.equal((await fetch(`${base}/api/models`, { headers: { authorization: 'Bearer sk-nope' } })).status, 401);
+      const dashboard = await asUser(base, session)('/models');
+      assert.equal(dashboard.status, 200);
+      assert.ok(String(dashboard.body).includes(`>${LOCALES.en['metric.used']}<`),
+        'and one for a signed-in account');
+      assert.ok(String(dashboard.body).includes('class="pill"'), 'the key picker comes with it');
     } finally {
       restore();
     }
@@ -870,13 +872,13 @@ await checkAsync('/v1/models only advertises the models a restricted key may use
   }
 });
 
-await checkAsync('a key DeepAI refuses sends the models tab to the sign-in card, not to a 502', async () => {
+await checkAsync('a catalog that cannot be read is a page that says so, not a 5xx from a proxy', async () => {
   /*
-   * DeepAI mints a fresh key on every sign-in, so a stored one stops working on its own. The
-   * models tab used to answer that with `502 catalog_unavailable` - a dead end for the visitor,
-   * and something a proxy in front is free to replace with its own HTML page. It is the
-   * session ending, so it answers 401 and the dashboard asks for a sign-in, exactly as it does
-   * when the gateway session itself expires.
+   * The catalog read is authenticated with this deployment's DeepAI key, and DeepAI mints a fresh
+   * key on every sign-in - so a stored one stops working on its own. The Models page has to say
+   * that in the page: answering 502 left the browser with a status and no explanation, and a
+   * proxy in front is free to replace a 5xx with its own HTML page, which is exactly how "the
+   * models could not be read" arrived as "Unexpected non-JSON answer (HTTP 502)".
    */
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
@@ -885,7 +887,7 @@ await checkAsync('a key DeepAI refuses sends the models tab to the sign-in card,
   await new Promise((resolve) => server.once('listening', resolve));
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
-  const session = sessionFor(fresh, 'stale-key-user');
+  saveAccount(fresh, { username: 'stale-key-user', apiKey: 'stale-deepai-key' });
 
   /*
    * The stub answers the catalog with a chosen status and hands every other request - the test
@@ -901,30 +903,27 @@ await checkAsync('a key DeepAI refuses sends the models tab to the sign-in card,
   };
 
   try {
-    const restore = withCatalogStatus(401);
-    try {
-      const response = await asUser(base, session)('/api/models');
-      assert.equal(response.status, 401, 'a refused DeepAI key is not a catalog failure');
-      assert.equal(response.body.code, 'deepai_signed_out');
-    } finally {
-      restore();
-    }
-
-    // And a genuine upstream failure is still reported as one rather than as a sign-out.
-    const broken = withCatalogStatus(503);
-    try {
-      const failed = await asUser(base, session)('/api/models');
-      assert.equal(failed.status, 502);
-      assert.equal(failed.body.code, 'catalog_unavailable');
-    } finally {
-      broken();
+    for (const status of [401, 503]) {
+      const restore = withCatalogStatus(status);
+      try {
+        const response = await fetch(`${base}/models`);
+        const html = await response.text();
+        assert.equal(response.status, 200,
+          `HTTP ${status} upstream is reported in a page that loads, so no proxy substitutes its own`);
+        assert.match(String(response.headers.get('content-type')), /text\/html/,
+          'and it is still a page, so no proxy has a reason to draw its own');
+        assert.ok(html.includes(LOCALES.en['models.unavailable']), 'which says what happened');
+      } finally {
+        restore();
+      }
     }
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
 });
 
-await checkAsync('/ serves the dashboard shell and nothing else is browser-navigable', async () => {  const fresh = openDatabase(':memory:');
+await checkAsync('/ serves the dashboard shell and nothing else is browser-navigable', async () => {
+  const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
   const app = createApp(fresh, { log: () => {}, logRequests: false });
   const server = app.listen(0, '127.0.0.1');
@@ -2961,6 +2960,12 @@ await checkAsync('every language is complete and agrees on its placeholders', as
   const root = new URL('..', import.meta.url).pathname;
   const app = readFileSync(join(root, 'public', 'app.js'), 'utf8');
   const html = readFileSync(join(root, 'public', 'index.html'), 'utf8');
+  /*
+   * The Models page is drawn by the server, so its labels are named in `src/web/render.js`
+   * rather than in the client or the shell. Those keys are just as live as the rest.
+   */
+  const server = readFileSync(join(root, 'src', 'web', 'render.js'), 'utf8');
+  const sources = [app, server];
   const used = new Set();
   /*
    * Any string literal in the client that names a key the locale file has.
@@ -2975,8 +2980,10 @@ await checkAsync('every language is complete and agrees on its placeholders', as
    * It still catches what it is for: a key that nothing names at all is still unnamed, which
    * is how the abandoned `common.logIn` was found.
    */
-  for (const m of app.matchAll(/'([a-z][a-zA-Z]*\.[a-zA-Z][\w.]*)'/g)) {
-    if (english[m[1]] !== undefined) used.add(m[1]);
+  for (const source of sources) {
+    for (const m of source.matchAll(/'([a-z][a-zA-Z]*\.[a-zA-Z][\w.]*)'/g)) {
+      if (english[m[1]] !== undefined) used.add(m[1]);
+    }
   }
   /*
    * Keys built at runtime from a stable family: `t(`status.${status}`)`. The family is read
@@ -5880,12 +5887,12 @@ await checkAsync('copying a key works on a plain http:// origin', async () => {
   assert.equal(secure.selection.range, undefined, 'and nothing to select by hand');
 });
 
-await checkAsync('the catalog loads once a session exists, without a reload', async () => {
+await checkAsync('the client reads the catalog out of the document, and never asks for it', async () => {
   /*
-   * The catalog needs an identity, so the load at startup is refused for a visitor who is
-   * not signed in - and `state.models` stays empty. Signing in without reloading the page
-   * then left the key form with no models to choose from. `render()` now fills it in as
-   * soon as there is a session.
+   * The catalog used to come from `/api/models`, which meant the dashboard published the model
+   * list as JSON to anyone who asked. It is drawn into the document instead - the page carries
+   * it, and the key form's picker rides along in a `<template>` - so the client has nothing to
+   * fetch and there is no endpoint left to consume.
    */
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
@@ -5893,11 +5900,9 @@ await checkAsync('the catalog loads once a session exists, without a reload', as
   const root = new URL('..', import.meta.url).pathname;
   const source = readFileSync(join(root, 'public', 'app.js'), 'utf8');
 
-  const catalogCalls = [];
-  const nodes = new Map();
   const node = () => ({
     innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
-    dataset: {}, style: {}, value: '', children: [],
+    dataset: {}, style: {}, value: '', children: [], content: undefined,
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
     addEventListener() {}, appendChild(c) { this.children.push(c); },
     append(...c) { this.children.push(...c); }, remove() {},
@@ -5906,28 +5911,38 @@ await checkAsync('the catalog loads once a session exists, without a reload', as
     setAttribute() {}, getAttribute: () => null, closest: () => null,
     focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
   });
-  for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
-    'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button', 'locale-button', 'locale-menu', 'locale-flag', 'currency-button', 'currency-menu', 'currency-sign']) nodes.set(id, node());
 
+  // The template the server fills, as the client would find it in the document.
+  const pills = [
+    Object.assign(node(), { dataset: { model: 'glm-5.3-flash', premier: 'false' }, textContent: 'GLM 5.3 Flash' }),
+    Object.assign(node(), { dataset: { model: 'glm-5.3', premier: 'true' }, textContent: 'GLM 5.3' }),
+  ];
+  const nodes = new Map();
+  for (const id of ['view', 'toasts', 'modal', 'modal-title', 'modal-body', 'modal-close',
+    'account-badge', 'account-badge-text', 'nav', 'theme-toggle', 'auth-button', 'locale-button',
+    'locale-menu', 'locale-flag', 'currency-button', 'currency-menu', 'currency-sign']) nodes.set(id, node());
+  nodes.set('model-pills', Object.assign(node(), { content: { querySelectorAll: () => pills } }));
+
+  const modelRequests = [];
   const emptyTotals = { totalTokens: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, requests: 0, costUsd: 0 };
   const sandbox = {
     document: {
       getElementById: (id) => nodes.get(id) ?? null,
       createElement: () => node(), querySelector: () => null, querySelectorAll: () => [],
       addEventListener() {}, documentElement: node(), visibilityState: 'visible', body: node(),
+      cookie: '',
     },
     window: { addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }), location: { assign() {} } },
-    location: { search: '', pathname: '/', hash: '' },
+    location: { search: '', pathname: '/', hash: '', reload() {} },
     history: { replaceState() {} },
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     navigator: { language: 'en-GB', languages: ['en-GB'] },
     fetch: async (url) => {
       const target = String(url);
       if (target.includes('/locales/')) return localeResponse();
-      if (target.includes('/models')) {
-        catalogCalls.push(target);
-        return new Response(JSON.stringify({ ok: true, models: [{ id: 'm-one' }, { id: 'm-two' }] }),
-          { status: 200, headers: { 'content-type': 'application/json' } });
+      if (/\/api\/models|\/models$/.test(target)) {
+        modelRequests.push(target);
+        return new Response('{"error":"gone"}', { status: 404, headers: { 'content-type': 'application/json' } });
       }
       if (target.includes('/account')) {
         return new Response(JSON.stringify({ ok: true, signedIn: true, username: 'u', displayName: 'u@example.com', allowance: null, balanceLow: false, keyQuota: { used: 0, max: 5, remaining: 5, atLimit: false } }),
@@ -5948,20 +5963,18 @@ await checkAsync('the catalog loads once a session exists, without a reload', as
   new vm.Script(source, { filename: 'app.js' }).runInContext(sandbox);
   await new Promise((resolve) => setTimeout(resolve, 60));
 
-  // The startup load ran while signed out and was refused, so nothing is in hand.
-  vm.runInContext('state.models = []', sandbox);
-  catalogCalls.length = 0;
+  // Joined rather than compared as arrays: what comes back from the sandbox has the sandbox's
+  // own `Array`, which a strict deepEqual never matches.
+  const models = vm.runInContext('state.models', sandbox);
+  assert.equal(models.map((model) => model.id).join(','), 'glm-5.3-flash,glm-5.3',
+    'the document names the models');
+  assert.equal(models.map((model) => model.premier).join(','), 'false,true',
+    'and their tiers, which is what the badges read');
+  assert.equal(models[0].displayName, 'GLM 5.3 Flash', 'and the label the picker shows');
 
   await vm.runInContext('render()', sandbox);
-
-  assert.ok(catalogCalls.length > 0, 'a signed-in render must fetch the catalog');
-  const models = vm.runInContext('state.models.length', sandbox);
-  assert.equal(models, 2, 'and keep it, so the key form has models to offer');
-
-  // A second render must not fetch it again: the guard is what keeps it cheap.
-  catalogCalls.length = 0;
-  await vm.runInContext('render()', sandbox);
-  assert.equal(catalogCalls.length, 0, 'a catalog already in hand is not fetched again');
+  assert.deepEqual(modelRequests, [], 'nothing in the client may ask for a model list');
+  assert.ok(!/api\('\/models'\)|loadModels/.test(source), 'and there is no helper left to ask with');
 });
 
 await checkAsync('the same DeepAI key never becomes two accounts', async () => {

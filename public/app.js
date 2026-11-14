@@ -778,6 +778,26 @@ const LOCALES = [
 
 const LOCALE_KEY = 'deepai-gateway-locale';
 
+/** Cookie the server reads to draw a page in the visitor's language. Matches `src/web/render.js`. */
+const LOCALE_COOKIE = 'deepai_gateway_locale';
+
+
+/**
+ * Mirror the chosen language into a cookie.
+ *
+ * The server draws some pages itself and cannot read `localStorage`, so the choice has to
+ * reach it somehow - a cookie is the one thing sent with the request for the document. Without
+ * it a Polish reader was served the English page and had to switch again on every load.
+ *
+ * @param {string} code
+ */
+function rememberLocale(code) {
+  try {
+    document.cookie = `${LOCALE_COOKIE}=${encodeURIComponent(code)}; path=/; max-age=31536000; SameSite=Lax`;
+  } catch {
+    // A browser that refuses cookies still gets the client-rendered pages in its language.
+  }
+}
 
 /** The locale entry for a code, or English when the code is unknown. */
 function localeOf(code) {
@@ -995,11 +1015,21 @@ async function setLocale(code) {
   if (entry.code === state.locale && Object.keys(state.strings).length > 0) return;
   if (!await loadLocale(entry.code)) return;
   localStorage.setItem(LOCALE_KEY, entry.code);
+  rememberLocale(entry.code);
   applyStaticText();
   renderLocaleButton();
   // The currency tooltip is a translated name, so it is redrawn with everything else.
   renderCurrencyButton();
   renderAccountBadge();
+  /*
+   * A page the server drew carries its strings already, and those are not re-rendered here:
+   * the document has to be asked for again in the new language. That is one request on a
+   * deliberate language change, and it is the only way the server-rendered text can follow.
+   */
+  if (document.body?.dataset?.page !== undefined) {
+    location.reload();
+    return;
+  }
   await render({ refreshAccount: false });
 }
 
@@ -1198,11 +1228,24 @@ async function loadAccount() {
   renderAccountBadge();
 }
 
-/** Load the model catalog once. */
-async function loadModels(force = false) {
-  if (!force && state.models.length > 0) return state.models;
-  const payload = await api('/models');
-  state.models = payload.models ?? [];
+/**
+ * The catalog, as the server drew it into this document.
+ *
+ * There is no model endpoint to ask: the model picker arrives with the page inside a
+ * `<template>`, and the pills in it carry the ids and tiers as data attributes. Reading it is
+ * what fills `state.models`, which is all the request table (for its tier badges) and the key
+ * form need to know.
+ *
+ * @returns {Array<{id: string, displayName: string, premier: boolean}>}
+ */
+function readCatalog() {
+  const template = $('model-pills');
+  if (template === null || template.content === undefined) return [];
+  state.models = [...template.content.querySelectorAll('.pill')].map((node) => ({
+    id: node.dataset?.model ?? '',
+    displayName: node.textContent ?? '',
+    premier: node.dataset?.premier === 'true',
+  }));
   return state.models;
 }
 
@@ -1210,9 +1253,9 @@ async function loadModels(force = false) {
 
 const routes = {
   home: renderHome,
-  models: renderModels,
   keys: renderKeys,
 };
+
 
 /** A metric card. */
 function metricCard({ eyebrow, value, label, foot }) {
@@ -1716,100 +1759,6 @@ async function renderHome() {
   });
 }
 
-/* ------------------------------------------------------------------ models */
-
-async function renderModels() {
-  view.innerHTML = `<div class="loading"><span class="spinner"></span>${t('models.loading')}</div>`;
-  let payload;
-  try {
-    payload = await api('/models');
-  } catch (error) {
-    // A 401 here is the account, not the catalog: the gateway session ended, or DeepAI
-    // stopped accepting this account's key. Both are fixed by signing in, so the view asks
-    // for that instead of showing an error nobody can act on.
-    if (isAuthFailure(error)) {
-      await loadAccount();
-      if (needsLogin()) return;
-    }
-    if (error.code === 'deepai_signed_out') {
-      renderSignInCard(error.message);
-      return;
-    }
-    view.innerHTML = `<div class="note note--error">${esc(t('error.models', { message: error.message }))}</div>`;
-    return;
-  }
-  const models = payload.models ?? [];
-  state.models = models;
-
-  const free = models.filter((model) => !model.premier);
-  const premier = models.filter((model) => model.premier);
-
-  const row = (model) => `
-    <tr>
-      <td>
-        <div class="model-row">
-          <div>
-            <div class="model-row__name">${esc(model.displayName)}</div>
-            <div class="tiny muted mono">${esc(model.id)}</div>
-          </div>
-        </div>
-      </td>
-      <td><span class="badge ${model.premier ? 'badge--violet' : 'badge--green'}">${model.premier ? t('common.premium') : t('common.free')}</span></td>
-      <td class="num tiny muted">${esc(tokens(model.contextWindow))}</td>
-      <td class="num tiny muted">${esc(tokens(model.maxTokens))}</td>
-      <td class="tiny muted">${model.reasoning ? 'none, low, medium, high' : '-'}</td>
-      <td class="tiny muted">${model.input.includes('image') ? 'text, image' : 'text'}</td>
-      <td class="num tiny muted">${model.premier ? esc(model.rateLabel) : t('common.unmetered')}</td>
-      <td class="num tiny">${model.usageMonth ? exact(model.usageMonth.totalTokens) : '<span class="muted">-</span>'}</td>
-    </tr>`;
-
-  view.innerHTML = `
-    <div class="page__head">
-      <h1 class="page__title">${t('models.title')}</h1>
-      <p class="page__sub">${t('models.subtitle')}</p>
-    </div>
-
-    <div class="stack">
-      <div class="grid grid--3">
-        ${metricCard({ eyebrow: t('metric.catalog'), value: String(models.length), label: t('metric.modelsAvailable') })}
-        ${metricCard({ eyebrow: t('metric.freeTier'), value: String(free.length), label: t('metric.unmeteredModels') })}
-        ${metricCard({ eyebrow: t('common.premium'), value: String(premier.length), label: t('common.billedInCredits') })}
-      </div>
-
-      <div class="card card--flush">
-        <div class="card__head">
-          <div>
-            <div class="card__title">${t('common.allModels')}</div>
-            <div class="card__sub">${t('models.usedNote')}</div>
-          </div>
-          <button class="btn btn--secondary btn--sm" id="reload-models">${t('models.reload')}</button>
-        </div>
-        <div class="table-wrap">
-          <table class="table">
-            <thead><tr>
-              <th>${t('metric.model')}</th><th>${t('metric.tier')}</th><th class="num">${t('metric.context')}</th><th class="num">${t('metric.maxOut')}</th>
-              <th class="hide-sm">${t('metric.reasoning')}</th><th class="hide-sm">${t('metric.input')}</th><th class="num">${t('metric.rate')}</th><th class="num">${t('metric.used')}</th>
-            </tr></thead>
-            <tbody>${models.map(row).join('')}</tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="eyebrow">${t('models.howBilling')}</div>
-        <p class="muted mt-2" style="font-size:13px;max-width:78ch">
-          ${t('models.billing')}
-        </p>
-      </div>
-    </div>`;
-
-  $('reload-models').addEventListener('click', async () => {
-    await loadModels(true);
-    toast(t('models.reloaded'));
-    renderModels();
-  });
-}
-
 /* -------------------------------------------------------------------- keys */
 
 async function renderKeys() {
@@ -2031,7 +1980,19 @@ function openKeyModal(existing, onDone) {
   // Free models are preselected: a new key is useful immediately, and the
   // operator opts in to the billed ones deliberately. The quick actions are
   // the only way to widen or clear the selection.
-  const catalog = state.models.length > 0 ? state.models : [];
+  /*
+   * The pills are drawn by the server into the document and cloned here, so the form knows the
+   * catalog without asking for it: a model endpoint would be the same list under another name,
+   * and open to whoever wanted one.
+   */
+  const pillTemplate = $('model-pills');
+  const catalog = pillTemplate === null || pillTemplate.content === undefined
+    ? []
+    : [...pillTemplate.content.querySelectorAll('.pill')].map((node) => ({
+      id: node.dataset?.model ?? '',
+      premier: node.dataset?.premier === 'true',
+      node,
+    }));
   const freeIds = catalog.filter((model) => !model.premier).map((model) => model.id);
 
   let unrestricted = existing !== undefined && existing.modelsRestricted !== true;
@@ -2045,10 +2006,7 @@ function openKeyModal(existing, onDone) {
   modelList.className = 'pill-list';
   const pills = new Map();
   for (const model of catalog) {
-    const pill = document.createElement('button');
-    pill.type = 'button';
-    pill.className = 'pill';
-    pill.textContent = model.displayName ?? model.id;
+    const pill = model.node.cloneNode(true);
     pill.title = t(model.premier ? 'models.pillPremium' : 'models.pillFree');
     pill.dataset.on = String(selected.has(model.id));
     pill.addEventListener('click', () => {
@@ -2236,16 +2194,31 @@ async function render({ refreshAccount = true } = {}) {
   if (refreshAccount) await loadAccount();
 
   /*
-   * The catalog needs an identity, so the load at startup is refused for a visitor who is
-   * not signed in yet - and `state.models` stays empty. Signing in without reloading the
-   * page then left the key form with no models to choose from, which is what this fixes.
-   * The `length === 0` guard makes it a no-op once the catalog is in hand.
+   * A page the server drew is already on screen.
+   *
+   * The Models page is a document, not a route this client paints: the server sends its
+   * markup with the shell. With no hash the client has nothing to add - repainting here would
+   * replace the catalog with the overview - so it only settles the top bar and the active
+   * link. Choosing any hash route from there navigates for real.
    */
-  if (state.account?.signedIn === true && state.models.length === 0) {
-    await loadModels().catch(() => []);
+  const serverPage = document.body?.dataset?.page;
+  if (serverPage !== undefined && location.hash === '') {
+    for (const link of document.querySelectorAll('.nav__link')) {
+      link.classList.toggle('is-active', link.dataset.route === serverPage);
+    }
+    return;
   }
 
   const route = currentRoute();
+  /*
+   * `#/models` was the old address of a client-rendered catalog. It is a page now, and a
+   * bookmark from before this change should land on it rather than on the overview - the
+   * hash route has no handler left, so it is forwarded instead of silently ignored.
+   */
+  if (route === 'models') {
+    location.replace('/models');
+    return;
+  }
   for (const link of document.querySelectorAll('.nav__link')) {
     link.classList.toggle('is-active', link.dataset.route === route);
   }
@@ -2320,12 +2293,16 @@ document.addEventListener('visibilitychange', () => {
   // The language comes first: everything rendered below is a translated string, and a
   // view painted in the wrong language and then repainted is worse than a short wait.
   await loadLocale(detectLocale());
+  // Pin the language for the server, which draws the Models page in it.
+  rememberLocale(state.locale);
   applyStaticText();
   renderLocaleButton();
   // The currency is a display choice, so it is settled before anything shows an amount.
   loadStoredCurrency();
   renderCurrencyButton();
-  await Promise.all([loadAccount(), loadModels().catch(() => []), loadRates()]);
+  // The catalog is part of this document, so there is nothing to fetch for it.
+  readCatalog();
+  await Promise.all([loadAccount(), loadRates()]);
   // DeepAI's callback redirects here with ?logged-in=1; confirm it once.
   if (new URLSearchParams(location.search).has('logged-in')) {
     if (state.account?.signedIn === true) toast(t('signin.loggedInToast'));

@@ -16,7 +16,6 @@ import { randomUUID } from 'node:crypto';
 import {
   checkKey,
 } from '../deepai/account.js';
-import { CATALOG_KEY_REFUSED, ensureCatalog, publicModel } from '../deepai/catalog.js';
 import {
   DEFAULT_MAX_KEYS,
   WINDOWS,
@@ -428,57 +427,6 @@ export function adminRouter(db, runtime) {
       },
       recent: recent(db, 25, row.id, row.owner_username),
     });
-  });
-
-  /* ----------------------------------------------------------------- models */
-
-  /**
-   * The model catalog with this account's usage beside it.
-   *
-   * Requires a signed-in session. The caller's DeepAI account API key is sent
-   * with the catalog request so DeepAI can rate-limit and bill against the
-   * right account. Usage figures are attached when a session is active.
-   */
-  router.get('/models', requireSession, async (req, res) => {
-    try {
-      const owner = req.account.username;
-      const apiKey = req.account.apiKey;
-      // The same copy the scheduled refresh keeps current, so the dashboard and /v1/models
-      // can never disagree about which models exist.
-      const models = await ensureCatalog(AbortSignal.timeout(10_000), apiKey);
-      const monthSince = startOfMonth();
-      const usageByModel = new Map(byModel(db, monthSince, owner).map((item) => [item.model, item]));
-      const allUsage = new Map(byModel(db, 0, owner).map((item) => [item.model, item]));
-      res.json({
-        models: models.map((model) => ({
-          ...publicModel(model),
-          usageMonth: usageByModel.get(model.id) ?? null,
-          usageAll: allUsage.get(model.id) ?? null,
-        })),
-      });
-    } catch (error) {
-      /*
-       * A key DeepAI no longer accepts is the session ending, not a catalog fault, and the
-       * dashboard can act on that: it re-reads the account and shows the sign-in card. Left as
-       * a 502 it was a dead end - and a proxy in front is free to replace a 502 with its own
-       * HTML page, which is how "the models could not be read" arrived as "Unexpected non-JSON
-       * answer (HTTP 502)" with nothing an operator could act on.
-       */
-      if (error?.code === CATALOG_KEY_REFUSED) {
-        return res.status(401).json({
-          ok: false,
-          error: 'DeepAI no longer accepts this account\'s key. Sign in again.',
-          code: 'deepai_signed_out',
-        });
-      }
-      // The dashboard shows this, so it says the models could not be read rather than
-      // echoing whatever the failure was.
-      res.status(502).json({
-        ok: false,
-        error: `The model list could not be read from DeepAI: ${error?.message ?? error}`,
-        code: 'catalog_unavailable',
-      });
-    }
   });
 
   return router;

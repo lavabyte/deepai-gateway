@@ -69,6 +69,22 @@ export function listAccounts(db) {
 }
 
 /**
+ * A DeepAI key this deployment can read the model catalog with.
+ *
+ * The catalog is the same for every account and lane 6 refuses a read without a key, so the
+ * public pages need one that is not the visitor's. The most recently used account is the
+ * likeliest to still be signed in; nothing here is per-account, so which one answers does not
+ * matter - only that one does.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @returns {string|undefined}
+ */
+export function newestAccountApiKey(db) {
+  const row = db.prepare('SELECT api_key FROM accounts ORDER BY updated_at DESC LIMIT 1').get();
+  return typeof row?.api_key === 'string' && row.api_key !== '' ? row.api_key : undefined;
+}
+
+/**
  * The account a DeepAI key already belongs to, if any.
  *
  * DeepAI mints a fresh key on every sign-in, so one DeepAI account can hold

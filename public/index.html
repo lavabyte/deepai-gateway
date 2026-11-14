@@ -33,7 +33,7 @@
 
 <header class="topbar">
   <div class="topbar__inner">
-    <a class="brand" href="#/">
+    <a class="brand" href="/#/">
       <span class="brand__mark" aria-hidden="true">
         <img class="brand__logo brand__logo--on-light" src="/icon-black.png" alt="" width="20" height="20">
         <img class="brand__logo brand__logo--on-dark" src="/icon.png" alt="" width="20" height="20">
@@ -41,9 +41,9 @@
       <span class="brand__name">DeepAI Gateway</span>
     </a>
     <nav class="nav">
-      <a class="nav__link" href="#/" data-route="home" data-i18n="nav.overview">Overview</a>
-      <a class="nav__link" href="#/models" data-route="models" data-i18n="nav.models">Models</a>
-      <a class="nav__link" href="#/keys" data-route="keys" data-i18n="nav.keys">API Keys</a>
+      <a class="nav__link" href="/#/" data-route="home" data-i18n="nav.overview">Overview</a>
+      <a class="nav__link" href="/models" data-route="models" data-i18n="nav.models">Models</a>
+      <a class="nav__link" href="/#/keys" data-route="keys" data-i18n="nav.keys">API Keys</a>
     </nav>
     <div class="topbar__right">
       <span class="badge badge--gray" id="account-badge">
@@ -76,7 +76,7 @@
   </div>
 </header>
 
-<main class="page" id="view" aria-live="polite"></main>
+<main class="page" id="view" aria-live="polite"><!--view--></main>
 
 <div class="toasts" id="toasts"></div>
 
@@ -93,6 +93,8 @@
     <div class="modal__body" id="modal-body"></div>
   </div>
 </div>
+
+<template id="model-pills"><!--model-pills--></template>
 
 <script type="module" src="/app.js"></script>
 </body>
