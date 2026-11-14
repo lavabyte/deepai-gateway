@@ -28,7 +28,7 @@ export const API_ORIGIN = 'https://api.deepai.org';
  * lane answers `426 lane_version_unsupported` and a live one answers `401 auth_required`,
  * which makes the revision cheap to find again.
  */
-export const LANE_VERSION = '4';
+export const LANE_VERSION = '6';
 
 /**
  * An identifier for this process, sent with every Code-lane request.
