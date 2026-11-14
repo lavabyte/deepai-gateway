@@ -68,8 +68,14 @@ export function advertisedCallbackPort(localPort) {
   return port;
 }
 
-/** The address DeepAI will build, from the port it is given. */
-function loopbackCallbackUrl(port) {
+/**
+ * The address DeepAI will build, from the port it is given.
+ *
+ * Exported so the dashboard can show the visitor what to look for in the address bar: the
+ * sign-in field used to name this project's default port instead of the one the deployment
+ * actually listens on, which is the one DeepAI is told about.
+ */
+export function loopbackCallbackUrl(port) {
   return `http://127.0.0.1:${Number(port) || 0}/callback`;
 }
 

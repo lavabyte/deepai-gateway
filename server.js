@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { openDatabase } from './src/db.js';
 import { adminRouter } from './src/api/admin.js';
-import { createCallbackLogin } from './src/deepai/callback-login.js';
+import { advertisedCallbackPort, createCallbackLogin, loopbackCallbackUrl } from './src/deepai/callback-login.js';
 import { installMachineIdFromDatabase } from './src/deepai/machine.js';
 import { startCatalogRefresh, catalogSnapshot, ensureCatalog, CATALOG_KEY_REFUSED, publicModel } from './src/deepai/catalog.js';
 import { installUpstreamPool } from './src/deepai/transport.js';
@@ -27,7 +27,7 @@ import { attachSession } from './src/middleware/session.js';
 import { listAccounts, clearSessionCookie, destroySession, forgetInactiveAccounts, newestAccountApiKey, recordAuthEvent } from './src/store.js';
 import { DEFAULT_MAX_KEYS, parseMaxKeys, totalKeyCount } from './src/keys.js';
 import { byModel, startOfMonth } from './src/usage.js';
-import { modelPills, modelsUnavailableView, modelsView, localeFor, translator } from './src/web/render.js';
+import { escapeHtml, modelPills, modelsUnavailableView, modelsView, localeFor, translator } from './src/web/render.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -197,28 +197,34 @@ export function createApp(db, options = {}) {
    * carries the model picker, so the key form needs no catalog call of its own - the catalog
    * comes in with the document or not at all.
    *
+   * The body also carries the address DeepAI will redirect a sign-in to. It is a property of
+   * *this* deployment - the port it listens on - so the client cannot work it out, and the
+   * sign-in field used to show the default port instead of the one in use.
+   *
+   * @param {import('express').Request} req
    * @param {{page?: string, html?: string, pills?: Array<object>}} [drawn]
    */
-  const shell = (drawn = {}) => {
-    let html = readFileSync(join(HERE, 'public', 'index.html'), 'utf8')
+  const shell = (req, drawn = {}) => {
+    const attributes = [
+      `data-callback-url="${escapeHtml(loopbackCallbackUrl(advertisedCallbackPort(req.socket?.localPort)))}"`,
+    ];
+    if (drawn.page !== undefined) attributes.push(`data-page="${escapeHtml(drawn.page)}"`);
+    return readFileSync(join(HERE, 'public', 'index.html'), 'utf8')
       .replace('href="/app.css"', `href="/${assetVersion('app.css')}"`)
       .replace('src="/app.js"', `src="/${assetVersion('app.js')}"`)
+      .replace('<body>', `<body ${attributes.join(' ')}>`)
       .replace('<!--model-pills-->', modelPills(drawn.pills ?? catalogSnapshot() ?? []))
       .replace('<!--view-->', drawn.html ?? '');
-    if (drawn.page !== undefined) {
-      html = html.replace('<body>', `<body data-page="${drawn.page}">`);
-    }
-    return html;
   };
-  const sendShell = (res, status = 200, drawn = {}) => res
+  const sendShell = (req, res, status = 200, drawn = {}) => res
     .status(status)
     .type('html')
     // The shell must never be stale: it is what names the versioned assets.
     .set('cache-control', 'no-store')
-    .send(shell(drawn));
+    .send(shell(req, drawn));
 
   app.use(express.static(join(HERE, 'public'), { index: false, extensions: ['html'] }));
-  app.get('/', (req, res) => sendShell(res));
+  app.get('/', (req, res) => sendShell(req, res));
 
   /**
    * The model catalog as a page.
@@ -261,13 +267,13 @@ export function createApp(db, options = {}) {
        * 5xx would only invite a proxy in front to replace this page with its own, which is how
        * the same failure once reached a browser as a bare "Bad gateway" with no explanation.
        */
-      return sendShell(res, 200, { page: 'models', html: modelsUnavailableView({ t, reason }) });
+      return sendShell(req, res, 200, { page: 'models', html: modelsUnavailableView({ t, reason }) });
     }
 
     const usage = req.account === undefined
       ? null
       : new Map(byModel(db, startOfMonth(), req.account.username).map((item) => [item.model, item]));
-    return sendShell(res, 200, {
+    return sendShell(req, res, 200, {
       page: 'models',
       html: modelsView({ models: models.map(publicModel), usage, t }),
       pills: models,
@@ -289,7 +295,7 @@ export function createApp(db, options = {}) {
     }
     // Unknown page: hand back the dashboard shell rather than a bare 404, so
     // client-side routes survive a hard refresh.
-    sendShell(res, 404);
+    sendShell(req, res, 404);
   });
 
   // eslint-disable-next-line no-unused-vars -- Express needs the arity.

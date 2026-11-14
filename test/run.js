@@ -935,7 +935,20 @@ await checkAsync('/ serves the dashboard shell and nothing else is browser-navig
     const root = await fetch(base, { redirect: 'manual' });
     assert.equal(root.status, 200);
     assert.match(root.headers.get('content-type'), /text\/html/);
-    assert.match(await root.text(), /DeepAI Gateway/);
+    const shellHtml = await root.text();
+    assert.match(shellHtml, /DeepAI Gateway/);
+
+    /*
+     * The shell names the address a DeepAI sign-in is redirected to, and it is this
+     * deployment's own: the sign-in field shows it, so it has to follow the port the gateway
+     * listens on rather than a default written into the client. It must also agree with the
+     * address DeepAI is actually told to build, which is what `/login?json=1` reports.
+     */
+    const signIn = await (await fetch(`${base}/login?json=1`)).json();
+    assert.ok(shellHtml.includes(`data-callback-url="${signIn.callbackUrl}"`),
+      `the shell must carry the sign-in address DeepAI is told about (${signIn.callbackUrl})`);
+    assert.ok(signIn.callbackUrl.endsWith(`:${port}/callback`),
+      'and that address is this gateway port');
 
     // A deep link must return the shell, not a bare 404 page.
     const deep = await fetch(`${base}/keys`);
@@ -4966,6 +4979,17 @@ await checkAsync('the sign-in card is three steps, a link, a field and a button'
   // The field is one line, and the button says what it does.
   assert.match(html, /<input class="input input--url" id="browser-paste" type="text"/,
     'a one-line field');
+
+  /*
+   * The placeholder is the address this deployment will actually be redirected to, which the
+   * server puts on the body because it depends on the port the gateway runs on. A constant
+   * here advertised `:8787` to every deployment, including the ones not on that port.
+   */
+  sandbox.document.body.dataset.callbackUrl = 'http://127.0.0.1:25912/callback';
+  const ported = vm.runInContext('signInRoutes()', sandbox);
+  assert.match(ported, /placeholder="http:\/\/127\.0\.0\.1:25912\/callback\?code=\.\.\.&amp;state=\.\.\."/,
+    'the field shows the configured port, not the default one');
+  assert.ok(!ported.includes(':8787'), 'and never the default port a deployment may not be on');
   assert.match(html, /id="login-finish"[^>]*>Login to gateway</, 'and a button that logs in');
 
   const css = readFileSync(join(root, 'public', 'app.css'), 'utf8');

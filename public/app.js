@@ -298,6 +298,13 @@ function isAuthFailure(error) {
  * @returns {string} markup.
  */
 function signInRoutes(prefix = '') {
+  /*
+   * The address in the field is the one this deployment's sign-in will actually land on, which
+   * depends on the port the gateway is configured with - so it comes from the document rather
+   * than from a constant here. The field used to advertise `:8787` regardless, which is only
+   * correct for a deployment that happened to use the default.
+   */
+  const callback = signInCallbackUrl();
   return `
     <section class="step" id="${prefix}signin-step">
       <div class="note note--attention">
@@ -323,13 +330,30 @@ function signInRoutes(prefix = '') {
       <div class="field mt-3">
         <input class="input input--url" id="${prefix}browser-paste" type="text" spellcheck="false"
           autocomplete="off" autocapitalize="off"
-          placeholder="http://127.0.0.1:8787/callback?code=...&amp;state=...">
+          placeholder="${esc(callback)}?code=...&amp;state=...">
       </div>
 
       <div class="row mt-3">
         <button class="btn" id="${prefix}login-finish" type="button">${t('signin.loginToGateway')}</button>
       </div>
     </section>`;
+}
+
+/**
+ * The address a DeepAI sign-in is redirected to on this deployment.
+ *
+ * It comes from the server, which knows the port it listens on (and which port DeepAI was
+ * told to use when the configured one is privileged). Nothing here may guess: the field is
+ * the visitor's only hint about what to look for in the address bar.
+ *
+ * @returns {string} an absolute `http://127.0.0.1:<port>/callback` address.
+ */
+function signInCallbackUrl() {
+  const fromServer = document.body?.dataset?.callbackUrl;
+  if (typeof fromServer === 'string' && fromServer !== '') return fromServer;
+  // No document attribute (an older server, or a test): the port this page was served on is
+  // the best available answer, and it is never the default baked in here.
+  return `http://127.0.0.1${location.port === '' ? '' : `:${location.port}`}/callback`;
 }
 
 /**
