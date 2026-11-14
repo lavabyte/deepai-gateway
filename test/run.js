@@ -950,6 +950,18 @@ await checkAsync('every dashboard document carries the models the key form picks
         assert.equal(ids.join(','), CATALOG_PAYLOAD.models.map((model) => model.id).join(','),
           `${path} carries every model the key form can grant`);
         assert.match(template[1], /data-premier="true"/, 'with the tier each pill needs');
+
+        /*
+         * A pill with no name is a picker nobody can use, and that is how this shipped once: the
+         * picker was drawn from catalog models, which carry `name`, while the field it read is
+         * the label `publicModel` adds. The buttons arrived empty and the form looked broken on a
+         * gateway whose catalog was perfect.
+         */
+        for (const [, label] of template[1].matchAll(/data-premier="(?:true|false)">([^<]*)<\/button>/g)) {
+          assert.ok(label.trim() !== '', `${path} names the model on its pill`);
+        }
+        assert.match(template[1], />GLM 5\.3 Flash Free</,
+          `${path} labels a free model exactly as the Models page does`);
       }
     } finally {
       restore();

@@ -17,6 +17,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { displayName } from '../deepai/catalog.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LOCALES = join(HERE, '..', '..', 'public', 'locales');
@@ -230,12 +231,16 @@ export function modelsUnavailableView({ t, reason }) {
  * pills are drawn with the page instead, and the client clones them; the ids and tiers ride
  * along as data attributes so the form can preselect the free ones without knowing the list.
  *
- * @param {Array<object>} models - as shaped by `publicModel`.
+ * The label is the one the Models page uses, from the same `displayName`, because a pill and a
+ * row describe the same model - and the pill is the only place its name appears when a key is
+ * being made.
+ *
+ * @param {Array<object>} models - catalog models, as `catalogSnapshot` keeps them.
  * @returns {string} markup to place inside the `<template>`.
  */
 export function modelPills(models) {
   return models.map((model) => (
     `<button type="button" class="pill" data-model="${escapeHtml(model.id)}" `
-    + `data-premier="${model.premier === true}">${escapeHtml(model.displayName)}</button>`
+    + `data-premier="${model.premier === true}">${escapeHtml(displayName(model))}</button>`
   )).join('');
 }
