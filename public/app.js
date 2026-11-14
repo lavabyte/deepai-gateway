@@ -2193,11 +2193,7 @@ function showCreatedKey(plaintext, name, onDone) {
   const done = document.createElement('button');
   done.className = 'btn btn--primary';
   done.textContent = t('common.done');
-  done.addEventListener('click', () => {
-    closeModal();
-    toast(t('keys.createdTitle', { name }));
-    onDone();
-  });
+  done.addEventListener('click', closeModal);
 
   const actions = document.createElement('div');
   actions.className = 'row';
@@ -2205,7 +2201,19 @@ function showCreatedKey(plaintext, name, onDone) {
   actions.appendChild(done);
 
   wrap.append(note, snippet(plaintext), actions);
-  openModal(t('keys.createdTitle', { name }), wrap);
+  /*
+   * The key exists by the time this is drawn, so every way out of this dialog has to end the
+   * same way - Escape, the backdrop, the close button and "Done" all mean the key has been
+   * seen. Only "Done" used to say so, and closing the reveal with Escape left the list without
+   * the key that had just been created, until the page was reloaded.
+   *
+   * The work is in the close callback rather than in the button, because the button is not the
+   * only exit: it is the exit the author remembered.
+   */
+  openModal(t('keys.createdTitle', { name }), wrap, () => {
+    toast(t('keys.createdTitle', { name }));
+    onDone();
+  });
 }
 
 /* ------------------------------------------------------------------ router */

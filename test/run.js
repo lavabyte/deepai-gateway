@@ -6072,6 +6072,32 @@ await checkAsync('the client reads the catalog out of the document, and never as
   assert.ok(!/api\('\/models'\)|loadModels/.test(source), 'and there is no helper left to ask with');
 });
 
+await checkAsync('the created-key reveal settles however it is closed', async () => {
+  /*
+   * A key exists by the time its reveal is drawn, so closing that dialog is not cancelling
+   * anything: it is the visitor saying they have copied it. The reveal used to do its work in
+   * its own "Done" button, and the dialog can be closed three other ways - Escape, the backdrop
+   * and the close button - all of which run the callback `openModal` was given instead. The
+   * reveal gave none, so a key created and dismissed with Escape was missing from the list
+   * until the page was reloaded.
+   *
+   * The modal is driven by real events, which these doubles cannot dispatch, so what is checked
+   * is the wiring: the work is in the close callback, and the button only closes.
+   */
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const source = readFileSync(join(new URL('..', import.meta.url).pathname, 'public', 'app.js'), 'utf8');
+  const reveal = source.slice(source.indexOf('function showCreatedKey'), source.indexOf('function currentRoute'));
+  assert.ok(reveal !== '', 'the reveal is still there');
+
+  assert.match(reveal, /addEventListener\('click', closeModal\)/,
+    'the button closes the dialog, and nothing else');
+  assert.match(reveal, /openModal\([\s\S]*?wrap, \(\) => \{[\s\S]{0,200}onDone\(\);[\s\S]{0,20}\}\);/,
+    'and the dialog is handed a close callback that refreshes the list');
+  assert.ok(!/toast\([\s\S]{0,200}addEventListener/.test(reveal.replace(/\n\s*\*.*$/gm, '')),
+    'the toast is not left in the button, which only one of four exits presses');
+});
+
 await checkAsync('the same DeepAI key never becomes two accounts', async () => {
   /*
    * DeepAI mints a fresh key on every sign-in, so one DeepAI account can hold
