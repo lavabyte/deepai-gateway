@@ -135,7 +135,7 @@ export function v1Router(db, options = {}) {
     try {
       // Served from the copy the scheduled refresh keeps current. It is read from DeepAI
       // every ten to twenty minutes, at a random point in that window.
-      const models = await ensureCatalog(AbortSignal.timeout(10_000));
+      const models = await ensureCatalog(AbortSignal.timeout(10_000), req.gatewayKey.api_key);
       const visible = models.filter((model) => allowsModel(req.gatewayKey, model.id));
       res.json({
         object: 'list',
@@ -172,7 +172,7 @@ export function v1Router(db, options = {}) {
   // A richer view used by the dashboard's Models tab. Same scoping rules.
   router.get('/models/details', authenticate(db), async (req, res) => {
     try {
-      const models = await ensureCatalog(AbortSignal.timeout(10_000));
+      const models = await ensureCatalog(AbortSignal.timeout(10_000), req.gatewayKey.api_key);
       const visible = models.filter((model) => allowsModel(req.gatewayKey, model.id));
       res.json({ object: 'list', data: visible.map(publicModel) });
     } catch (error) {
@@ -227,7 +227,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
   let models;
   const catalogStart = Date.now();
   try {
-    models = await ensureCatalog(AbortSignal.timeout(10_000));
+    models = await ensureCatalog(AbortSignal.timeout(10_000), req.gatewayKey.api_key);
   } catch (error) {
     return apiError(res, 503, catalogMessage(error), 'catalog_unavailable', 'api_error');
   }

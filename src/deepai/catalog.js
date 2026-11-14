@@ -134,13 +134,15 @@ function normalize(raw) {
  * say what went wrong instead of "something failed".
  *
  * @param {AbortSignal} [signal]
+ * @param {string} [apiKey] - DeepAI account API key, sent as `Api-Key` header when present.
+ *   Lane 6 requires it on `/deepai_code/models`; without it DeepAI answers 401.
  * @returns {Promise<Array<object>>}
  */
-export async function fetchCatalog(signal) {
+export async function fetchCatalog(signal, apiKey) {
   let response;
   try {
     response = await fetch(`${API_ORIGIN}/deepai_code/models`, {
-      headers: codeHeaders({ accept: 'application/json' }),
+      headers: codeHeaders({ accept: 'application/json', 'Api-Key': apiKey }),
       signal: signal ?? AbortSignal.timeout(10_000),
     });
   } catch (error) {
@@ -214,12 +216,13 @@ export function catalogAge() {
  * current. Concurrent callers during that first read share one request.
  *
  * @param {AbortSignal} [signal]
+ * @param {string} [apiKey] - DeepAI account API key, sent as `Api-Key` header.
  * @returns {Promise<Array<object>>}
  */
-export async function ensureCatalog(signal) {
+export async function ensureCatalog(signal, apiKey) {
   if (served !== null) return served;
   if (loading !== null) return loading;
-  loading = fetchCatalog(signal)
+  loading = fetchCatalog(signal, apiKey)
     .then((models) => {
       served = models;
       servedAt = Date.now();

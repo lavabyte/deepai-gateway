@@ -442,20 +442,19 @@ export function adminRouter(db, runtime) {
    */
   router.get('/models', async (req, res) => {
     try {
-      const models = await ensureCatalog(AbortSignal.timeout(10_000));
       const owner = req.account?.username;
-      let usageMonth = null;
-      let usageAll = null;
-      if (owner !== undefined) {
-        const monthSince = startOfMonth();
-        usageMonth = new Map(byModel(db, monthSince, owner).map((item) => [item.model, item]));
-        usageAll = new Map(byModel(db, 0, owner).map((item) => [item.model, item]));
-      }
+      const apiKey = req.account?.apiKey;
+      // The same copy the scheduled refresh keeps current, so the dashboard and /v1/models
+      // can never disagree about which models exist.
+      const models = await ensureCatalog(AbortSignal.timeout(10_000), apiKey);
+      const monthSince = startOfMonth();
+      const usageByModel = new Map(byModel(db, monthSince, owner).map((item) => [item.model, item]));
+      const allUsage = new Map(byModel(db, 0, owner).map((item) => [item.model, item]));
       res.json({
         models: models.map((model) => ({
           ...publicModel(model),
-          usageMonth: usageMonth === null ? null : usageMonth.get(model.id) ?? null,
-          usageAll: usageAll === null ? null : usageAll.get(model.id) ?? null,
+          usageMonth: usageByModel.get(model.id) ?? null,
+          usageAll: usageAll.get(model.id) ?? null,
         })),
       });
     } catch (error) {
