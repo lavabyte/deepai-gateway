@@ -223,8 +223,45 @@ export function createApp(db, options = {}) {
     .set('cache-control', 'no-store')
     .send(shell(req, drawn));
 
+  /**
+   * Read the catalog for a document, with the key this deployment stores.
+   *
+   * Every page draws the model picker, because the key form has no other way to learn the
+   * list: its pills are cloned out of the document, since there is deliberately no model
+   * endpoint to ask. A gateway that has read the catalog once answers this from the kept list,
+   * so a warm one pays no round trip - only the first document after a start waits.
+   *
+   * A read that fails is not a failed page. The picker is then empty and the form says the
+   * catalog is unavailable, which is true; a page that refused to load would say less.
+   *
+   * @returns {Promise<{models: Array<object>|null, reason: string}>}
+   */
+  const readCatalogForPage = async () => {
+    const apiKey = newestAccountApiKey(db);
+    if (apiKey === undefined) {
+      // No account on this deployment, so there is no key to read the catalog with. Saying so
+      // beats asking DeepAI with an empty header and reporting its refusal as a key problem.
+      return { models: null, reason: 'no DeepAI account is signed in on this gateway yet' };
+    }
+    try {
+      const models = catalogSnapshot() ?? await ensureCatalog(AbortSignal.timeout(10_000), apiKey);
+      return { models, reason: '' };
+    } catch (error) {
+      if (error?.code === CATALOG_KEY_REFUSED) {
+        // The stored DeepAI key is the deployment's, not the visitor's, so an operator has to
+        // act - and the log is where they look, since a visitor can do nothing about it.
+        runtime.log('model catalog: the stored DeepAI key was refused - sign in again in the dashboard');
+      }
+      return { models: null, reason: error?.message ?? String(error) };
+    }
+  };
+
   app.use(express.static(join(HERE, 'public'), { index: false, extensions: ['html'] }));
-  app.get('/', (req, res) => sendShell(req, res));
+  app.get('/', async (req, res) => {
+    // The key form's pills come out of this document, so the dashboard needs the catalog too.
+    const { models } = await readCatalogForPage();
+    sendShell(req, res, 200, { pills: models ?? [] });
+  });
 
   /**
    * The model catalog as a page.
@@ -240,27 +277,7 @@ export function createApp(db, options = {}) {
    */
   app.get('/models', async (req, res) => {
     const t = translator(localeFor(req));
-    // The catalog the schedule keeps current, read once if it has never been read.
-    let models = null;
-    let reason = '';
-    const apiKey = newestAccountApiKey(db);
-    if (apiKey === undefined) {
-      // No account on this deployment, so there is no key to read the catalog with. Saying so
-      // beats asking DeepAI with an empty header and reporting its refusal as a key problem.
-      reason = 'no DeepAI account is signed in on this gateway yet';
-    } else {
-      try {
-        models = catalogSnapshot() ?? await ensureCatalog(AbortSignal.timeout(10_000), apiKey);
-      } catch (error) {
-        reason = error?.message ?? String(error);
-        if (error?.code === CATALOG_KEY_REFUSED) {
-          // The stored DeepAI key is the deployment's, not the visitor's, so the page says what
-          // an operator has to do rather than asking the reader to sign in for something they
-          // did not cause.
-          runtime.log('models page: the stored DeepAI key was refused - sign in again in the dashboard');
-        }
-      }
-    }
+    const { models, reason } = await readCatalogForPage();
     if (models === null) {
       /*
        * `200`, deliberately. The document is what was asked for and it says what happened; a
@@ -280,7 +297,7 @@ export function createApp(db, options = {}) {
     });
   });
 
-  app.use((req, res) => {
+  app.use(async (req, res) => {
     const wantsJson = req.path === '/v1' || req.path.startsWith('/v1/')
       || req.path === '/api' || req.path.startsWith('/api/');
     if (wantsJson) {
@@ -294,8 +311,10 @@ export function createApp(db, options = {}) {
       });
     }
     // Unknown page: hand back the dashboard shell rather than a bare 404, so
-    // client-side routes survive a hard refresh.
-    sendShell(req, res, 404);
+    // client-side routes survive a hard refresh. It is a full shell, so it carries the model
+    // picker for the same reason `/` does.
+    const { models } = await readCatalogForPage();
+    sendShell(req, res, 404, { pills: models ?? [] });
   });
 
   // eslint-disable-next-line no-unused-vars -- Express needs the arity.

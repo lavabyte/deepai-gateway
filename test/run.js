@@ -922,6 +922,65 @@ await checkAsync('a catalog that cannot be read is a page that says so, not a 5x
   }
 });
 
+await checkAsync('every dashboard document carries the models the key form picks from', async () => {
+  /*
+   * The key form has no catalog of its own - its pills are cloned out of the document, because
+   * there is deliberately no model endpoint to ask. So the dashboard document has to carry
+   * them, and it used to be only the models page that ever read the catalog: a visitor who
+   * went straight to "create key" got an empty picker and a line saying the catalog was
+   * unavailable, on a gateway whose catalog was fine.
+   */
+  const { createApp } = await import('../server.js');
+  const fresh = openDatabase(':memory:');
+  saveAccount(fresh, { apiKey: 'catalog-key', username: 'picker-user', isPro: true });
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const restore = stubCatalog();
+    try {
+      for (const path of ['/', '/keys']) {
+        const html = await fetch(`${base}${path}`).then((res) => res.text());
+        const template = /<template id="model-pills">([\s\S]*?)<\/template>/.exec(html);
+        assert.ok(template !== null, `${path} has somewhere to put the picker`);
+        const ids = [...template[1].matchAll(/data-model="([^"]+)"/g)].map((match) => match[1]);
+        assert.equal(ids.join(','), CATALOG_PAYLOAD.models.map((model) => model.id).join(','),
+          `${path} carries every model the key form can grant`);
+        assert.match(template[1], /data-premier="true"/, 'with the tier each pill needs');
+      }
+    } finally {
+      restore();
+    }
+
+    /*
+     * A catalog that cannot be read is not a page that cannot be served: the picker is empty
+     * and the form says so, which is a truer answer than a 5xx from a proxy in front.
+     */
+    // A gateway that has never read the catalog, and whose key DeepAI refuses: the list kept
+    // from the check above is exactly what a live one would still be serving, so drop it.
+    resetCatalog();
+    const realFetch = globalThis.fetch;
+    const dead = () => { globalThis.fetch = realFetch; };
+    globalThis.fetch = async (url, init) => (String(url).includes('deepai_code/models')
+      ? new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } })
+      : realFetch(url, init));
+    try {
+      const response = await fetch(`${base}/`);
+      assert.equal(response.status, 200, 'the dashboard still loads');
+      const html = await response.text();
+      assert.equal(/data-model="/.test(html), false, 'with no models to offer');
+    } finally {
+      dead();
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fresh.close();
+  }
+});
+
 await checkAsync('/ serves the dashboard shell and nothing else is browser-navigable', async () => {
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');

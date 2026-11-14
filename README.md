@@ -220,7 +220,10 @@ what this gateway offers its own callers; an endpoint handing out the model list
 somebody else builds their own front end on, and there is no reason to offer one. The page is
 public - which models exist is DeepAI's published list - and the usage column beside it is
 drawn only for a signed-in session. The key form's model picker rides along in the same
-document, so the browser never asks for the catalog at all.
+document, so the browser never asks for the catalog at all - and it rides along in *every*
+document, not just this one, because the key form is reached from the dashboard and has no
+other way to learn the list. A page served while the catalog cannot be read carries an empty
+picker, and the form then says the catalog is unavailable.
 
 The price shown is `theosPerRequest`, which is what DeepAI charges per call.
 
