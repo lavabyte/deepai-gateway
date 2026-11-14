@@ -434,16 +434,16 @@ export function adminRouter(db, runtime) {
   /* ----------------------------------------------------------------- models */
 
   /**
-   * The public model catalog.
+   * The model catalog with this account's usage beside it.
    *
-   * No identity is required: a wylogowany visitor can see which models exist.
-   * Usage figures (`usageMonth`, `usageAll`) are only attached when a session
-   * is active — otherwise they are `null`.
+   * Requires a signed-in session. The caller's DeepAI account API key is sent
+   * with the catalog request so DeepAI can rate-limit and bill against the
+   * right account. Usage figures are attached when a session is active.
    */
-  router.get('/models', async (req, res) => {
+  router.get('/models', requireSession, async (req, res) => {
     try {
-      const owner = req.account?.username;
-      const apiKey = req.account?.apiKey;
+      const owner = req.account.username;
+      const apiKey = req.account.apiKey;
       // The same copy the scheduled refresh keeps current, so the dashboard and /v1/models
       // can never disagree about which models exist.
       const models = await ensureCatalog(AbortSignal.timeout(10_000), apiKey);
