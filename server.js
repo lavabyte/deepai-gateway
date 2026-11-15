@@ -104,7 +104,7 @@ export function createApp(db, options = {}) {
   app.set('etag', false);
   if (options.trustProxy === true) app.set('trust proxy', true);
 
-  app.use(express.json({ limit: '16mb' }));
+  app.use(express.json({ limit: '50mb' }));
 
   // Every response is JSON unless a route says otherwise; the dashboard sets
   // its own content types.

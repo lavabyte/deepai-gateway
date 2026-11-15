@@ -1243,9 +1243,24 @@ async function logOutEverywhere() {
 }
 
 /** Load the account once and keep the badge in sync. */
+/**
+ * Read the account, always refreshing the balance live from DeepAI first.
+ *
+ * The old version only showed the value cached in the database, so a balance
+ * that changed on DeepAI's side could stay stale until the next manual refresh.
+ * Now every read asks DeepAI for the current allowance and only then paints it,
+ * so the number on the home page and everywhere else is never outdated.
+ *
+ * @returns {Promise<void>}
+ */
 async function loadAccount() {
   try {
     state.account = await api('/account');
+    if (state.account.signedIn === true) {
+      // Force a live read from DeepAI, then paint the fresh value.
+      await api('/account/refresh', { method: 'POST' });
+      state.account = await api('/account');
+    }
   } catch (error) {
     state.account = { signedIn: false, username: '', error: String(error.message ?? error) };
   }
