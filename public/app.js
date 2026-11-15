@@ -917,11 +917,17 @@ function fill(value, params) {
 }
 
 function t(key, params) {
-  // Dotted keys like `signin.browserLead` walk into nested locale objects.
-  let value = state.strings;
-  for (const part of key.split('.')) {
-    if (value === null || typeof value !== 'object') break;
-    value = value[part];
+  // Prefer exact flat key (e.g. "signin.stepAuthenticate") used by current locales.
+  let value = Object.prototype.hasOwnProperty.call(state.strings, key)
+    ? state.strings[key]
+    : undefined;
+  // Fallback: walk dotted keys into nested locale objects if present.
+  if (value === undefined) {
+    value = state.strings;
+    for (const part of key.split('.')) {
+      if (value === null || typeof value !== 'object') { value = undefined; break; }
+      value = value[part];
+    }
   }
   if (typeof value === 'string') return fill(value, params);
 
