@@ -917,7 +917,12 @@ function fill(value, params) {
 }
 
 function t(key, params) {
-  const value = state.strings[key];
+  // Dotted keys like `signin.browserLead` walk into nested locale objects.
+  let value = state.strings;
+  for (const part of key.split('.')) {
+    if (value === null || typeof value !== 'object') break;
+    value = value[part];
+  }
   if (typeof value === 'string') return fill(value, params);
 
   /*
