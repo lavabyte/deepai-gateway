@@ -406,8 +406,12 @@ async function finishBrowserLogin(prefix = '') {
   try {
     await api('/login/complete', { method: 'POST', body: { url: text } });
     if (field) field.value = '';
-    toast(t('signin.loggedIn'));
     await afterSignIn();
+    if (state.account?.signedIn === true) {
+      toast(t('signin.loggedIn'));
+    } else {
+      toast(t('error.http', { status: 401 }), 'error');
+    }
   } catch (error) {
     toast(failureMessage(error), 'error');
     if (button) {
@@ -1267,13 +1271,20 @@ async function logOutEverywhere() {
 async function loadAccount() {
   try {
     state.account = await api('/account');
-    if (state.account.signedIn === true) {
-      // Force a live read from DeepAI, then paint the fresh value.
-      await api('/account/refresh', { method: 'POST' });
-      state.account = await api('/account');
-    }
   } catch (error) {
     state.account = { signedIn: false, username: '', error: String(error.message ?? error) };
+    renderAccountBadge();
+    return;
+  }
+
+  if (state.account.signedIn === true) {
+    // Best-effort live balance read; a refresh failure must not log the user out.
+    try {
+      await api('/account/refresh', { method: 'POST' });
+      state.account = await api('/account');
+    } catch {
+      // Keep the session/account state we already have.
+    }
   }
   renderAccountBadge();
 }
@@ -1469,16 +1480,7 @@ async function afterSignIn() {
   await loadAccount();
   await render();
   if (state.account?.signedIn !== true) return;
-  if (state.account.allowance?.balance) return;
-  try {
-    await api('/account/refresh', { method: 'POST' });
-    await loadAccount();
-    renderAccountBadge();
-  } catch (error) {
-    // `api()` throws for `ok:false`, so there is no result to inspect: the reason is on the
-    // error, and it is translated from its code rather than read out of its message.
-    toast(failureMessage(error), 'error');
-  }
+  // loadAccount already attempted a best-effort refresh; avoid duplicate failing toasts.
 }
 
 /**
