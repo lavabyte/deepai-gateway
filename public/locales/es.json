@@ -240,5 +240,20 @@
   "time.minutesAgo": "hace {count} min",
   "window.day": "día",
   "window.hour": "hora",
-  "window.month": "mes"
+  "window.month": "mes",
+  "signin": {
+    "browserLead": "Sign in with your DeepAI account in the browser. No API key or JSON needs to be pasted.",
+    "loginWithDeepAI": "Log in with DeepAI",
+    "manualCallbackTitle": "Callback URL did not open?",
+    "manualCallbackHelp": "If the browser lands on a page that cannot load after sign-in, copy the full address from the address bar and paste it here.",
+    "completeSignIn": "Complete sign-in",
+    "pasteTheAddress": "Paste the callback URL from your browser's address bar.",
+    "signingIn": "Signing in…",
+    "loggedIn": "Signed in successfully.",
+    "loggedInToast": "Signed in with DeepAI.",
+    "apiKeyLabel": "Clave API de DeepAI",
+    "apiKeyPlaceholder": "sk-...",
+    "loginWithKey": "Iniciar sesión con clave API",
+    "apiKeyRequired": "Pegue su clave API de DeepAI."
+  }
 }

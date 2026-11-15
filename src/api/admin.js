@@ -15,6 +15,7 @@ import express from 'express';
 import { randomUUID } from 'node:crypto';
 import {
   checkKey,
+  usernameForKey,
 } from '../deepai/account.js';
 import {
   DEFAULT_MAX_KEYS,
@@ -153,6 +154,33 @@ export function adminRouter(db, runtime) {
     }
     res.setHeader('set-cookie', clearSessionCookie());
     res.json({ ok: true });
+  });
+
+  /**
+   * Log in by pasting a DeepAI API key directly.
+   *
+   * This bypasses DeepAI's desktop_auth exchange, which does not return a key for
+   * every sign-in method (email/password accounts can fail there). The key is
+   * validated against DeepAI and, if accepted, the account is created or updated
+   * and a session cookie is issued - exactly as the callback flow does.
+   */
+  router.post('/api/login/key', async (req, res) => {
+    const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+    if (apiKey === '') {
+      return res.status(400).json({ ok: false, error: 'API key is required.', code: 'no-key' });
+    }
+    const check = await checkKey(apiKey, AbortSignal.timeout(15_000));
+    if (!check.ok) {
+      recordAuthEvent(db, 'denied', { username: '', detail: check.reason ?? 'unreachable' });
+      return res.status(401).json({ ok: false, error: check.error, code: check.reason ?? 'unreachable' });
+    }
+    const completed = completeLogin(db, runtime, {
+      apiKey,
+      username: usernameForKey(apiKey),
+      isPro: typeof check.isPro === 'boolean' ? check.isPro : false,
+    }, { secure: runtime.trustProxy === true });
+    res.setHeader('set-cookie', completed.cookie);
+    res.json({ ok: true, username: completed.username });
   });
 
   /** Forget the account entirely, including its DeepAI key and API keys. */

@@ -1,22 +1,9 @@
 /**
- * DeepAI account details: reading a key's balance, naming its owner, and parsing
- * the account JSON a visitor copies out of their own browser.
+ * DeepAI account details: reading a key's balance and deriving a stable owner name.
  *
- * **Why there is no browser sign-in here.** DeepAI implements RFC 8252 for a
- * native client: the desktop app binds `127.0.0.1:0`, hands DeepAI the ephemeral
- * port, and DeepAI hard-codes the loopback host when it builds the redirect.
- * `port` is parsed as a plain TCP port - a full URL, a `host:port` pair, `0`,
- * `-1`, an empty value and a path suffix are each rejected with
- * `400 Invalid desktop sign-in request` - so no parameter exists through which a
- * public origin could be passed, and a browser on any other machine cannot open
- * the redirect at all.
- *
- * So the gateway does not try. The visitor signs in at `deepai.org` as usual -
- * including with a Google or Apple account, which has no password to give - and
- * reads the account JSON out of
- * `https://api.deepai.org/daily-time-sync/user/`. That JSON carries both the
- * account's `email` and its `userprofile.api_key`, so nothing has to be typed
- * from memory and nothing has to be trusted but the key, which DeepAI validates.
+ * Browser-based sign-in is handled by `callback-login.js`, which redirects users to
+ * DeepAI's authentication flow and completes login via the callback (or a pasted callback
+ * URL fallback when the local callback address cannot be opened directly).
  *
  * @module deepai-gateway/deepai/account
  */

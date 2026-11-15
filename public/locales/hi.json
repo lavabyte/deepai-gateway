@@ -228,5 +228,20 @@
   "time.minutesAgo": "{count} मिनट पहले",
   "window.day": "दिन",
   "window.hour": "घंटा",
-  "window.month": "महीना"
+  "window.month": "महीना",
+  "signin": {
+    "browserLead": "Sign in with your DeepAI account in the browser. No API key or JSON needs to be pasted.",
+    "loginWithDeepAI": "Log in with DeepAI",
+    "manualCallbackTitle": "Callback URL did not open?",
+    "manualCallbackHelp": "If the browser lands on a page that cannot load after sign-in, copy the full address from the address bar and paste it here.",
+    "completeSignIn": "Complete sign-in",
+    "pasteTheAddress": "Paste the callback URL from your browser's address bar.",
+    "signingIn": "Signing in…",
+    "loggedIn": "Signed in successfully.",
+    "loggedInToast": "Signed in with DeepAI.",
+    "apiKeyLabel": "डीपएआई API कुंजी",
+    "apiKeyPlaceholder": "sk-...",
+    "loginWithKey": "API कुंजी से लॉगिन करें",
+    "apiKeyRequired": "अपनी डीपएआई API कुंजी पेस्ट करें।"
+  }
 }
