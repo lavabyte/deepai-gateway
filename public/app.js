@@ -283,51 +283,58 @@ function isAuthFailure(error) {
 
 
 /**
- * Sign in with DeepAI in the browser.
+ * The one way in: DeepAI's own sign-in page, and the address it comes back to.
  *
- * Clicking the button redirects the browser to DeepAI's own sign-in page. After you
- * authenticate there, DeepAI sends you back to this gateway's callback. If that callback
- * address cannot be opened directly (DeepAI redirects to a local address that may not be
- * reachable from this browser), you can paste the final callback URL below to complete sign-in.
+ * The flow is three steps and one field. DeepAI signs the visitor in on its own page - so a
+ * Google or Apple account works, and no password is ever typed here - and then sends the
+ * browser to a `127.0.0.1` address on this gateway, which usually cannot load. The address
+ * is still in the bar, and it carries the one-shot `code` and the `state` this gateway
+ * generated, so pasting it back completes the sign-in. Nothing needs a tunnel.
+ *
+ * The button is a real link opened in a new tab, so it is not a popup: the address is
+ * fetched when the card is drawn and put on the anchor, rather than opened after a click.
  *
  * @param {string} prefix - distinguishes the ids when both cards are in the DOM.
  * @returns {string} markup.
  */
 function signInRoutes(prefix = '') {
+  /*
+   * The address in the field is the one this deployment's sign-in will actually land on, which
+   * depends on the port the gateway is configured with - so it comes from the document rather
+   * than from a constant here. The field used to advertise `:8787` regardless, which is only
+   * correct for a deployment that happened to use the default.
+   */
   const callback = signInCallbackUrl();
   return `
     <section class="step" id="${prefix}signin-step">
       <div class="note note--attention">
-        <p>${t('signin.browserLead', 'Sign in with your DeepAI account in the browser. No API key or JSON needs to be pasted.')}</p>
+        <ol class="step__list">
+          <li>${t('signin.stepAuthenticate')} <strong>DeepAI</strong></li>
+          <li>${t('signin.stepCopy')}</li>
+          <li>${t('signin.stepPaste')}</li>
+        </ol>
+        <p class="signin-tutorial">${t('signin.tutorial')}</p>
+        <video class="signin-video" controls preload="metadata" playsinline
+          src="/assets/login-tutorial.mp4"
+          title="${t('signin.tutorial')}"
+          aria-label="${t('signin.tutorial')}">
+          <a href="/assets/login-tutorial.mp4">${t('signin.tutorial')}</a>
+        </video>
       </div>
 
       <div class="row mt-3">
-        <a class="btn btn--primary" id="${prefix}login-browser" href="/login">${t('signin.loginWithDeepAI', 'Log in with DeepAI')}</a>
+        <a class="btn btn--primary" id="${prefix}login-browser" target="_blank"
+          rel="noopener noreferrer" href="#">${t('signin.getUrl')}</a>
       </div>
 
-      <details class="mt-3">
-        <summary>${t('signin.manualCallbackTitle', 'Callback URL did not open?')}</summary>
-        <p class="mt-2">${t('signin.manualCallbackHelp', 'If the browser lands on a page that cannot load after sign-in, copy the full address from the address bar and paste it here.')}</p>
-        <div class="field mt-2">
-          <input class="input input--url" id="${prefix}browser-paste" type="text" spellcheck="false"
-            autocomplete="off" autocapitalize="off"
-            placeholder="${esc(callback)}?code=...&amp;state=...">
-        </div>
-        <div class="row mt-2">
-          <button class="btn" id="${prefix}login-finish" type="button">${t('signin.completeSignIn', 'Complete sign-in')}</button>
-        </div>
-      </details>
+      <div class="field mt-3">
+        <input class="input input--url" id="${prefix}browser-paste" type="text" spellcheck="false"
+          autocomplete="off" autocapitalize="off"
+          placeholder="${esc(callback)}?code=...&amp;state=...">
+      </div>
 
-      <div class="mt-3">
-        <div class="field">
-          <label class="field__label">${t('signin.apiKeyLabel', 'DeepAI API key')}</label>
-          <input class="input input--url" id="${prefix}api-key" type="text" spellcheck="false"
-            autocomplete="off" autocapitalize="off"
-            placeholder="${t('signin.apiKeyPlaceholder', 'sk-...')}">
-        </div>
-        <div class="row mt-2">
-          <button class="btn btn--primary" id="${prefix}login-key" type="button">${t('signin.loginWithKey', 'Log in with API key')}</button>
-        </div>
+      <div class="row mt-3">
+        <button class="btn" id="${prefix}login-finish" type="button">${t('signin.loginToGateway')}</button>
       </div>
     </section>`;
 }
@@ -350,14 +357,30 @@ function signInCallbackUrl() {
 }
 
 /**
- * The sign-in button redirects to `/login`, which starts DeepAI browser authentication.
- * Kept as a no-op hook for call sites.
+ * Put the sign-in address on the button, so it opens in a new tab as a link.
+ *
+ * A click handler that fetched first and then called `window.open` would be a popup, and
+ * browsers block those. Resolving the address while drawing the card keeps the button an
+ * ordinary anchor and lets the visitor open it in a tab of their own.
  *
  * @param {string} prefix
  * @returns {Promise<void>}
  */
 async function loadSignInUrl(prefix = '') {
-  void prefix;
+  const link = $(`${prefix}login-browser`);
+  if (link === null) return;
+  try {
+    // A plain fetch, not `api()`: this is a page route, not an `/api` one.
+    const response = await fetch('/login?json=1', { headers: { accept: 'application/json' } });
+    if (!response.ok) throw new Error(t('error.http', { status: response.status }));
+    const payload = await response.json();
+    link.setAttribute('href', payload.url);
+  } catch (error) {
+    // Without an address the button cannot work, so it says so rather than pointing nowhere.
+    link.setAttribute('href', '#');
+    link.classList.add('is-disabled');
+    toast(String(error.message ?? error), 'error');
+  }
 }
 
 /**
@@ -397,47 +420,6 @@ async function finishBrowserLogin(prefix = '') {
 }
 
 /**
- * Finish sign-in by pasting a DeepAI API key directly.
- *
- * Used when the browser redirect flow cannot complete - for example when DeepAI's
- * desktop_auth exchange does not return a key for the sign-in method in use
- * (email/password accounts). The key is validated against DeepAI and, if accepted,
- * a session is minted just like the callback flow.
- *
- * @param {string} prefix
- * @returns {Promise<void>}
- */
-async function finishKeyLogin(prefix = '') {
-  const field = $(`${prefix}api-key`);
-  const apiKey = field?.value?.trim() ?? '';
-  if (apiKey === '') {
-    toast(t('signin.apiKeyRequired', 'Paste your DeepAI API key.'), 'error');
-    field?.focus();
-    return;
-  }
-  const button = $(`${prefix}login-key`);
-  const label = button?.textContent;
-  if (button) {
-    button.disabled = true;
-    button.textContent = t('signin.signingIn');
-  }
-  try {
-    await api('/login/key', { method: 'POST', body: { apiKey } });
-    if (field) field.value = '';
-    toast(t('signin.loggedIn'));
-    await afterSignIn();
-  } catch (error) {
-    toast(failureMessage(error), 'error');
-    if (button) {
-      button.disabled = false;
-      button.textContent = label ?? t('signin.loginWithKey');
-    }
-    field?.focus();
-    field?.select();
-  }
-}
-
-/**
  * Wire every sign-in control a card may contain.
  *
  * All of them are optional, because a card can show any subset - but the two cards
@@ -455,14 +437,6 @@ function wireSignInForms(prefix = '') {
       void finishBrowserLogin(prefix);
     }
   });
-  // Enter in the API key field submits it.
-  id('api-key')?.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      void finishKeyLogin(prefix);
-    }
-  });
-  id('login-key')?.addEventListener('click', () => void finishKeyLogin(prefix));
   // The button is an anchor, so its address is resolved while the card is drawn.
   void loadSignInUrl(prefix);
 }
