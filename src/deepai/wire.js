@@ -10,6 +10,7 @@
 
 import { randomBytes } from 'node:crypto';
 import { machineHeaders } from './machine.js';
+import { beaconHeaders, checkInHeaders } from './checkin.js';
 
 export const API_ORIGIN = 'https://api.deepai.org';
 
@@ -54,7 +55,14 @@ export const LANE_HEADERS = Object.freeze({
  * module-level object would be frozen before that happened. See `machine.js`.
  */
 export function codeHeaders(extra = {}) {
-  return { ...LANE_HEADERS, ...machineHeaders(), ...extra };
+  /*
+   * The beacon and the check-in ride along on every lane request, exactly as the app sends
+   * them: the beacon is what the server reads to tell a real client from a script, and the
+   * check-in nonce is the mark it issued to this process on the last `/theos` answer. Sent
+   * here so that every lane call - catalog, allowance, completions - carries the same
+   * identity, rather than three of them each remembering to.
+   */
+  return { ...LANE_HEADERS, ...machineHeaders(), ...beaconHeaders(), ...checkInHeaders(), ...extra };
 }
 
 /**

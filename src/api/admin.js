@@ -15,6 +15,7 @@ import express from 'express';
 import { randomUUID } from 'node:crypto';
 import {
   checkKey,
+  usernameForKey,
 } from '../deepai/account.js';
 import {
   DEFAULT_MAX_KEYS,
@@ -153,6 +154,41 @@ export function adminRouter(db, runtime) {
     }
     res.setHeader('set-cookie', clearSessionCookie());
     res.json({ ok: true });
+  });
+
+  /**
+   * Sign in by pasting a DeepAI Code key.
+   *
+   * The browser flow is the ordinary way in, and it can produce a key DeepAI Code does not
+   * accept: DeepAI keeps ordinary API keys - the ones its dashboard hands out - apart from the
+   * keys its Code lane takes, and an account can sign in and get the first kind. The app itself
+   * is the source of the second kind, so its key is accepted here as a first-class sign-in.
+   *
+   * The key is validated against the Code lane, which is the only authority on whether it can
+   * be used at all - not against the website, which accepts both kinds and would let a useless
+   * key in. A key carries no identity (no endpoint reports whose it is), so the account is
+   * named after the key's digest: one key, one account, and no key can land on another's.
+   */
+  router.post('/login/key', async (req, res) => {
+    const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+    if (apiKey === '') {
+      return res.status(400).json({ ok: false, error: 'A DeepAI Code key is required.', code: 'no-key' });
+    }
+    const check = await checkKey(apiKey, AbortSignal.timeout(15_000));
+    if (!check.ok) {
+      recordAuthEvent(db, 'denied', { username: '', detail: check.reason ?? 'unreachable' });
+      // `invalidated` is a key DeepAI no longer knows anywhere; the rest are keys it knows but
+      // will not take here, which is a bad key for this purpose rather than a dead account.
+      const status = check.reason === 'invalidated' ? 401 : 400;
+      return res.status(status).json({ ok: false, error: check.error, code: check.reason ?? 'unreachable' });
+    }
+    const completed = completeLogin(db, runtime, {
+      apiKey,
+      username: usernameForKey(apiKey),
+      isPro: check.isPro === true,
+    }, { secure: runtime.trustProxy === true });
+    res.setHeader('set-cookie', completed.cookie);
+    res.json({ ok: true, username: completed.username });
   });
 
   /** Forget the account entirely, including its DeepAI key and API keys. */

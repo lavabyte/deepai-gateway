@@ -336,6 +336,16 @@ function signInRoutes(prefix = '') {
       <div class="row mt-3">
         <button class="btn" id="${prefix}login-finish" type="button">${t('signin.loginToGateway')}</button>
       </div>
+
+      <div class="field mt-3">
+        <label class="field__label" for="${prefix}key-input">${t('signin.keyLabel')}</label>
+        <input class="input input--url" id="${prefix}key-input" type="text" spellcheck="false"
+          autocomplete="off" autocapitalize="off" placeholder="8-4-4-4-12">
+        <span class="field__hint">${t('signin.keyHint')}</span>
+      </div>
+      <div class="row mt-2">
+        <button class="btn btn--secondary" id="${prefix}key-login" type="button">${t('signin.keyButton')}</button>
+      </div>
     </section>`;
 }
 
@@ -404,11 +414,19 @@ async function finishBrowserLogin(prefix = '') {
     button.textContent = t('signin.signingIn');
   }
   try {
-    await api('/login/complete', { method: 'POST', body: { url: text } });
+    const completed = await api('/login/complete', { method: 'POST', body: { url: text } });
     if (field) field.value = '';
     await afterSignIn();
     if (state.account?.signedIn === true) {
-      toast(t('signin.loggedIn'));
+      /*
+       * A sign-in whose key DeepAI Code refuses is not a sign-in anybody can use, so it is
+       * said at once and in the place the fix is: the key field below. Saying "logged in" and
+       * leaving a dash where the balance belongs is how this looked for a day.
+       */
+      toast(
+        completed.codeAccess === false ? t('signin.noCodeAccess') : t('signin.loggedIn'),
+        completed.codeAccess === false ? 'error' : undefined,
+      );
     } else {
       toast(t('error.http', { status: 401 }), 'error');
     }
@@ -424,6 +442,46 @@ async function finishBrowserLogin(prefix = '') {
 }
 
 /**
+ * Sign in with a DeepAI Code key, pasted.
+ *
+ * The browser flow cannot always produce a key DeepAI Code will take - the exchange can hand
+ * back an ordinary website key, and an account without Code access gets nothing usable - while
+ * the key the DeepAI Code app itself holds always works. This is the way in for exactly that
+ * case, so it validates against the Code lane on the server and nothing else.
+ *
+ * @param {string} prefix
+ * @returns {Promise<void>}
+ */
+async function finishKeyLogin(prefix = '') {
+  const field = $(`${prefix}key-input`);
+  const apiKey = (field?.value ?? '').trim();
+  if (apiKey === '') {
+    toast(t('signin.keyMissing'), 'error');
+    field?.focus();
+    return;
+  }
+  const button = $(`${prefix}key-login`);
+  const label = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = t('signin.signingIn');
+  }
+  try {
+    await api('/login/key', { method: 'POST', body: { apiKey } });
+    if (field) field.value = '';
+    await afterSignIn();
+    toast(t('signin.loggedIn'));
+  } catch (error) {
+    toast(failureMessage(error), 'error');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = label ?? t('signin.keyButton');
+    }
+  }
+}
+
+/**
  * Wire every sign-in control a card may contain.
  *
  * All of them are optional, because a card can show any subset - but the two cards
@@ -434,6 +492,13 @@ async function finishBrowserLogin(prefix = '') {
 function wireSignInForms(prefix = '') {
   const id = (name) => $(`${prefix}${name}`);
   id('login-finish')?.addEventListener('click', () => void finishBrowserLogin(prefix));
+  id('key-login')?.addEventListener('click', () => void finishKeyLogin(prefix));
+  id('key-input')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void finishKeyLogin(prefix);
+    }
+  });
   // Enter in the one-line field signs in, which is what a one-line field invites.
   id('browser-paste')?.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {

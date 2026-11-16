@@ -30,6 +30,7 @@ import express from 'express';
 import { API_ORIGIN } from './wire.js';
 import { usernameForKey } from './account.js';
 import { readAccount } from '../store.js';
+import { checkKey } from './account.js';
 import { completeLogin } from '../api/admin.js';
 
 /** How long one attempt stays redeemable. */
@@ -172,6 +173,11 @@ const FAILURES = {
  *   both share one map of pending attempts - which is why this is a factory rather than
  *   two independent routers.
  */
+/** Escape text for a page this module writes by hand. */
+function escapeText(value) {
+  return String(value).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
 export function createCallbackLogin(db, runtime, options = {}) {
   const apiOrigin = options.apiOrigin ?? API_ORIGIN;
   const router = express.Router();
@@ -249,7 +255,7 @@ export function createCallbackLogin(db, runtime, options = {}) {
    *   A session cookie is handed out either way - it is the read that follows that has to
    *   know - but the caller must not call this a successful sign-in when the key did not land.
    */
-  const finish = (res, account) => {
+  const finish = async (res, account) => {
     const username = account.username !== '' ? account.username : usernameForKey(account.apiKey);
     const completed = completeLogin(db, runtime, {
       apiKey: account.apiKey,
@@ -257,8 +263,40 @@ export function createCallbackLogin(db, runtime, options = {}) {
       isPro: account.isPro,
     }, { secure: runtime.trustProxy === true });
     res.setHeader('set-cookie', completed.cookie);
-    return readAccount(db, completed.username)?.apiKey === account.apiKey;
+    const stored = readAccount(db, completed.username)?.apiKey === account.apiKey;
+    /*
+     * Ask the lane about the key it just issued, before this is called a sign-in.
+     *
+     * DeepAI keeps ordinary API keys and DeepAI Code keys apart, and an exchange can produce
+     * the first kind - the website accepts it and `/deepai_code` refuses it - or an account
+     * without Code access can sign in and get nothing usable. Either way the account card
+     * showed "Active", the balance a dash and a refusal nobody could act on. The read costs one
+     * request and turns that into a sentence at the moment of signing in.
+     */
+    let codeAccess = true;
+    if (stored) {
+      const check = await checkKey(account.apiKey, AbortSignal.timeout(15_000));
+      if (!check.ok) codeAccess = false;
+    }
+    return { stored, codeAccess };
   };
+
+  /**
+   * One sentence on a page, for the browser that lands here.
+   *
+   * The callback usually cannot load at all - it is a `127.0.0.1` address on a machine the
+   * visitor is often not on - so this exists for the case where it does: the browser reaches
+   * the gateway, and the page says what happened rather than redirecting into a dashboard that
+   * would have to explain it in a toast.
+   */
+  const page = (title, message) => `<!doctype html>
+<meta charset="utf-8"><title>${escapeText(title)}</title>
+<body style="font:15px/1.6 system-ui;margin:0;display:grid;place-items:center;min-height:100vh">
+<div style="max-width:44ch">
+<h1 style="font-size:18px">${escapeText(title)}</h1>
+<p>${escapeText(message)}</p>
+<p><a href="/">Back to the dashboard</a></p>
+</div>`;
 
   /**
    * Start the sign-in and send the browser to DeepAI.
@@ -286,20 +324,20 @@ export function createCallbackLogin(db, runtime, options = {}) {
   const handleCallback = async (req, res) => {
     const result = await redeem(req.query.code, req.query.state);
     if (result.ok) {
-      finish(res, result);
+      const { stored, codeAccess } = await finish(res, result);
+      if (!stored) return res.status(500).type('html').send(page('Sign-in failed',
+        'The DeepAI key could not be saved on this gateway. Sign in again after an operator fixes the database.'));
+      if (!codeAccess) {
+        runtime.log?.('callback sign-in: the exchanged key has no DeepAI Code access');
+        return res.status(200).type('html').send(page('Signed in, but not to DeepAI Code',
+          'DeepAI issued a key for this account that DeepAI Code does not accept. Sign in with an account that has DeepAI Code access, or paste a DeepAI Code key in the dashboard.'));
+      }
       runtime.log?.('callback sign-in completed');
       return res.redirect(302, '/');
     }
     const [status, message] = FAILURES[result.reason] ?? [400, 'That sign-in could not be completed.'];
     runtime.log?.(`callback sign-in refused: ${result.reason}`);
-    return res.status(status).type('html').send(`<!doctype html>
-<meta charset="utf-8"><title>Sign-in failed</title>
-<body style="font:15px/1.6 system-ui;margin:0;display:grid;place-items:center;min-height:100vh">
-<div style="max-width:44ch">
-<h1 style="font-size:18px">Sign-in failed</h1>
-<p>${message.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</p>
-<p><a href="/">Back to the dashboard</a></p>
-</div>`);
+    return res.status(status).type('html').send(page('Sign-in failed', message));
   };
 
   router.get('/callback', handleCallback);
@@ -327,7 +365,7 @@ export function createCallbackLogin(db, runtime, options = {}) {
        * holds what the exchange returned. The failure names the likely cause (a database the
        * process cannot write) rather than leaving the reader to infer it from a refusal later.
        */
-      const stored = finish(res, result);
+      const { stored, codeAccess } = await finish(res, result);
       if (stored !== true) {
         runtime.log?.('sign-in: the exchanged key could not be stored - refusing to report success');
         return res.status(500).json({
@@ -337,7 +375,7 @@ export function createCallbackLogin(db, runtime, options = {}) {
         });
       }
       const username = result.username !== '' ? result.username : usernameForKey(result.apiKey);
-      return res.json({ ok: true, username });
+      return res.json({ ok: true, username, codeAccess });
     }
     const [status, message] = FAILURES[result.reason] ?? [400, 'That sign-in could not be completed.'];
     return res.status(status).json({ ok: false, error: message, code: result.reason });

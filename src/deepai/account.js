@@ -23,6 +23,7 @@
 
 import { createHash } from 'node:crypto';
 import { API_ORIGIN, laneHeaders } from './wire.js';
+import { noteCheckIn } from './checkin.js';
 
 
 
@@ -53,6 +54,11 @@ export async function checkKey(apiKey, signal) {
       }).catch(() => undefined),
     ]);
 
+    /*
+     * The refusal body carries a check-in too, and the app keeps it from either answer - the
+     * mark and the balance come from the same endpoint, so a refused read that still hands out
+     * a nonce is a lane that wants this client to keep talking to it.
+     */
     if (allowanceResponse.status === 401 || allowanceResponse.status === 403) {
       /*
        * A refusal carries a code that says *which* refusal it is, and they need different
@@ -62,6 +68,7 @@ export async function checkKey(apiKey, signal) {
        * key was rejected" sends the reader to change a key that was never the problem.
        */
       const body = await allowanceResponse.json().catch(() => undefined);
+      noteCheckIn(body);
       const code = typeof body?.error?.code === 'string' ? body.error.code : '';
       if (code === 'machine_required') {
         return { ok: false, reason: 'machine-required', error: 'DeepAI requires a machine identity' };
@@ -89,6 +96,20 @@ export async function checkKey(apiKey, signal) {
             error: 'the key is no longer accepted anywhere - DeepAI issues a fresh key on every sign-in and retires the previous one',
           };
         }
+        if (siteAuth === true) {
+          /*
+           * The website still knows this key and the Code lane will not have it. That is not a
+           * dead key and not a gateway fault: DeepAI keeps ordinary API keys and DeepAI Code
+           * keys apart, and a key issued for the website's own API - or an account without
+           * Code access - is refused here however fresh it is. Saying "this account's key was
+           * rejected" sent the reader to sign in again, which produces the same refusal.
+           */
+          return {
+            ok: false,
+            reason: 'code-access-missing',
+            error: 'the key is valid for DeepAI but is not a DeepAI Code key - sign in with an account that has DeepAI Code access',
+          };
+        }
       }
       return { ok: false, reason: 'rejected', error: 'the key was rejected by DeepAI' };
     }
@@ -107,6 +128,7 @@ export async function checkKey(apiKey, signal) {
     }
 
     const data = await allowanceResponse.json().catch(() => ({}));
+    noteCheckIn(data);
     const entitlement = entitlementResponse?.ok
       ? await entitlementResponse.json().catch(() => undefined)
       : undefined;

@@ -1040,10 +1040,20 @@ await checkAsync('/ serves the dashboard shell and nothing else is browser-navig
      * HTML. `/api/login/complete` is the one that remains: it is how the pasted callback
      * address finishes the sign-in, and it is served.
      */
-    for (const path of ['/api/login', '/api/login/key', '/api/login/profile', '/api/login/password', '/api/cancel-login']) {
+    /*
+     * `/api/login/key` is deliberately not in this list. DeepAI hands out ordinary API keys and
+     * DeepAI Code keys, and the browser exchange can produce the first kind - so the key the
+     * DeepAI Code app itself holds is accepted as its own way in. It answers, rather than 404s,
+     * and refuses an empty body rather than pretending to be gone.
+     */
+    for (const path of ['/api/login', '/api/login/profile', '/api/login/password', '/api/cancel-login']) {
       const gone = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
       assert.equal(gone.status, 404, `${path} must be gone`);
     }
+    const keyLogin = await fetch(`${base}/api/login/key`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    });
+    assert.equal(keyLogin.status, 400, 'the key sign-in answers, and refuses an empty key with a reason');
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -2540,7 +2550,8 @@ await checkAsync('a retired key is told apart from a lane the key still owns', a
 
     siteAuthenticated = true;
     const alive = await checkKey('lane-refused-key', AbortSignal.timeout(5000));
-    assert.equal(alive.reason, 'rejected', 'a key the website accepts is a lane refusal, not a retired key');
+    assert.equal(alive.reason, 'code-access-missing',
+      'a key the website accepts is alive but is not a DeepAI Code key - its own state, not "rejected"');
 
     // The witness itself failing is not a second reason to invent: the generic refusal stands.
     globalThis.fetch = async (url) => (String(url).includes('/deepai_code/theos')
@@ -5379,6 +5390,135 @@ await checkAsync('the sign-in routes are always served, because they are the onl
   }
 });
 
+
+await checkAsync('a DeepAI Code key signs in, and a website key does not', async () => {
+  /*
+   * DeepAI keeps two kinds of key: ordinary ones for its website API, and the ones the Code
+   * lane takes. The browser exchange can hand back the first kind, and an account without Code
+   * access signs in and gets nothing usable - which the dashboard reported as "DeepAI refused
+   * this account's key" long after the fact.
+   *
+   * So the key the DeepAI Code app itself holds is accepted as a sign-in of its own, validated
+   * against the Code lane - the authority on what can be used - and never against the website,
+   * which accepts both kinds and would let a useless key in.
+   */
+  const { openDatabase } = await import('../src/db.js');
+  const { createApp } = await import('../server.js');
+  const { readAccount } = await import('../src/store.js');
+  const fresh = openDatabase(':memory:');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const laneKey = '11111111-2222-4333-8444-555555555555';
+  const websiteKey = '99999999-8888-4777-8666-555555555555';
+  const retiredKey = '12121212-3434-4565-8787-909090909090';
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const target = String(url);
+    if (target.includes('/deepai_code/theos')) {
+      const key = String(init?.headers?.['Api-Key'] ?? '');
+      if (key === laneKey) {
+        return new Response(JSON.stringify({ enabled: true, balance: '5.00000', granted: '5.00000',
+          check_in: { nonce: 'a'.repeat(32), seconds: 600 } }),
+        { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      // The website key and the retired one are both refused by the lane.
+      return new Response(JSON.stringify({ error: { code: 'auth_required' } }),
+        { status: 401, headers: { 'content-type': 'application/json' } });
+    }
+    if (target.includes('/get_usage_summary')) {
+      const key = String(init?.headers?.['Api-Key'] ?? '');
+      return new Response(JSON.stringify({ is_authenticated: key === websiteKey }),
+        { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return realFetch(url, init);
+  };
+
+  const post = (body) => fetch(`${base}/api/login/key`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+  try {
+    // 1. A Code key signs in, and the account is named after the key's digest.
+    const good = await post({ apiKey: laneKey });
+    assert.equal(good.status, 200, 'a DeepAI Code key is enough to sign in');
+    const signedIn = await good.json();
+    assert.equal(signedIn.ok, true);
+    assert.ok(signedIn.username.startsWith('key-'), 'named after the key, which carries no identity');
+    assert.equal(readAccount(fresh, signedIn.username)?.apiKey, laneKey, 'and stored for that owner');
+    assert.match(String(good.headers.get('set-cookie')), /deepai_gateway_session=/,
+      'with the session it just created');
+
+    /*
+     * 2. A key the website accepts and the Code lane refuses is refused here: this gateway only
+     *    exists to reach DeepAI Code, so a key that cannot is not a way in.
+     */
+    const website = await post({ apiKey: websiteKey });
+    assert.equal(website.status, 400, 'a website key is not a DeepAI Code key');
+    assert.equal((await website.json()).code, 'code-access-missing', 'and says which kind it is');
+
+    // 3. A key DeepAI has retired is a dead credential, and that is worth its own status.
+    const retired = await post({ apiKey: retiredKey });
+    assert.equal(retired.status, 401);
+    assert.equal((await retired.json()).code, 'invalidated');
+
+    // 4. Nothing that is not a key at all gets through, and nothing reaches DeepAI.
+    const empty = await post({ apiKey: '   ' });
+    assert.equal(empty.status, 400);
+    assert.equal((await empty.json()).code, 'no-key');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+    fresh.close();
+  }
+});
+
+await checkAsync('the lane check-in mark is kept and sent back while it is fresh', async () => {
+  /*
+   * Read out of the app: `/deepai_code/theos` is a check-in, and its answer carries
+   * `check_in: { nonce, seconds }`. The app keeps that mark and sends it as
+   * `X-DeepAI-Code-Check-In` until half its life has passed, and every request carries a
+   * `X-DeepAI-Code-Beacon` describing the client.
+   *
+   * A gateway that never checked in was a build the server had no reason to treat as a client,
+   * and that is exactly the shape of the refusal a fresh account's key ran into.
+   */
+  const { noteCheckIn, checkInHeaders, beaconHeaders, hasCheckIn, resetCheckIn, noteRelay } =
+    await import('../src/deepai/checkin.js');
+  const { codeHeaders } = await import('../src/deepai/wire.js');
+
+  resetCheckIn();
+  assert.deepEqual(checkInHeaders(), {}, 'nothing is sent before the lane has issued a mark');
+  assert.equal(noteCheckIn({ check_in: { nonce: 'not-a-nonce', seconds: 600 } }), false,
+    'a malformed mark is ignored rather than stored');
+
+  const now = 1_000_000;
+  assert.equal(noteCheckIn({ check_in: { nonce: 'b'.repeat(32), seconds: 600 } }, now), true);
+  assert.equal(hasCheckIn(), true);
+  assert.deepEqual(checkInHeaders(now + 1_000), { 'X-DeepAI-Code-Check-In': 'b'.repeat(32) },
+    'a fresh mark is sent back');
+  assert.deepEqual(checkInHeaders(now + 600_001), {},
+    'an expired one is not, because it describes a client that stopped talking');
+
+  assert.match(beaconHeaders(now)['X-DeepAI-Code-Beacon'], /^v=[^;]+;up=\d+;pi=0;focus=0$/,
+    'the beacon describes this client the way the app describes itself');
+  noteRelay(now);
+  assert.match(beaconHeaders(now + 60_000)['X-DeepAI-Code-Beacon'], /pi=1/,
+    'and says a completion went through recently');
+  assert.match(beaconHeaders(now + 700_000)['X-DeepAI-Code-Beacon'], /pi=0/,
+    'but not once the gateway has been idle');
+
+  // On the real clock, because `codeHeaders` reads it: a mark noted at a fake past time is
+  // already expired, which is the behaviour the check above just asserted.
+  noteCheckIn({ check_in: { nonce: 'c'.repeat(32), seconds: 600 } });
+  const headers = codeHeaders();
+  assert.equal(headers['X-DeepAI-Code-Check-In'], 'c'.repeat(32),
+    'every lane request carries the mark, not just the one that read it');
+  assert.ok(typeof headers['X-DeepAI-Code-Beacon'] === 'string', 'alongside the beacon');
+  resetCheckIn();
+  assert.deepEqual(checkInHeaders(), {}, 'and a reset process starts unchecked');
+});
 
 await checkAsync('a sign-in whose key did not land is not reported as a sign-in', async () => {
   /*

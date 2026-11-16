@@ -113,7 +113,15 @@ plain-HTTP localhost, where a `Secure` cookie would never be sent.
 
 ## Signing in
 
-There is one way in, and it is DeepAI's own sign-in page. Three steps:
+There are two ways in. The first is DeepAI's own sign-in page, and it is the ordinary one.
+The second exists because DeepAI keeps **two kinds of key**: the ordinary ones its website
+hands out, and the ones its Code lane accepts. The exchange below can hand back the first kind
+(or an account without Code access can sign in and get nothing usable), so the key the DeepAI
+Code app itself holds is accepted as a sign-in of its own - pasted into the card, validated
+against the Code lane, and refused if it cannot reach DeepAI Code. The dashboard says which
+kind a sign-in produced instead of reporting "logged in" and a dash where the balance belongs.
+
+Three steps for the browser flow:
 
 1. **Get callback url** opens DeepAI's sign-in in a new tab. It is a real link, not a popup.
 2. Authenticate there, as you normally would - a password, or Google or Apple.
@@ -636,6 +644,13 @@ exactly as the server does.
 
 The sign-in the gateway uses is the one the Code app uses: DeepAI's own page, and the
 `desktop_auth` exchange behind it for an `api_key` - see [Signing in](#signing-in).
+
+The lane also expects the handshake the app performs, which is reproduced here
+(`src/deepai/checkin.js`): `/deepai_code/theos` is a *check-in* whose answer carries
+`check_in: { nonce, seconds }`, and every later lane request sends that nonce as
+`X-DeepAI-Code-Check-In` while it is fresh, plus a `X-DeepAI-Code-Beacon` describing this
+client. A gateway that never checked in was a build the server had no reason to treat as a
+client - the refusal a fresh account's key ran into.
 
 ## Reasoning levels
 
