@@ -121,6 +121,11 @@ Code app itself holds is accepted as a sign-in of its own - pasted into the card
 against the Code lane, and refused if it cannot reach DeepAI Code. The dashboard says which
 kind a sign-in produced instead of reporting "logged in" and a dash where the balance belongs.
 
+A signed-in account can also have its key replaced from the account card: the DeepAI key is
+the one thing that changes, while the account, its gateway keys and its usage stay. That is the
+repair for a sign-in whose key DeepAI Code will not take - and the replacement is validated
+against the Code lane, so a key that cannot reach DeepAI Code never displaces one that could.
+
 Three steps for the browser flow:
 
 1. **Get callback url** opens DeepAI's sign-in in a new tab. It is a real link, not a popup.

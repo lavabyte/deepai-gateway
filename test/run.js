@@ -5474,6 +5474,89 @@ await checkAsync('a DeepAI Code key signs in, and a website key does not', async
   }
 });
 
+await checkAsync('the key behind a signed-in account can be replaced without losing the account', async () => {
+  /*
+   * This is the repair the dashboard was missing. A browser sign-in can produce a key DeepAI
+   * Code refuses, and the account card's only exits were "refresh" (which fails) and "forget"
+   * (which deletes the gateway's own keys along with it) - so a working gateway key set was
+   * thrown away to fix a credential.
+   *
+   * The replacement is validated against the Code lane, so a key that cannot reach DeepAI Code
+   * never displaces one that could, and nothing else about the account changes.
+   */
+  const { openDatabase } = await import('../src/db.js');
+  const { createApp } = await import('../server.js');
+  const { readAccount, saveAccount, createSession, listAccounts } = await import('../src/store.js');
+  const fresh = openDatabase(':memory:');
+  saveAccount(fresh, { apiKey: 'website-key', username: 'someone@example.com', isPro: false });
+  const session = createSession(fresh, 'someone@example.com');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const cookie = `deepai_gateway_session=${session.token}`;
+
+  const goodKey = '11111111-2222-4333-8444-555555555555';
+  const websiteKey = '99999999-8888-4777-8666-555555555555';
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const target = String(url);
+    const key = String(init?.headers?.['Api-Key'] ?? '');
+    if (target.includes('/deepai_code/theos')) {
+      return key === goodKey
+        ? new Response(JSON.stringify({ enabled: true, balance: '7.00000', granted: '7.00000' }),
+          { status: 200, headers: { 'content-type': 'application/json' } })
+        : new Response(JSON.stringify({ error: { code: 'auth_required' } }),
+          { status: 401, headers: { 'content-type': 'application/json' } });
+    }
+    if (target.includes('/get_usage_summary')) {
+      return new Response(JSON.stringify({ is_authenticated: true }),
+        { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return realFetch(url, init);
+  };
+
+  const replace = (apiKey) => fetch(`${base}/api/account/key`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ apiKey }),
+  });
+  try {
+    // A website key cannot take over: it does not reach DeepAI Code.
+    const refused = await replace(websiteKey);
+    assert.equal(refused.status, 400);
+    assert.equal((await refused.json()).code, 'code-access-missing');
+    assert.equal(readAccount(fresh, 'someone@example.com').apiKey, 'website-key',
+      'and the stored key is left exactly as it was');
+
+    // A Code key replaces the credential and nothing else.
+    const replaced = await replace(goodKey);
+    assert.equal(replaced.status, 200);
+    const body = await replaced.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.allowance.balance, '7.00000', 'the balance comes back with it');
+    const account = readAccount(fresh, 'someone@example.com');
+    assert.equal(account.apiKey, goodKey, 'the credential is the new one');
+    assert.equal(account.allowance?.balance, '7.00000', 'and its allowance is recorded');
+    assert.equal(listAccounts(fresh).length, 1, 'the account is the same account, not a second one');
+
+    // An empty box is an empty box, not a key that replaces anything.
+    const empty = await replace('   ');
+    assert.equal(empty.status, 400);
+    assert.equal((await empty.json()).code, 'no-key');
+
+    // And it is a session route: a signed-out caller cannot swap a credential.
+    const anon = await fetch(`${base}/api/account/key`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ apiKey: goodKey }),
+    });
+    assert.equal(anon.status, 401, 'swapping a key needs the session that owns it');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+    fresh.close();
+  }
+});
+
 await checkAsync('the lane check-in mark is kept and sent back while it is fresh', async () => {
   /*
    * Read out of the app: `/deepai_code/theos` is a check-in, and its answer carries

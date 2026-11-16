@@ -1527,6 +1527,20 @@ function accountCard() {
         <span class="spacer"></span>
         <span class="tiny muted">${esc(keyQuotaLabel(account.keyQuota))}</span>
       </div>
+      <!--
+        The credential behind this account can be the wrong kind, and that has to be fixable
+        without deleting the account: DeepAI refuses an ordinary website key on its Code lane,
+        and "forget the account" would take the gateway's own keys with it.
+      -->
+      <div class="field mt-3">
+        <label class="field__label" for="account-key-input">${t('account.keyLabel')}</label>
+        <input class="input input--url" id="account-key-input" type="text" spellcheck="false"
+          autocomplete="off" autocapitalize="off" placeholder="8-4-4-4-12">
+        <span class="field__hint">${t('account.keyHint')}</span>
+      </div>
+      <div class="row mt-2">
+        <button class="btn btn--secondary btn--sm" id="account-key-save" type="button">${t('account.keyButton')}</button>
+      </div>
       <div class="tiny muted mt-2">
         ${t('account.sessionNote', { when: account.sessionExpiresAt ? when(account.sessionExpiresAt) : t('common.never') })}
       </div>
@@ -1716,6 +1730,39 @@ function wireAccountCard(rerender) {
       toast(t('account.balanceToast', { amount: result.allowance.balance }));
     } catch (error) {
       toast(failureMessage(error), 'error');
+    }
+    await loadAccount();
+    rerender();
+  });
+
+  /*
+   * Replace the DeepAI key behind this account.
+   *
+   * This is the repair for a key DeepAI Code will not take: the account, its gateway keys and
+   * its usage stay, and only the credential changes - validated against the Code lane on the
+   * server, so a key that cannot reach DeepAI Code never replaces one that could.
+   */
+  $('account-key-save')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    const field = $('account-key-input');
+    const apiKey = (field?.value ?? '').trim();
+    if (apiKey === '') {
+      toast(t('signin.keyMissing'), 'error');
+      field?.focus();
+      return;
+    }
+    button.disabled = true;
+    const label = button.textContent;
+    button.textContent = t('pricing.refreshing');
+    try {
+      await api('/account/key', { method: 'POST', body: { apiKey } });
+      if (field) field.value = '';
+      toast(t('account.keyReplaced'));
+    } catch (error) {
+      toast(failureMessage(error), 'error');
+    } finally {
+      button.disabled = false;
+      button.textContent = label ?? t('account.keyButton');
     }
     await loadAccount();
     rerender();

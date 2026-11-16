@@ -82,9 +82,14 @@ export async function checkKey(apiKey, signal) {
        * while a key the site still accepts points at the lane rather than the key.
        */
       if (code === 'auth_required') {
+        /*
+         * With its own deadline, not the caller's: the allowance read has just spent part of
+         * that budget, and a witness that inherits it gets aborted by the clock rather than
+         * answering - which turns "this key is not a Code key" into a vague "rejected".
+         */
         const site = await fetch(`${API_ORIGIN}/get_usage_summary`, {
           headers: { accept: 'application/json', 'Api-Key': apiKey },
-          signal,
+          signal: AbortSignal.timeout(8_000),
         }).catch(() => undefined);
         const siteAuth = site?.ok
           ? (await site.json().catch(() => undefined))?.is_authenticated
