@@ -17,6 +17,7 @@
   "account.refreshError.no-account": "Esta cuenta ya no está guardada. Inicia sesión de nuevo.",
   "account.refreshError.no-key": "No hay ninguna clave de DeepAI guardada para esta cuenta. Inicia sesión de nuevo.",
   "account.refreshError.rejected": "DeepAI rechaza la clave de esta cuenta. Inicia sesión de nuevo con una clave que DeepAI acepte.",
+  "account.refreshError.invalidated": "DeepAI ya no acepta esta clave en ningún sitio - cada inicio de sesión emite una clave nueva y retira la anterior, y un inicio de sesión más reciente la reemplazó. Vuelve a iniciar sesión.",
   "account.refreshError.unreachable": "No se pudo contactar con DeepAI para leer el saldo. Inténtalo en un momento.",
   "account.removeConfirm": "Eliminar cuenta",
   "account.removeLine1": "Esta cuenta se eliminará de este gateway.",

@@ -1278,12 +1278,19 @@ async function loadAccount() {
   }
 
   if (state.account.signedIn === true) {
-    // Best-effort live balance read; a refresh failure must not log the user out.
+    /*
+     * Best-effort live balance read. A failure must not log the user out - the session is
+     * good and the cached numbers are still there - but it may not be silent either: a
+     * sign-in whose balance cannot be read looks like success with a dash where Credits
+     * belong, and the reason is the one thing that says what to do about it. The code rides
+     * along in `state.refreshIssue` for the caller that wants to say it out loud.
+     */
+    state.refreshIssue = undefined;
     try {
       await api('/account/refresh', { method: 'POST' });
       state.account = await api('/account');
-    } catch {
-      // Keep the session/account state we already have.
+    } catch (error) {
+      state.refreshIssue = typeof error?.code === 'string' ? error.code : 'unreachable';
     }
   }
   renderAccountBadge();
@@ -1480,7 +1487,16 @@ async function afterSignIn() {
   await loadAccount();
   await render();
   if (state.account?.signedIn !== true) return;
-  // loadAccount already attempted a best-effort refresh; avoid duplicate failing toasts.
+  /*
+   * The sign-in itself worked, and the balance read may not have - and that difference has to
+   * be said, because the dash where Credits belong is otherwise the only sign. The session
+   * stays (a failed read is not a failed sign-in); the reason is translated from its code,
+   * exactly as the refresh button reports it.
+   */
+  if (state.refreshIssue !== undefined) {
+    toast(refreshError({ code: state.refreshIssue }), 'error');
+    state.refreshIssue = undefined;
+  }
 }
 
 /**

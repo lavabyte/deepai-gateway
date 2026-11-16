@@ -17,6 +17,7 @@
   "account.refreshError.no-account": "यह खाता अब सहेजा नहीं है। दोबारा साइन इन करें।",
   "account.refreshError.no-key": "इस खाते के लिए कोई DeepAI कुंजी सहेजी नहीं है। दोबारा साइन इन करें।",
   "account.refreshError.rejected": "DeepAI इस खाते की कुंजी अस्वीकार करता है। ऐसी कुंजी से दोबारा साइन इन करें जिसे DeepAI स्वीकार करता हो।",
+  "account.refreshError.invalidated": "DeepAI अब इस कुंजी को कहीं भी स्वीकार नहीं करता - प्रत्येक साइन-इन एक नई कुंजी जारी करता है और पिछली को समाप्त कर देता है, और किसी नए साइन-इन ने इसे बदल दिया। फिर से साइन इन करें।",
   "account.refreshError.unreachable": "शेष पढ़ने के लिए DeepAI तक नहीं पहुँच सके। थोड़ी देर में फिर कोशिश करें।",
   "account.removeConfirm": "खाता हटाएँ",
   "account.removeLine1": "यह खाता इस गेटवे से हटा दिया जाएगा।",

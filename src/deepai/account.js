@@ -66,6 +66,30 @@ export async function checkKey(apiKey, signal) {
       if (code === 'machine_required') {
         return { ok: false, reason: 'machine-required', error: 'DeepAI requires a machine identity' };
       }
+      /*
+       * A Code-lane refusal is one of two very different states, and they need different
+       * words. DeepAI issues a fresh key on every sign-in and stops accepting the previous
+       * one, so a key stored here can be retired by a sign-in that happened somewhere else -
+       * the desktop app on the same machine, another browser. Asking the plain website
+       * endpoint with the same key tells the two apart: a retired key is refused there too,
+       * while a key the site still accepts points at the lane rather than the key.
+       */
+      if (code === 'auth_required') {
+        const site = await fetch(`${API_ORIGIN}/get_usage_summary`, {
+          headers: { accept: 'application/json', 'Api-Key': apiKey },
+          signal,
+        }).catch(() => undefined);
+        const siteAuth = site?.ok
+          ? (await site.json().catch(() => undefined))?.is_authenticated
+          : undefined;
+        if (siteAuth === false) {
+          return {
+            ok: false,
+            reason: 'invalidated',
+            error: 'the key is no longer accepted anywhere - DeepAI issues a fresh key on every sign-in and retires the previous one',
+          };
+        }
+      }
       return { ok: false, reason: 'rejected', error: 'the key was rejected by DeepAI' };
     }
     /*

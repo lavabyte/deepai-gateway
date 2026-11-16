@@ -17,6 +17,7 @@
   "account.refreshError.no-account": "To konto nie jest już zapisane. Zaloguj się ponownie.",
   "account.refreshError.no-key": "Dla tego konta nie ma zapisanego klucza DeepAI. Zaloguj się ponownie.",
   "account.refreshError.rejected": "DeepAI odrzuca klucz tego konta. Zaloguj się ponownie kluczem, który DeepAI akceptuje.",
+  "account.refreshError.invalidated": "DeepAI już nigdzie nie akceptuje tego klucza - każde zalogowanie wydaje świeży klucz i unieważnia poprzedni, a nowsze logowanie zastąpiło ten. Zaloguj się ponownie.",
   "account.refreshError.unreachable": "Nie udało się połączyć z DeepAI, aby odczytać saldo. Spróbuj za chwilę.",
   "account.removeConfirm": "Usuń konto",
   "account.removeLine1": "To konto zostanie usunięte z tej bramy.",

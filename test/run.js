@@ -2474,7 +2474,7 @@ await checkAsync('a balance that was never read does not look like one that was'
 
   // --- A refusal is translated, whatever the server's wording was.
   const error = (result) => vm.runInContext(`refreshError(${JSON.stringify(result)})`, read.sandbox);
-  for (const code of ['rejected', 'lane-outdated', 'unreachable', 'http', 'no-key', 'no-account']) {
+  for (const code of ['rejected', 'invalidated', 'lane-outdated', 'unreachable', 'http', 'no-key', 'no-account']) {
     const shown = error({ code, error: 'internal english sentence' });
     assert.equal(shown, LOCALES.en[`account.refreshError.${code}`], `${code} must be translated`);
     assert.ok(!shown.includes('internal english sentence'), `${code} must not leak the server wording`);
@@ -2507,6 +2507,50 @@ await checkAsync('a balance that was never read does not look like one that was'
     'the server sentence must not reach the screen at all');
   // No result at all is the request itself having failed, which is the unreachable case.
   assert.equal(error(undefined), LOCALES.en['account.refreshError.unreachable']);
+});
+
+await checkAsync('a retired key is told apart from a lane the key still owns', async () => {
+  /*
+   * DeepAI issues a fresh key on every sign-in and stops accepting the previous one, so a
+   * key stored here can be retired by a sign-in that happened somewhere else entirely - the
+   * desktop app on the same machine, another browser. Both states used to read as "the key
+   * was rejected", which sent the reader to sign in again they had just done.
+   *
+   * The plain website endpoint answers the same key, so it is the witness: a key it also
+   * refuses is retired everywhere, and a key it still accepts points at the Code lane.
+   */
+  const { checkKey } = await import('../src/deepai/account.js');
+  const realFetch = globalThis.fetch;
+  const answer = (status, body) => new Response(JSON.stringify(body), {
+    status, headers: { 'content-type': 'application/json' },
+  });
+  let theosStatus = 401;
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    if (target.includes('/deepai_code/theos')) return answer(theosStatus, { error: { code: 'auth_required' } });
+    if (target.includes('/get_usage_summary')) return answer(200, { is_authenticated: siteAuthenticated });
+    throw new Error(`unexpected upstream: ${target}`);
+  };
+  let siteAuthenticated = false;
+
+  try {
+    const retired = await checkKey('retired-key', AbortSignal.timeout(5000));
+    assert.equal(retired.ok, false);
+    assert.equal(retired.reason, 'invalidated', 'a key refused by the website too is retired everywhere');
+
+    siteAuthenticated = true;
+    const alive = await checkKey('lane-refused-key', AbortSignal.timeout(5000));
+    assert.equal(alive.reason, 'rejected', 'a key the website accepts is a lane refusal, not a retired key');
+
+    // The witness itself failing is not a second reason to invent: the generic refusal stands.
+    globalThis.fetch = async (url) => (String(url).includes('/deepai_code/theos')
+      ? answer(401, { error: { code: 'auth_required' } })
+      : Promise.reject(new Error('network down')));
+    const silentWitness = await checkKey('unwitnessed-key', AbortSignal.timeout(5000));
+    assert.equal(silentWitness.reason, 'rejected', 'no witness means the old wording, not a guess');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 await checkAsync('a refused balance is explained in the visitor\'s language', async () => {

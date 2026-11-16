@@ -17,6 +17,7 @@
   "account.refreshError.no-account": "This account is no longer stored. Sign in again.",
   "account.refreshError.no-key": "No DeepAI key is stored for this account. Sign in again.",
   "account.refreshError.rejected": "DeepAI refused this account key. Sign in again with a key DeepAI accepts.",
+  "account.refreshError.invalidated": "DeepAI no longer accepts this key anywhere - each sign-in issues a fresh key and retires the previous one, and a newer sign-in replaced it. Sign in again.",
   "account.refreshError.unreachable": "Could not reach DeepAI to read the balance. Try again in a moment.",
   "account.removeConfirm": "Remove account",
   "account.removeLine1": "This account will be removed from this gateway.",

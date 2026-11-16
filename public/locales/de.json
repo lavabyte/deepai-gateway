@@ -17,6 +17,7 @@
   "account.refreshError.no-account": "Dieses Konto ist nicht mehr gespeichert. Melde dich erneut an.",
   "account.refreshError.no-key": "Für dieses Konto ist kein DeepAI-Schlüssel gespeichert. Melde dich erneut an.",
   "account.refreshError.rejected": "DeepAI lehnt den Schlüssel dieses Kontos ab. Melde dich erneut mit einem Schlüssel an, den DeepAI akzeptiert.",
+  "account.refreshError.invalidated": "DeepAI akzeptiert diesen Schlüssel nirgendwo mehr - jede Anmeldung stellt einen neuen Schlüssel aus und macht den vorherigen ungültig; eine neuere Anmeldung hat diesen ersetzt. Bitte melde dich erneut an.",
   "account.refreshError.unreachable": "DeepAI war nicht erreichbar, um das Guthaben zu lesen. Versuche es gleich noch einmal.",
   "account.removeConfirm": "Konto entfernen",
   "account.removeLine1": "Dieses Konto wird von diesem Gateway entfernt.",
