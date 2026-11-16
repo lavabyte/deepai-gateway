@@ -5380,6 +5380,100 @@ await checkAsync('the sign-in routes are always served, because they are the onl
 });
 
 
+await checkAsync('a sign-in whose key did not land is not reported as a sign-in', async () => {
+  /*
+   * This is the shape of a bug that took a day to see: the account card showed a session, the
+   * key count was zero, and every balance read refused "this account's key". The exchange had
+   * worked, `completeLogin` ran, the cookie was handed out - and the stored row still held an
+   * older key, because the database was not the one the process could write to.
+   *
+   * The fix is a read-back after the write: `ok` is only answered when the row holds the key
+   * the exchange just returned. A session cookie still goes out, because the read that follows
+   * is what has to learn the truth, but the caller is told plainly.
+   */
+  const { createCallbackLogin } = await import('../src/deepai/callback-login.js');
+  const { openDatabase } = await import('../src/db.js');
+  const { readAccount, saveAccount } = await import('../src/store.js');
+  const express = (await import('express')).default;
+
+  // A DeepAI whose exchange answers, so the refusal can only come from the write.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const target = String(url);
+    if (target.includes('desktop_auth/exchange')) {
+      return new Response(JSON.stringify({ api_key: 'fresh-key-from-deepai', username: 'someone', is_pro: false }),
+        { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    // Anything else here is a request to this test's own server, which the real fetch serves.
+    return realFetch(url, init);
+  };
+
+  try {
+    const db = openDatabase(':memory:');
+    const login = createCallbackLogin(db, { log: () => {} });
+    const app = express();
+    app.use(express.json());
+    app.use(login.router);
+    app.post('/api/login/complete', login.complete);
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+
+    try {
+      const start = await (await fetch(`${base}/login?json=1`)).json();
+      const state = new URL(start.url).searchParams.get('state');
+      const complete = (body) => fetch(`${base}/api/login/complete`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+      });
+
+      // 1. The write lands: the fresh key is stored and the answer says so.
+      const good = await complete({ url: `http://127.0.0.1:8080/callback?code=c1&state=${state}` });
+      assert.equal(good.status, 200);
+      assert.equal((await good.json()).ok, true, 'a stored key is a completed sign-in');
+      assert.equal(readAccount(db, 'someone')?.apiKey, 'fresh-key-from-deepai',
+        'and the row holds the key the exchange returned');
+
+      // 2. The row cannot take the new key: the sign-in must not claim success.
+      const start2 = await (await fetch(`${base}/login?json=1`)).json();
+      const state2 = new URL(start2.url).searchParams.get('state');
+      const frozen = readAccount(db, 'someone');
+      // A name that resolves to a row which cannot be updated: the account is renamed out
+      // from under the write, so `saveAccount` inserts one row and the read-back finds the
+      // old key still in place under the username the exchange reported.
+      db.prepare('UPDATE accounts SET api_key = ? WHERE username = ?').run('older-key', frozen.username);
+      db.exec("CREATE TRIGGER refuse_update BEFORE UPDATE ON accounts BEGIN SELECT RAISE(IGNORE); END");
+      try {
+        const broken = await complete({ url: `http://127.0.0.1:8080/callback?code=c2&state=${state2}` });
+        assert.equal(broken.status, 500, 'a key that did not land is a failed sign-in');
+        const body = await broken.json();
+        assert.equal(body.ok, false);
+        assert.equal(body.code, 'account_not_saved', 'with a code the client can act on');
+        assert.equal(readAccount(db, 'someone')?.apiKey, 'older-key', 'and nothing was silently stored');
+      } finally {
+        db.exec('DROP TRIGGER refuse_update');
+      }
+      // A key stored afterwards is a sign-in again - the guard is about the write, not a latch.
+      saveAccount(db, { apiKey: 'fresh-again', username: 'someone', isPro: false });
+      const start3 = await (await fetch(`${base}/login?json=1`)).json();
+      const state3 = new URL(start3.url).searchParams.get('state');
+      const healed = await complete({ url: `http://127.0.0.1:8080/callback?code=c3&state=${state3}` });
+      assert.equal((await healed.json()).ok, true, 'a writable database signs in again');
+      /*
+       * `completeLogin` starts an allowance refresh and does not wait for it. The stub answers
+       * it a tick later, and closing the database first turns a passing test into a crash from
+       * a promise nobody holds - so the three refreshes are given time to land before the
+       * handle goes away. The database is not closed here at all: this is an in-memory one and
+       * the process ends shortly, which is cheaper than racing three background calls.
+       */
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 await checkAsync('no name from the database can reach the page', async () => {
   /*
    * The display name used to be shown twice - in the top bar and on the account card - and

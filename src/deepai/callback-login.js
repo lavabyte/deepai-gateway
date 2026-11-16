@@ -29,6 +29,7 @@ import { randomBytes } from 'node:crypto';
 import express from 'express';
 import { API_ORIGIN } from './wire.js';
 import { usernameForKey } from './account.js';
+import { readAccount } from '../store.js';
 import { completeLogin } from '../api/admin.js';
 
 /** How long one attempt stays redeemable. */
@@ -241,14 +242,22 @@ export function createCallbackLogin(db, runtime, options = {}) {
     }
   };
 
-  /** Persist the account and hand the browser its session cookie. */
+  /**
+   * Persist the account and hand the browser its session cookie.
+   *
+   * @returns {boolean} whether the key just exchanged is the one now stored for the account.
+   *   A session cookie is handed out either way - it is the read that follows that has to
+   *   know - but the caller must not call this a successful sign-in when the key did not land.
+   */
   const finish = (res, account) => {
+    const username = account.username !== '' ? account.username : usernameForKey(account.apiKey);
     const completed = completeLogin(db, runtime, {
       apiKey: account.apiKey,
-      username: account.username !== '' ? account.username : usernameForKey(account.apiKey),
+      username,
       isPro: account.isPro,
     }, { secure: runtime.trustProxy === true });
     res.setHeader('set-cookie', completed.cookie);
+    return readAccount(db, completed.username)?.apiKey === account.apiKey;
   };
 
   /**
@@ -311,7 +320,22 @@ export function createCallbackLogin(db, runtime, options = {}) {
     }
     const result = await redeem(parsed.code, parsed.state);
     if (result.ok) {
-      finish(res, result);
+      /*
+       * The key is written, then read back: a sign-in whose key did not reach the database
+       * looks exactly like one that worked - the dashboard has a session, the account card is
+       * drawn, and every later read refuses the key - so `ok` is not reported unless the row
+       * holds what the exchange returned. The failure names the likely cause (a database the
+       * process cannot write) rather than leaving the reader to infer it from a refusal later.
+       */
+      const stored = finish(res, result);
+      if (stored !== true) {
+        runtime.log?.('sign-in: the exchanged key could not be stored - refusing to report success');
+        return res.status(500).json({
+          ok: false,
+          error: 'The DeepAI key could not be saved on this gateway (the database is not writable). Sign in again after fixing it.',
+          code: 'account_not_saved',
+        });
+      }
       const username = result.username !== '' ? result.username : usernameForKey(result.apiKey);
       return res.json({ ok: true, username });
     }
