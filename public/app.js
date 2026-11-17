@@ -1512,6 +1512,14 @@ function accountCard() {
         </div>
       </div>`;
   }
+  /*
+   * Which DeepAI account this is, in DeepAI's own naming, and on every signed-in card.
+   *
+   * One email can exist at DeepAI twice - as a password account and as a Google account - and
+   * those are not the same account, with different credits and different DeepAI Code access. A
+   * card that says only "signed in" leaves the reader unable to tell which one the gateway
+   * landed on, and unable to see that the access they have belongs to the other.
+   */
   const allowance = account.allowance;
   const balance = Number(allowance?.balance);
   const granted = Number(allowance?.granted);
@@ -1523,6 +1531,8 @@ function accountCard() {
       <div class="row row--between">
         <div>
           <div class="card__title">${t('account.title')}</div>
+          <div class="card__sub" id="account-identity">${esc(t('account.signedInAs'))}:
+            <span class="mono">${esc(String(account.username ?? '-'))}</span></div>
           ${account.isPro ? `<div class="card__sub">${t('account.pro')}</div>` : ''}
         </div>
         <span class="badge ${account.balanceLow ? 'badge--amber' : 'badge--green'}"><span class="dot"></span>${account.balanceLow ? t('account.lowBalance') : t('account.active')}</span>

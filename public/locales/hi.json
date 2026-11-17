@@ -36,6 +36,7 @@
   "account.removed": "खाता हटा दिया गया",
   "account.resets": "{when} को रीसेट होता है",
   "account.sessionNote": "इस ब्राउज़र का सत्र {when} को समाप्त होता है। लॉग आउट करने पर केवल यही सत्र समाप्त होता है; DeepAI खाता और उसकी कुंजियाँ बनी रहती हैं, इसलिए दूसरे ब्राउज़र काम करते रहते हैं।",
+  "account.signedInAs": "DeepAI खाता",
   "account.subtitle": "मॉडल तक पहुँचने के लिए गेटवे को आपके DeepAI खाते की ज़रूरत है।",
   "account.title": "DeepAI खाता",
   "authEvent.denied": "अस्वीकृत",

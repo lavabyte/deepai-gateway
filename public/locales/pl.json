@@ -36,6 +36,7 @@
   "account.removed": "Konto usunięte",
   "account.resets": "Resetuje się {when}",
   "account.sessionNote": "Sesja tej przeglądarki kończy się {when}. Wylogowanie kończy tylko tę sesję: konto DeepAI i jego klucze zostają, więc inne przeglądarki działają dalej.",
+  "account.signedInAs": "Konto DeepAI",
   "account.subtitle": "Brama potrzebuje Twojego konta DeepAI, aby korzystać z modeli.",
   "account.title": "Konto DeepAI",
   "authEvent.denied": "odmowa",

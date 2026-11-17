@@ -121,6 +121,11 @@ Code app itself holds is accepted as a sign-in of its own - pasted into the card
 against the Code lane, and refused if it cannot reach DeepAI Code. The dashboard says which
 kind a sign-in produced instead of reporting "logged in" and a dash where the balance belongs.
 
+The account card names the DeepAI account, in DeepAI's own naming. One address can exist twice
+at DeepAI - once as a password account and once as a Google account - and those are two
+accounts with their own credits and their own DeepAI Code access, so "signed in" was not enough
+to tell which one a sign-in landed on.
+
 ### A balance is not the same as access
 
 DeepAI answers three different questions about one key, and they can disagree:

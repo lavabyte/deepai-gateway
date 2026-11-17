@@ -36,6 +36,7 @@
   "account.removed": "Account removed",
   "account.resets": "Resets {when}",
   "account.sessionNote": "This browser's session ends {when}. Logging out ends only this session; the DeepAI account and its keys stay, so other browsers keep working.",
+  "account.signedInAs": "DeepAI account",
   "account.subtitle": "The gateway needs your DeepAI account to reach the models.",
   "account.title": "DeepAI account",
   "authEvent.denied": "denied",

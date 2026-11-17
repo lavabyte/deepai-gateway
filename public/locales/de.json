@@ -36,6 +36,7 @@
   "account.removed": "Konto entfernt",
   "account.resets": "Zurücksetzung {when}",
   "account.sessionNote": "Die Sitzung dieses Browsers endet {when}. Das Abmelden beendet nur diese Sitzung; das DeepAI-Konto und seine Schlüssel bleiben erhalten, sodass andere Browser weiter funktionieren.",
+  "account.signedInAs": "DeepAI-Konto",
   "account.subtitle": "Das Gateway benötigt dein DeepAI-Konto, um die Modelle zu erreichen.",
   "account.title": "DeepAI-Konto",
   "authEvent.denied": "abgelehnt",

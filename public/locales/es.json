@@ -36,6 +36,7 @@
   "account.removed": "Cuenta eliminada",
   "account.resets": "Se restablece {when}",
   "account.sessionNote": "La sesión de este navegador termina {when}. Cerrar sesión solo finaliza esta sesión; la cuenta de DeepAI y sus claves se mantienen, así que los demás navegadores siguen funcionando.",
+  "account.signedInAs": "Cuenta de DeepAI",
   "account.subtitle": "El gateway necesita tu cuenta de DeepAI para acceder a los modelos.",
   "account.title": "Cuenta de DeepAI",
   "authEvent.denied": "denegado",
