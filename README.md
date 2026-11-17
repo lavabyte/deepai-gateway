@@ -121,6 +121,27 @@ Code app itself holds is accepted as a sign-in of its own - pasted into the card
 against the Code lane, and refused if it cannot reach DeepAI Code. The dashboard says which
 kind a sign-in produced instead of reporting "logged in" and a dash where the balance belongs.
 
+### A balance is not the same as access
+
+DeepAI answers three different questions about one key, and they can disagree:
+
+| endpoint | question |
+| --- | --- |
+| `/deepai_code/theos` | does the counter know this key, and what balance does it have |
+| `/deepai_code/models` | will the lane serve this key the catalog |
+| `/get_usage_summary` | does the website know this key |
+
+`/theos` is where the daily grant is counted, and it refuses some accounts that `/models`
+serves happily - an account signed in by email was refused there while its key worked on the
+lane. Reading that refusal as "DeepAI rejects this account's key" turned a metering quirk into
+a dead account, and pointed the reader at signing in again, which produced the same refusal.
+
+So the lane's own answer is what decides whether a key is usable here, and a key it serves is
+kept even when no balance can be read: the dashboard draws a dash and says why instead of
+reporting a failure. **Check DeepAI access** on the account card asks all three questions and
+shows the answers with DeepAI's own error codes, which is the evidence the verdict used to
+lack.
+
 A signed-in account can also have its key replaced from the account card: the DeepAI key is
 the one thing that changes, while the account, its gateway keys and its usage stay. That is the
 repair for a sign-in whose key DeepAI Code will not take - and the replacement is validated

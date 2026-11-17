@@ -83,6 +83,32 @@ export async function checkKey(apiKey, signal) {
        */
       if (code === 'auth_required') {
         /*
+         * Ask the lane itself before believing it about the account.
+         *
+         * `/theos` is the *metering* endpoint - it is where the daily grant is counted, and the
+         * app's own source says the server withholds the grant from a build it does not
+         * recognise. `/models` is the lane's plain answer about whether this key can use DeepAI
+         * Code at all. A key that the counter refuses while the catalog comes back with it is a
+         * working key with an unreadable balance, and reporting that as "DeepAI rejects this
+         * account's key" turned a metering quirk into a dead account - which is exactly what an
+         * account signed in by email ran into while the same account worked in the app.
+         */
+        const lane = await fetch(`${API_ORIGIN}/deepai_code/models`, {
+          headers: { ...laneHeaders(), 'Api-Key': apiKey },
+          signal: AbortSignal.timeout(10_000),
+        }).catch(() => undefined);
+        if (lane?.ok === true) {
+          const catalog = await lane.json().catch(() => undefined);
+          noteCheckIn(catalog);
+          return {
+            ok: true,
+            metering: 'refused',
+            allowance: null,
+            error: 'the key is accepted, but DeepAI will not report a balance for it',
+          };
+        }
+
+        /*
          * With its own deadline, not the caller's: the allowance read has just spent part of
          * that budget, and a witness that inherits it gets aborted by the clock rather than
          * answering - which turns "this key is not a Code key" into a vague "rejected".

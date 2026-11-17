@@ -1305,6 +1305,21 @@ function renderAccountBadge() {
   }
 }
 
+/**
+ * Say why the balance is a dash when it is one.
+ *
+ * A dash in the badge is not the same as a broken account: DeepAI accepts some keys on its Code
+ * lane and reports no balance for them, and a reader who is not told that goes looking for a
+ * new key while the gateway is working.
+ *
+ * @param {{ allowance: unknown }} account
+ * @returns {string} markup, empty when there is a balance to show
+ */
+function renderMeteringNote(account) {
+  if (account.allowance !== null) return '';
+  return `<p class="tiny muted mt-2" id="metering-note">${esc(t('account.meteringUnavailable'))}</p>`;
+}
+
 /** The top-bar action: log out. */
 async function onAuthButton() {
   if (state.account?.signedIn === true) await logOutEverywhere();
@@ -1523,10 +1538,13 @@ function accountCard() {
         </div>` : ''}
       <div class="row mt-3 row--wrap">
         <button class="btn btn--secondary btn--sm" id="refresh-allowance">${t('account.refresh')}</button>
+        <button class="btn btn--ghost btn--sm" id="diagnose-account">${t('account.diagnose')}</button>
         <button class="btn btn--ghost btn--sm" id="forget-account">${t('account.forget')}</button>
         <span class="spacer"></span>
         <span class="tiny muted">${esc(keyQuotaLabel(account.keyQuota))}</span>
       </div>
+      ${renderMeteringNote(account)}
+      <div id="diagnose-report" hidden></div>
       <!--
         The credential behind this account can be the wrong kind, and that has to be fixable
         without deleting the account: DeepAI refuses an ordinary website key on its Code lane,
@@ -1727,12 +1745,48 @@ function wireAccountCard(rerender) {
     button.textContent = t('pricing.refreshing');
     try {
       const result = await api('/account/refresh', { method: 'POST' });
-      toast(t('account.balanceToast', { amount: result.allowance.balance }));
+      /*
+       * The lane can accept the key and still refuse to report a balance - that is the
+       * metering endpoint's own decision, not the account being broken - so the answer is
+       * "no balance to show", not a toast reading "Balance: undefined".
+       */
+      toast(
+        result.allowance === null
+          ? t('account.meteringUnavailable')
+          : t('account.balanceToast', { amount: result.allowance.balance }),
+      );
     } catch (error) {
       toast(failureMessage(error), 'error');
     }
     await loadAccount();
     rerender();
+  });
+
+  /*
+   * "DeepAI rejects this account's key" is a verdict, and the reader deserves the evidence.
+   * Three endpoints answer three different questions about the same key, and the gateway's own
+   * verdict depends on which of them said no - so the answers are shown, with DeepAI's own
+   * error codes, rather than summarised into a word.
+   */
+  $('diagnose-account')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    const report = $('diagnose-report');
+    button.disabled = true;
+    try {
+      const result = await api('/account/diagnose', { method: 'POST' });
+      if (report) {
+        report.hidden = false;
+        report.innerHTML = `<h4 class="tiny muted mt-3">${esc(t('account.diagnoseTitle'))}</h4>`
+          + result.steps.map((step) => `<div class="tiny mono" data-step="${esc(step.label)}">`
+            + `${esc(step.ok ? t('account.diagnoseOk') : t('account.diagnoseRefused'))} ${esc(step.path)} `
+            + `${esc(String(step.status === 0 ? (step.note ?? 'unreachable') : step.status))}`
+            + `${step.code === undefined ? '' : ` ${esc(step.code)}`}</div>`).join('');
+      }
+    } catch (error) {
+      toast(failureMessage(error), 'error');
+    } finally {
+      button.disabled = false;
+    }
   });
 
   /*

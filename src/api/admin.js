@@ -17,6 +17,7 @@ import {
   checkKey,
   usernameForKey,
 } from '../deepai/account.js';
+import { API_ORIGIN, laneHeaders } from '../deepai/wire.js';
 import {
   DEFAULT_MAX_KEYS,
   WINDOWS,
@@ -199,6 +200,49 @@ export function adminRouter(db, runtime) {
     runtime.log?.(`removed account ${username}`);
     res.setHeader('set-cookie', clearSessionCookie());
     res.json({ ok: true });
+  });
+
+  /**
+   * Ask DeepAI, endpoint by endpoint, what it makes of the stored key.
+   *
+   * "DeepAI rejects this account's key" is a conclusion, and the dashboard had no way to show
+   * the evidence behind it. DeepAI answers three different questions with three different
+   * endpoints - does the counter know this key (`/theos`), will the lane serve it the catalog
+   * (`/models`), does the website know it (`/get_usage_summary`) - and an account can pass one
+   * and fail another. Showing the three answers, and DeepAI's own error codes beside them, is
+   * the difference between "sign in again" and knowing which of the three said no.
+   *
+   * The key is not echoed back: the report is statuses and codes only.
+   */
+  router.post('/account/diagnose', requireSession, async (req, res) => {
+    const account = req.account;
+    const ask = async (label, path, absolute) => {
+      const url = absolute ? `${API_ORIGIN}${path}` : `${API_ORIGIN}/deepai_code${path}`;
+      try {
+        const response = await fetch(url, {
+          headers: { ...laneHeaders(), 'Api-Key': account.apiKey },
+          signal: AbortSignal.timeout(10_000),
+          redirect: 'error',
+        });
+        const body = await response.json().catch(() => undefined);
+        return {
+          label,
+          path,
+          status: response.status,
+          ok: response.ok,
+          code: typeof body?.error?.code === 'string' ? body.error.code : undefined,
+        };
+      } catch (error) {
+        return { label, path, status: 0, ok: false, code: undefined, note: String(error?.message ?? error).slice(0, 120) };
+      }
+    };
+    const steps = await Promise.all([
+      ask('allowance', '/theos'),
+      ask('catalog', '/models'),
+      ask('website', '/get_usage_summary', true),
+    ]);
+    recordAuthEvent(db, 'refresh', { username: account.username, detail: 'diagnosed' });
+    res.json({ ok: true, steps });
   });
 
   /**
@@ -663,6 +707,17 @@ export async function refreshAllowance(db, runtime, username) {
   }
   saveAllowance(db, username, check.allowance);
   if (typeof check.isPro === 'boolean') savePro(db, username, check.isPro);
+  /*
+   * A key can be accepted by the lane while the metering endpoint will not report a balance -
+   * it is where the daily grant is counted, and it answers some accounts with a refusal. That
+   * is a working account with an unreadable balance, so it is not an error: the allowance is
+   * cleared, which is what the dashboard draws as unknown, and `metering` says why.
+   */
+  if (check.metering === 'refused') {
+    recordAuthEvent(db, 'refresh', { username, detail: 'balance unavailable' });
+    runtime.log?.(`allowance unavailable for ${username}: the lane accepts the key but reports no balance`);
+    return { ok: true, allowance: null, metering: 'refused' };
+  }
   recordAuthEvent(db, 'refresh', { username, detail: `balance ${check.allowance.balance ?? '?'}` });
   runtime.log?.(`allowance refreshed for ${username}: ${check.allowance.balance ?? '?'} Credits`);
   return { ok: true, allowance: check.allowance };

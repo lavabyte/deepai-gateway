@@ -2535,9 +2535,16 @@ await checkAsync('a retired key is told apart from a lane the key still owns', a
     status, headers: { 'content-type': 'application/json' },
   });
   let theosStatus = 401;
+  // The lane's own answer about the key, which is not the same question the counter answers.
+  let laneCatalog = 401;
   globalThis.fetch = async (url) => {
     const target = String(url);
     if (target.includes('/deepai_code/theos')) return answer(theosStatus, { error: { code: 'auth_required' } });
+    if (target.includes('/deepai_code/models')) {
+      return laneCatalog === 200
+        ? answer(200, { models: [{ id: 'glm-5.3-flash' }] })
+        : answer(laneCatalog, { error: { code: 'auth_required' } });
+    }
     if (target.includes('/get_usage_summary')) return answer(200, { is_authenticated: siteAuthenticated });
     throw new Error(`unexpected upstream: ${target}`);
   };
@@ -2552,6 +2559,20 @@ await checkAsync('a retired key is told apart from a lane the key still owns', a
     const alive = await checkKey('lane-refused-key', AbortSignal.timeout(5000));
     assert.equal(alive.reason, 'code-access-missing',
       'a key the website accepts is alive but is not a DeepAI Code key - its own state, not "rejected"');
+
+    /*
+     * A key the lane itself hands the catalog to is a working key, whatever the metering
+     * endpoint says about its balance. `/theos` is where the daily grant is counted, and it
+     * refuses some accounts that DeepAI Code otherwise serves - the account signed in by email
+     * was one - so this must not be reported as "DeepAI rejects this account's key" while
+     * completions would go through.
+     */
+    laneCatalog = 200;
+    const metered = await checkKey('metered-refused-key', AbortSignal.timeout(5000));
+    assert.equal(metered.ok, true, 'the lane accepting the key is what makes it usable');
+    assert.equal(metered.metering, 'refused', 'and the balance is what is missing, not the access');
+    assert.equal(metered.allowance, null, 'no balance to show, rather than a made-up one');
+    laneCatalog = 401;
 
     // The witness itself failing is not a second reason to invent: the generic refusal stands.
     globalThis.fetch = async (url) => (String(url).includes('/deepai_code/theos')
@@ -5550,6 +5571,66 @@ await checkAsync('the key behind a signed-in account can be replaced without los
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ apiKey: goodKey }),
     });
     assert.equal(anon.status, 401, 'swapping a key needs the session that owns it');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+    fresh.close();
+  }
+});
+
+await checkAsync('the account can be asked what DeepAI makes of its key, endpoint by endpoint', async () => {
+  /*
+   * The dashboard used to hand down a verdict - "DeepAI rejects this account's key" - with no
+   * evidence behind it, and the verdict was wrong in the one case that mattered: DeepAI's
+   * counter (`/theos`) refuses some keys that its lane (`/models`) serves happily, so the same
+   * account was reported broken while requests would have gone through.
+   *
+   * Three endpoints answer three different questions about one key. Showing the three answers,
+   * with DeepAI's own error codes, is what makes the next step obvious instead of guessed.
+   */
+  const { openDatabase } = await import('../src/db.js');
+  const { createApp } = await import('../server.js');
+  const { saveAccount, createSession } = await import('../src/store.js');
+  const fresh = openDatabase(':memory:');
+  saveAccount(fresh, { apiKey: 'the-key', username: 'someone@example.com', isPro: false });
+  const session = createSession(fresh, 'someone@example.com');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const realFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url, init) => {
+    const target = String(url);
+    // Only DeepAI is stubbed: the request to this gateway has to reach the gateway.
+    if (!target.startsWith('https://api.deepai.org')) return realFetch(url, init);
+    seen.push({ target, key: String(init?.headers?.['Api-Key'] ?? '') });
+    if (target.endsWith('/deepai_code/theos')) {
+      return new Response(JSON.stringify({ error: { code: 'auth_required' } }),
+        { status: 401, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ models: [], is_authenticated: true }),
+      { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    const response = await fetch(`${base}/api/account/diagnose`, {
+      method: 'POST', headers: { cookie: `deepai_gateway_session=${session.token}` },
+    });
+    assert.equal(response.status, 200);
+    const { steps } = await response.json();
+    assert.deepEqual(steps.map((step) => step.path), ['/theos', '/models', '/get_usage_summary'],
+      'the three questions, in the order they are worth reading');
+    assert.deepEqual(steps.map((step) => step.ok), [false, true, true]);
+    assert.equal(steps[0].code, 'auth_required', "DeepAI's own word, not a paraphrase");
+    assert.equal(steps[0].status, 401);
+
+    // The key goes to DeepAI and nowhere near the answer.
+    assert.ok(seen.every((call) => call.key === 'the-key'), 'every probe carries the stored key');
+    assert.ok(!JSON.stringify(steps).includes('the-key'), 'and it is never echoed back to the browser');
+
+    const anon = await fetch(`${base}/api/account/diagnose`, { method: 'POST' });
+    assert.equal(anon.status, 401, 'and it is the session\'s own account that is asked about');
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));
