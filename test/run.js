@@ -1041,19 +1041,15 @@ await checkAsync('/ serves the dashboard shell and nothing else is browser-navig
      * address finishes the sign-in, and it is served.
      */
     /*
-     * `/api/login/key` is deliberately not in this list. DeepAI hands out ordinary API keys and
-     * DeepAI Code keys, and the browser exchange can produce the first kind - so the key the
-     * DeepAI Code app itself holds is accepted as its own way in. It answers, rather than 404s,
-     * and refuses an empty body rather than pretending to be gone.
+     * There is one way in. A key sign-in was tried and taken out again: it asked visitors to
+     * open the DeepAI Code app and copy a credential out of it, which is a thing this gateway
+     * exists to spare them, and no flow of this dashboard can require it.
      */
-    for (const path of ['/api/login', '/api/login/profile', '/api/login/password', '/api/cancel-login']) {
+    for (const path of ['/api/login', '/api/login/key', '/api/login/profile', '/api/login/password',
+      '/api/account/key', '/api/cancel-login']) {
       const gone = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
       assert.equal(gone.status, 404, `${path} must be gone`);
     }
-    const keyLogin = await fetch(`${base}/api/login/key`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
-    });
-    assert.equal(keyLogin.status, 400, 'the key sign-in answers, and refuses an empty key with a reason');
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -5411,172 +5407,6 @@ await checkAsync('the sign-in routes are always served, because they are the onl
   }
 });
 
-
-await checkAsync('a DeepAI Code key signs in, and a website key does not', async () => {
-  /*
-   * DeepAI keeps two kinds of key: ordinary ones for its website API, and the ones the Code
-   * lane takes. The browser exchange can hand back the first kind, and an account without Code
-   * access signs in and gets nothing usable - which the dashboard reported as "DeepAI refused
-   * this account's key" long after the fact.
-   *
-   * So the key the DeepAI Code app itself holds is accepted as a sign-in of its own, validated
-   * against the Code lane - the authority on what can be used - and never against the website,
-   * which accepts both kinds and would let a useless key in.
-   */
-  const { openDatabase } = await import('../src/db.js');
-  const { createApp } = await import('../server.js');
-  const { readAccount } = await import('../src/store.js');
-  const fresh = openDatabase(':memory:');
-  const app = createApp(fresh, { log: () => {}, logRequests: false });
-  const server = app.listen(0, '127.0.0.1');
-  await new Promise((resolve) => server.once('listening', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-
-  const laneKey = '11111111-2222-4333-8444-555555555555';
-  const websiteKey = '99999999-8888-4777-8666-555555555555';
-  const retiredKey = '12121212-3434-4565-8787-909090909090';
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
-    const target = String(url);
-    if (target.includes('/deepai_code/theos')) {
-      const key = String(init?.headers?.['Api-Key'] ?? '');
-      if (key === laneKey) {
-        return new Response(JSON.stringify({ enabled: true, balance: '5.00000', granted: '5.00000',
-          check_in: { nonce: 'a'.repeat(32), seconds: 600 } }),
-        { status: 200, headers: { 'content-type': 'application/json' } });
-      }
-      // The website key and the retired one are both refused by the lane.
-      return new Response(JSON.stringify({ error: { code: 'auth_required' } }),
-        { status: 401, headers: { 'content-type': 'application/json' } });
-    }
-    if (target.includes('/get_usage_summary')) {
-      const key = String(init?.headers?.['Api-Key'] ?? '');
-      return new Response(JSON.stringify({ is_authenticated: key === websiteKey }),
-        { status: 200, headers: { 'content-type': 'application/json' } });
-    }
-    return realFetch(url, init);
-  };
-
-  const post = (body) => fetch(`${base}/api/login/key`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-  });
-  try {
-    // 1. A Code key signs in, and the account is named after the key's digest.
-    const good = await post({ apiKey: laneKey });
-    assert.equal(good.status, 200, 'a DeepAI Code key is enough to sign in');
-    const signedIn = await good.json();
-    assert.equal(signedIn.ok, true);
-    assert.ok(signedIn.username.startsWith('key-'), 'named after the key, which carries no identity');
-    assert.equal(readAccount(fresh, signedIn.username)?.apiKey, laneKey, 'and stored for that owner');
-    assert.match(String(good.headers.get('set-cookie')), /deepai_gateway_session=/,
-      'with the session it just created');
-
-    /*
-     * 2. A key the website accepts and the Code lane refuses is refused here: this gateway only
-     *    exists to reach DeepAI Code, so a key that cannot is not a way in.
-     */
-    const website = await post({ apiKey: websiteKey });
-    assert.equal(website.status, 400, 'a website key is not a DeepAI Code key');
-    assert.equal((await website.json()).code, 'code-access-missing', 'and says which kind it is');
-
-    // 3. A key DeepAI has retired is a dead credential, and that is worth its own status.
-    const retired = await post({ apiKey: retiredKey });
-    assert.equal(retired.status, 401);
-    assert.equal((await retired.json()).code, 'invalidated');
-
-    // 4. Nothing that is not a key at all gets through, and nothing reaches DeepAI.
-    const empty = await post({ apiKey: '   ' });
-    assert.equal(empty.status, 400);
-    assert.equal((await empty.json()).code, 'no-key');
-  } finally {
-    globalThis.fetch = realFetch;
-    await new Promise((resolve) => server.close(resolve));
-    fresh.close();
-  }
-});
-
-await checkAsync('the key behind a signed-in account can be replaced without losing the account', async () => {
-  /*
-   * This is the repair the dashboard was missing. A browser sign-in can produce a key DeepAI
-   * Code refuses, and the account card's only exits were "refresh" (which fails) and "forget"
-   * (which deletes the gateway's own keys along with it) - so a working gateway key set was
-   * thrown away to fix a credential.
-   *
-   * The replacement is validated against the Code lane, so a key that cannot reach DeepAI Code
-   * never displaces one that could, and nothing else about the account changes.
-   */
-  const { openDatabase } = await import('../src/db.js');
-  const { createApp } = await import('../server.js');
-  const { readAccount, saveAccount, createSession, listAccounts } = await import('../src/store.js');
-  const fresh = openDatabase(':memory:');
-  saveAccount(fresh, { apiKey: 'website-key', username: 'someone@example.com', isPro: false });
-  const session = createSession(fresh, 'someone@example.com');
-  const app = createApp(fresh, { log: () => {}, logRequests: false });
-  const server = app.listen(0, '127.0.0.1');
-  await new Promise((resolve) => server.once('listening', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  const cookie = `deepai_gateway_session=${session.token}`;
-
-  const goodKey = '11111111-2222-4333-8444-555555555555';
-  const websiteKey = '99999999-8888-4777-8666-555555555555';
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
-    const target = String(url);
-    const key = String(init?.headers?.['Api-Key'] ?? '');
-    if (target.includes('/deepai_code/theos')) {
-      return key === goodKey
-        ? new Response(JSON.stringify({ enabled: true, balance: '7.00000', granted: '7.00000' }),
-          { status: 200, headers: { 'content-type': 'application/json' } })
-        : new Response(JSON.stringify({ error: { code: 'auth_required' } }),
-          { status: 401, headers: { 'content-type': 'application/json' } });
-    }
-    if (target.includes('/get_usage_summary')) {
-      return new Response(JSON.stringify({ is_authenticated: true }),
-        { status: 200, headers: { 'content-type': 'application/json' } });
-    }
-    return realFetch(url, init);
-  };
-
-  const replace = (apiKey) => fetch(`${base}/api/account/key`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', cookie },
-    body: JSON.stringify({ apiKey }),
-  });
-  try {
-    // A website key cannot take over: it does not reach DeepAI Code.
-    const refused = await replace(websiteKey);
-    assert.equal(refused.status, 400);
-    assert.equal((await refused.json()).code, 'code-access-missing');
-    assert.equal(readAccount(fresh, 'someone@example.com').apiKey, 'website-key',
-      'and the stored key is left exactly as it was');
-
-    // A Code key replaces the credential and nothing else.
-    const replaced = await replace(goodKey);
-    assert.equal(replaced.status, 200);
-    const body = await replaced.json();
-    assert.equal(body.ok, true);
-    assert.equal(body.allowance.balance, '7.00000', 'the balance comes back with it');
-    const account = readAccount(fresh, 'someone@example.com');
-    assert.equal(account.apiKey, goodKey, 'the credential is the new one');
-    assert.equal(account.allowance?.balance, '7.00000', 'and its allowance is recorded');
-    assert.equal(listAccounts(fresh).length, 1, 'the account is the same account, not a second one');
-
-    // An empty box is an empty box, not a key that replaces anything.
-    const empty = await replace('   ');
-    assert.equal(empty.status, 400);
-    assert.equal((await empty.json()).code, 'no-key');
-
-    // And it is a session route: a signed-out caller cannot swap a credential.
-    const anon = await fetch(`${base}/api/account/key`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ apiKey: goodKey }),
-    });
-    assert.equal(anon.status, 401, 'swapping a key needs the session that owns it');
-  } finally {
-    globalThis.fetch = realFetch;
-    await new Promise((resolve) => server.close(resolve));
-    fresh.close();
-  }
-});
 
 await checkAsync('the account can be asked what DeepAI makes of its key, endpoint by endpoint', async () => {
   /*

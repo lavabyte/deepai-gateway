@@ -13,10 +13,7 @@
 
 import express from 'express';
 import { randomUUID } from 'node:crypto';
-import {
-  checkKey,
-  usernameForKey,
-} from '../deepai/account.js';
+import { checkKey } from '../deepai/account.js';
 import { API_ORIGIN, laneHeaders } from '../deepai/wire.js';
 import {
   DEFAULT_MAX_KEYS,
@@ -157,41 +154,6 @@ export function adminRouter(db, runtime) {
     res.json({ ok: true });
   });
 
-  /**
-   * Sign in by pasting a DeepAI Code key.
-   *
-   * The browser flow is the ordinary way in, and it can produce a key DeepAI Code does not
-   * accept: DeepAI keeps ordinary API keys - the ones its dashboard hands out - apart from the
-   * keys its Code lane takes, and an account can sign in and get the first kind. The app itself
-   * is the source of the second kind, so its key is accepted here as a first-class sign-in.
-   *
-   * The key is validated against the Code lane, which is the only authority on whether it can
-   * be used at all - not against the website, which accepts both kinds and would let a useless
-   * key in. A key carries no identity (no endpoint reports whose it is), so the account is
-   * named after the key's digest: one key, one account, and no key can land on another's.
-   */
-  router.post('/login/key', async (req, res) => {
-    const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
-    if (apiKey === '') {
-      return res.status(400).json({ ok: false, error: 'A DeepAI Code key is required.', code: 'no-key' });
-    }
-    const check = await checkKey(apiKey, AbortSignal.timeout(15_000));
-    if (!check.ok) {
-      recordAuthEvent(db, 'denied', { username: '', detail: check.reason ?? 'unreachable' });
-      // `invalidated` is a key DeepAI no longer knows anywhere; the rest are keys it knows but
-      // will not take here, which is a bad key for this purpose rather than a dead account.
-      const status = check.reason === 'invalidated' ? 401 : 400;
-      return res.status(status).json({ ok: false, error: check.error, code: check.reason ?? 'unreachable' });
-    }
-    const completed = completeLogin(db, runtime, {
-      apiKey,
-      username: usernameForKey(apiKey),
-      isPro: check.isPro === true,
-    }, { secure: runtime.trustProxy === true });
-    res.setHeader('set-cookie', completed.cookie);
-    res.json({ ok: true, username: completed.username });
-  });
-
   /** Forget the account entirely, including its DeepAI key and API keys. */
   router.post('/account/forget', requireSession, (req, res) => {
     const username = req.account.username;
@@ -243,39 +205,6 @@ export function adminRouter(db, runtime) {
     ]);
     recordAuthEvent(db, 'refresh', { username: account.username, detail: 'diagnosed' });
     res.json({ ok: true, steps });
-  });
-
-  /**
-   * Replace this account's DeepAI key with one the visitor pastes.
-   *
-   * The browser sign-in can produce a key DeepAI Code refuses - DeepAI keeps ordinary website
-   * keys and Code keys apart - and the account keeps its identity, its keys and its usage while
-   * the credential behind it is what has to change. Without this the only way out was "forget
-   * the account", which deletes the gateway keys that were working fine.
-   *
-   * The key is validated against the Code lane first, so a key that cannot reach DeepAI Code
-   * never replaces one that could.
-   */
-  router.post('/account/key', requireSession, async (req, res) => {
-    const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
-    if (apiKey === '') {
-      return res.status(400).json({ ok: false, error: 'A DeepAI Code key is required.', code: 'no-key' });
-    }
-    const check = await checkKey(apiKey, AbortSignal.timeout(15_000));
-    if (!check.ok) {
-      recordAuthEvent(db, 'denied', { username: req.account.username, detail: check.reason ?? 'unreachable' });
-      const status = check.reason === 'invalidated' ? 401 : 400;
-      return res.status(status).json({ ok: false, error: check.error, code: check.reason ?? 'unreachable' });
-    }
-    saveAccount(db, {
-      apiKey,
-      username: req.account.username,
-      isPro: typeof check.isPro === 'boolean' ? check.isPro : req.account.isPro,
-    });
-    saveAllowance(db, req.account.username, check.allowance);
-    recordAuthEvent(db, 'refresh', { username: req.account.username, detail: 'key replaced' });
-    runtime.log?.(`key replaced for ${req.account.username}`);
-    res.json({ ok: true, allowance: check.allowance });
   });
 
   router.post('/account/refresh', requireSession, async (req, res) => {

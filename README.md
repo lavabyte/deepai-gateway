@@ -113,13 +113,9 @@ plain-HTTP localhost, where a `Secure` cookie would never be sent.
 
 ## Signing in
 
-There are two ways in. The first is DeepAI's own sign-in page, and it is the ordinary one.
-The second exists because DeepAI keeps **two kinds of key**: the ordinary ones its website
-hands out, and the ones its Code lane accepts. The exchange below can hand back the first kind
-(or an account without Code access can sign in and get nothing usable), so the key the DeepAI
-Code app itself holds is accepted as a sign-in of its own - pasted into the card, validated
-against the Code lane, and refused if it cannot reach DeepAI Code. The dashboard says which
-kind a sign-in produced instead of reporting "logged in" and a dash where the balance belongs.
+There is one way in, and it is DeepAI's own sign-in page. Nothing here asks anyone to open the
+DeepAI Code app or to copy a key out of it: the app is where the account comes from, not
+something a visitor of this gateway has to touch.
 
 The account card names the DeepAI account, in DeepAI's own naming. One address can exist twice
 at DeepAI - once as a password account and once as a Google account - and those are two
@@ -143,14 +139,15 @@ a dead account, and pointed the reader at signing in again, which produced the s
 
 So the lane's own answer is what decides whether a key is usable here, and a key it serves is
 kept even when no balance can be read: the dashboard draws a dash and says why instead of
-reporting a failure. **Check DeepAI access** on the account card asks all three questions and
-shows the answers with DeepAI's own error codes, which is the evidence the verdict used to
-lack.
+reporting a failure.
 
-A signed-in account can also have its key replaced from the account card: the DeepAI key is
-the one thing that changes, while the account, its gateway keys and its usage stay. That is the
-repair for a sign-in whose key DeepAI Code will not take - and the replacement is validated
-against the Code lane, so a key that cannot reach DeepAI Code never displaces one that could.
+A key the lane also refuses is DeepAI's decision about the account the sign-in landed on, and
+no client of DeepAI can mint an entitlement DeepAI will not mint - the desktop app's own sign-in
+is the same URL, the same `desktop_auth` exchange and the same headers, byte for byte, and there
+is no branch anywhere in it on how the visitor authenticated. So the dashboard says that, names
+the account it is signed into, and shows the three answers with DeepAI's own error codes -
+**Check DeepAI access**, run automatically after a refused sign-in - instead of asking for a key
+from the app.
 
 Three steps for the browser flow:
 

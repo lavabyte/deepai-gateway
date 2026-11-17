@@ -337,15 +337,6 @@ function signInRoutes(prefix = '') {
         <button class="btn" id="${prefix}login-finish" type="button">${t('signin.loginToGateway')}</button>
       </div>
 
-      <div class="field mt-3">
-        <label class="field__label" for="${prefix}key-input">${t('signin.keyLabel')}</label>
-        <input class="input input--url" id="${prefix}key-input" type="text" spellcheck="false"
-          autocomplete="off" autocapitalize="off" placeholder="8-4-4-4-12">
-        <span class="field__hint">${t('signin.keyHint')}</span>
-      </div>
-      <div class="row mt-2">
-        <button class="btn btn--secondary" id="${prefix}key-login" type="button">${t('signin.keyButton')}</button>
-      </div>
     </section>`;
 }
 
@@ -427,6 +418,11 @@ async function finishBrowserLogin(prefix = '') {
         completed.codeAccess === false ? t('signin.noCodeAccess') : t('signin.loggedIn'),
         completed.codeAccess === false ? 'error' : undefined,
       );
+      /*
+       * A refused sign-in is the moment the evidence is worth having, and asking for a second
+       * click to get it is asking the reader to reproduce a failure on purpose.
+       */
+      if (completed.codeAccess === false) await runDiagnose();
     } else {
       toast(t('error.http', { status: 401 }), 'error');
     }
@@ -442,46 +438,6 @@ async function finishBrowserLogin(prefix = '') {
 }
 
 /**
- * Sign in with a DeepAI Code key, pasted.
- *
- * The browser flow cannot always produce a key DeepAI Code will take - the exchange can hand
- * back an ordinary website key, and an account without Code access gets nothing usable - while
- * the key the DeepAI Code app itself holds always works. This is the way in for exactly that
- * case, so it validates against the Code lane on the server and nothing else.
- *
- * @param {string} prefix
- * @returns {Promise<void>}
- */
-async function finishKeyLogin(prefix = '') {
-  const field = $(`${prefix}key-input`);
-  const apiKey = (field?.value ?? '').trim();
-  if (apiKey === '') {
-    toast(t('signin.keyMissing'), 'error');
-    field?.focus();
-    return;
-  }
-  const button = $(`${prefix}key-login`);
-  const label = button?.textContent;
-  if (button) {
-    button.disabled = true;
-    button.textContent = t('signin.signingIn');
-  }
-  try {
-    await api('/login/key', { method: 'POST', body: { apiKey } });
-    if (field) field.value = '';
-    await afterSignIn();
-    toast(t('signin.loggedIn'));
-  } catch (error) {
-    toast(failureMessage(error), 'error');
-  } finally {
-    if (button) {
-      button.disabled = false;
-      button.textContent = label ?? t('signin.keyButton');
-    }
-  }
-}
-
-/**
  * Wire every sign-in control a card may contain.
  *
  * All of them are optional, because a card can show any subset - but the two cards
@@ -492,13 +448,6 @@ async function finishKeyLogin(prefix = '') {
 function wireSignInForms(prefix = '') {
   const id = (name) => $(`${prefix}${name}`);
   id('login-finish')?.addEventListener('click', () => void finishBrowserLogin(prefix));
-  id('key-login')?.addEventListener('click', () => void finishKeyLogin(prefix));
-  id('key-input')?.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      void finishKeyLogin(prefix);
-    }
-  });
   // Enter in the one-line field signs in, which is what a one-line field invites.
   id('browser-paste')?.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
@@ -1306,6 +1255,33 @@ function renderAccountBadge() {
 }
 
 /**
+ * Ask DeepAI what it makes of the stored key, and show the answers.
+ *
+ * Three endpoints answer three different questions about one key - does the counter know it
+ * (`/theos`), will the lane serve it the catalog (`/models`), does the website know it
+ * (`/get_usage_summary`) - and a sign-in can fail one and pass the others. Summarising that as
+ * "DeepAI rejects the key" hides which of the three said no, which is the only part that says
+ * what to do next, so the answers are shown with DeepAI's own error codes.
+ *
+ * @returns {Promise<void>}
+ */
+async function runDiagnose() {
+  const report = $('diagnose-report');
+  if (!report) return;
+  try {
+    const result = await api('/account/diagnose', { method: 'POST' });
+    report.hidden = false;
+    report.innerHTML = `<h4 class="tiny muted mt-3">${esc(t('account.diagnoseTitle'))}</h4>`
+      + result.steps.map((step) => `<div class="tiny mono" data-step="${esc(step.label)}">`
+        + `${esc(step.ok ? t('account.diagnoseOk') : t('account.diagnoseRefused'))} ${esc(step.path)} `
+        + `${esc(String(step.status === 0 ? (step.note ?? 'unreachable') : step.status))}`
+        + `${step.code === undefined ? '' : ` ${esc(step.code)}`}</div>`).join('');
+  } catch (error) {
+    toast(failureMessage(error), 'error');
+  }
+}
+
+/**
  * Say why the balance is a dash when it is one.
  *
  * A dash in the badge is not the same as a broken account: DeepAI accepts some keys on its Code
@@ -1555,20 +1531,6 @@ function accountCard() {
       </div>
       ${renderMeteringNote(account)}
       <div id="diagnose-report" hidden></div>
-      <!--
-        The credential behind this account can be the wrong kind, and that has to be fixable
-        without deleting the account: DeepAI refuses an ordinary website key on its Code lane,
-        and "forget the account" would take the gateway's own keys with it.
-      -->
-      <div class="field mt-3">
-        <label class="field__label" for="account-key-input">${t('account.keyLabel')}</label>
-        <input class="input input--url" id="account-key-input" type="text" spellcheck="false"
-          autocomplete="off" autocapitalize="off" placeholder="8-4-4-4-12">
-        <span class="field__hint">${t('account.keyHint')}</span>
-      </div>
-      <div class="row mt-2">
-        <button class="btn btn--secondary btn--sm" id="account-key-save" type="button">${t('account.keyButton')}</button>
-      </div>
       <div class="tiny muted mt-2">
         ${t('account.sessionNote', { when: account.sessionExpiresAt ? when(account.sessionExpiresAt) : t('common.never') })}
       </div>
@@ -1772,65 +1734,8 @@ function wireAccountCard(rerender) {
     rerender();
   });
 
-  /*
-   * "DeepAI rejects this account's key" is a verdict, and the reader deserves the evidence.
-   * Three endpoints answer three different questions about the same key, and the gateway's own
-   * verdict depends on which of them said no - so the answers are shown, with DeepAI's own
-   * error codes, rather than summarised into a word.
-   */
-  $('diagnose-account')?.addEventListener('click', async (event) => {
-    const button = event.currentTarget;
-    const report = $('diagnose-report');
-    button.disabled = true;
-    try {
-      const result = await api('/account/diagnose', { method: 'POST' });
-      if (report) {
-        report.hidden = false;
-        report.innerHTML = `<h4 class="tiny muted mt-3">${esc(t('account.diagnoseTitle'))}</h4>`
-          + result.steps.map((step) => `<div class="tiny mono" data-step="${esc(step.label)}">`
-            + `${esc(step.ok ? t('account.diagnoseOk') : t('account.diagnoseRefused'))} ${esc(step.path)} `
-            + `${esc(String(step.status === 0 ? (step.note ?? 'unreachable') : step.status))}`
-            + `${step.code === undefined ? '' : ` ${esc(step.code)}`}</div>`).join('');
-      }
-    } catch (error) {
-      toast(failureMessage(error), 'error');
-    } finally {
-      button.disabled = false;
-    }
-  });
-
-  /*
-   * Replace the DeepAI key behind this account.
-   *
-   * This is the repair for a key DeepAI Code will not take: the account, its gateway keys and
-   * its usage stay, and only the credential changes - validated against the Code lane on the
-   * server, so a key that cannot reach DeepAI Code never replaces one that could.
-   */
-  $('account-key-save')?.addEventListener('click', async (event) => {
-    const button = event.currentTarget;
-    const field = $('account-key-input');
-    const apiKey = (field?.value ?? '').trim();
-    if (apiKey === '') {
-      toast(t('signin.keyMissing'), 'error');
-      field?.focus();
-      return;
-    }
-    button.disabled = true;
-    const label = button.textContent;
-    button.textContent = t('pricing.refreshing');
-    try {
-      await api('/account/key', { method: 'POST', body: { apiKey } });
-      if (field) field.value = '';
-      toast(t('account.keyReplaced'));
-    } catch (error) {
-      toast(failureMessage(error), 'error');
-    } finally {
-      button.disabled = false;
-      button.textContent = label ?? t('account.keyButton');
-    }
-    await loadAccount();
-    rerender();
-  });
+  // "DeepAI rejects this account's key" is a verdict, and the reader deserves the evidence.
+  $('diagnose-account')?.addEventListener('click', async () => void runDiagnose());
 
   // Removing the account is destructive, so it gets its own confirm step.
   $('forget-account')?.addEventListener('click', async () => {
