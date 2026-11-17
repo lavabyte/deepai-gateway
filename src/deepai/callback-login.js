@@ -27,10 +27,10 @@
 
 import { randomBytes } from 'node:crypto';
 import express from 'express';
-import { API_ORIGIN } from './wire.js';
+import { API_ORIGIN, laneHeaders } from './wire.js';
 import { usernameForKey } from './account.js';
+import { noteCheckIn } from './checkin.js';
 import { readAccount } from '../store.js';
-import { checkKey } from './account.js';
 import { completeLogin } from '../api/admin.js';
 
 /** How long one attempt stays redeemable. */
@@ -119,24 +119,73 @@ export function parseCallbackInput(input) {
 }
 
 /**
+ * Connection failures worth one more try, as the app classifies them.
+ *
+ * These all happen *before* DeepAI has seen the request, so repeating them cannot burn the
+ * code. Everything else - a timeout, a reset mid-flight - may have already minted the key,
+ * and the app does not retry those either: a second exchange of the same one-shot code is
+ * refused, and the key the first one produced is gone.
+ */
+const RETRYABLE_CONNECT_CODES = new Set([
+  'EAI_AGAIN',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'ECONNREFUSED',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+]);
+
+/** Did this failure happen before anything was sent? */
+function failedBeforeSending(cause) {
+  if (cause instanceof AggregateError) {
+    return cause.errors.length > 0 && cause.errors.every(failedBeforeSending);
+  }
+  if (cause === null || typeof cause !== 'object' || !('code' in cause)) return false;
+  if (cause.code === 'ETIMEDOUT') return cause.syscall === 'connect';
+  return RETRYABLE_CONNECT_CODES.has(String(cause.code));
+}
+
+/**
  * Redeem a one-shot sign-in code for the account's key.
+ *
+ * Reproduces the app's exchange, request for request: only a content type, `redirect: error`,
+ * a 20 second deadline, exactly one retry and only for a failure that happened before the
+ * request was sent. The retry is not politeness - the code is one-shot, so a pre-send failure
+ * that is not repeated is a sign-in the visitor has to start over.
  *
  * @param {string} code
  * @returns {Promise<{apiKey: string, username: string, isPro: boolean}>}
+ * @throws {Error & {exchangeStatus?: number}} with the status DeepAI answered, when it did.
  */
 async function exchangeCode(code) {
-  const response = await fetch(`${API_ORIGIN}/deepai_code/desktop_auth/exchange/`, {
+  const deadline = AbortSignal.timeout(20_000);
+  const send = () => fetch(`${API_ORIGIN}/deepai_code/desktop_auth/exchange/`, {
     method: 'POST',
     // Only a content type, exactly as the app's own exchange call sends: this endpoint
     // neither reads a lane revision nor needs a machine identity.
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ code }),
     redirect: 'error',
-    signal: AbortSignal.timeout(20_000),
+    signal: deadline,
   });
-  if (!response.ok) throw new Error(`DeepAI sign-in exchange: HTTP ${response.status}`);
+  let response;
+  try {
+    response = await send();
+  } catch (error) {
+    if (deadline.aborted || !failedBeforeSending(error?.cause)) throw error;
+    response = await send();
+  }
+  if (!response.ok) {
+    const failure = new Error(`DeepAI sign-in exchange: HTTP ${response.status}`);
+    failure.exchangeStatus = response.status;
+    throw failure;
+  }
   const data = await response.json();
-  if (data === null || typeof data !== 'object' || typeof data.api_key !== 'string' || data.api_key === '') {
+  /*
+   * The key is written into a header on every later call, so a newline in it is not a key:
+   * it is a response this gateway must not store. The app validates the same way.
+   */
+  if (data === null || typeof data !== 'object'
+    || typeof data.api_key !== 'string' || data.api_key === '' || /[\r\n]/.test(data.api_key)) {
     throw new Error('DeepAI sign-in returned an invalid response');
   }
   return {
@@ -144,6 +193,39 @@ async function exchangeCode(code) {
     username: typeof data.username === 'string' ? data.username : '',
     isPro: data.is_pro === true,
   };
+}
+
+/**
+ * Ask the lane whether the key it just issued can use DeepAI Code.
+ *
+ * This is the app's own post-sign-in step: the app reads the catalog with a five second
+ * budget and nothing else. Asking `/theos` instead was a mistake with a cost - `/theos` is
+ * the *counter*, and it refuses accounts the lane serves happily, so the gateway reported
+ * "DeepAI Code does not accept this key" for keys that worked.
+ *
+ * Only an explicit refusal counts as one. A 426, a 5xx, a timeout or a network failure is the
+ * gateway not knowing, and an unknown answer must never be turned into a verdict about
+ * somebody's account.
+ *
+ * @param {string} apiKey
+ * @returns {Promise<true|false|undefined>} `false` only when DeepAI refused the key itself.
+ */
+async function laneServesKey(apiKey) {
+  try {
+    const response = await fetch(`${API_ORIGIN}/deepai_code/models`, {
+      headers: { ...laneHeaders(), 'Api-Key': apiKey },
+      redirect: 'error',
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (response.ok) {
+      noteCheckIn(await response.json().catch(() => undefined));
+      return true;
+    }
+    if (response.status === 401 || response.status === 403) return false;
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -273,11 +355,8 @@ export function createCallbackLogin(db, runtime, options = {}) {
      * showed "Active", the balance a dash and a refusal nobody could act on. The read costs one
      * request and turns that into a sentence at the moment of signing in.
      */
-    let codeAccess = true;
-    if (stored) {
-      const check = await checkKey(account.apiKey, AbortSignal.timeout(15_000));
-      if (!check.ok) codeAccess = false;
-    }
+    // `true` accepted, `false` refused, `undefined` not known - and unknown is not a refusal.
+    const codeAccess = stored ? await laneServesKey(account.apiKey) : undefined;
     return { stored, codeAccess };
   };
 
@@ -327,7 +406,7 @@ export function createCallbackLogin(db, runtime, options = {}) {
       const { stored, codeAccess } = await finish(res, result);
       if (!stored) return res.status(500).type('html').send(page('Sign-in failed',
         'The DeepAI key could not be saved on this gateway. Sign in again after an operator fixes the database.'));
-      if (!codeAccess) {
+      if (codeAccess === false) {
         runtime.log?.('callback sign-in: the exchanged key has no DeepAI Code access');
         return res.status(200).type('html').send(page('Signed in, but not to DeepAI Code',
           'DeepAI issued a key for this account that DeepAI Code does not accept. Sign in with an account that has DeepAI Code access, or paste a DeepAI Code key in the dashboard.'));

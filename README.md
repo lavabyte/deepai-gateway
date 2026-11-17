@@ -141,6 +141,12 @@ So the lane's own answer is what decides whether a key is usable here, and a key
 kept even when no balance can be read: the dashboard draws a dash and says why instead of
 reporting a failure.
 
+Signing in never asks the counter (`/theos`) whether the key is good. It is the counter that
+refuses accounts the lane serves, and folding its refusal into a verdict about the account is what
+reported working sign-ins as broken. Only an outright `401`/`403` from the catalog read is a
+refusal; a `426`, a `5xx`, a timeout or a dead network is the gateway not knowing, and it says so
+by saying nothing.
+
 A key the lane also refuses is DeepAI's decision about the account the sign-in landed on, and
 no client of DeepAI can mint an entitlement DeepAI will not mint - the desktop app's own sign-in
 is the same URL, the same `desktop_auth` exchange and the same headers, byte for byte, and there
@@ -672,6 +678,13 @@ exactly as the server does.
 
 The sign-in the gateway uses is the one the Code app uses: DeepAI's own page, and the
 `desktop_auth` exchange behind it for an `api_key` - see [Signing in](#signing-in).
+
+The exchange, the lane revision and the post-sign-in read are the app's, request for request: one
+`POST /deepai_code/desktop_auth/exchange/` with a content type and the code, a 20 second deadline,
+**exactly one retry and only for a failure that happened before anything was sent** (the code is
+one-shot, so a dropped connection otherwise costs a whole sign-in), and then the catalog read with
+a five second budget - the app's own post-sign-in step. Lane revision `7`: measured against the
+live service, `5` through `7` are answered and `8` is refused with `426`.
 
 The lane also expects the handshake the app performs, which is reproduced here
 (`src/deepai/checkin.js`): `/deepai_code/theos` is a *check-in* whose answer carries

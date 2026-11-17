@@ -5408,6 +5408,184 @@ await checkAsync('the sign-in routes are always served, because they are the onl
 });
 
 
+await checkAsync('a sign-in is refused only when DeepAI refuses the key, not when it does not answer', async () => {
+  /*
+   * The verdict that decides whether a visitor is told their account works is one lane read:
+   * the catalog, exactly as the app reads it after signing in. Three outcomes, not two.
+   *
+   * - the lane serves the catalog: the account works;
+   * - the lane refuses the key outright (401/403): it does not;
+   * - the lane says something else - a retired revision, a 5xx, a timeout, a dead network -
+   *   and the gateway does not know.
+   *
+   * Folding the third case into the second is how a working sign-in was reported as "DeepAI
+   * Code does not accept this account's key", which sent the reader to sign in again, which
+   * produced the same read and the same sentence.
+   */
+  const { createCallbackLogin } = await import('../src/deepai/callback-login.js');
+  const { openDatabase } = await import('../src/db.js');
+  const express = (await import('express')).default;
+  const realFetch = globalThis.fetch;
+  let lane = 200;
+  let exchangeCalls = 0;
+  globalThis.fetch = async (url, init) => {
+    const target = String(url);
+    if (target.includes('desktop_auth/exchange')) {
+      exchangeCalls += 1;
+      return new Response(JSON.stringify({ api_key: 'a-key', username: 'someone', is_pro: false }),
+        { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (target.includes('/theos')) {
+      throw new Error('the gateway must not ask the counter at sign-in');
+    }
+    if (target.includes('deepai_code/models')) {
+      if (lane === 'network') throw new TypeError('fetch failed');
+      return new Response(JSON.stringify(lane === 200 ? { models: [] } : { error: { code: 'auth_required' } }),
+        { status: lane, headers: { 'content-type': 'application/json' } });
+    }
+    return realFetch(url, init);
+  };
+  try {
+    const db = openDatabase(':memory:');
+    const login = createCallbackLogin(db, { log: () => {} });
+    const app = express();
+    app.use(express.json());
+    app.use(login.router);
+    app.post('/api/login/complete', login.complete);
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const signIn = async () => {
+        const start = await (await fetch(`${base}/login?json=1`)).json();
+        const state = new URL(start.url).searchParams.get('state');
+        const response = await fetch(`${base}/api/login/complete`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ url: `http://127.0.0.1:8080/callback?code=c&state=${state}` }),
+        });
+        return { status: response.status, body: await response.json() };
+      };
+
+      const accepted = await signIn();
+      assert.equal(accepted.status, 200);
+      assert.equal(accepted.body.codeAccess, true, 'a key the lane serves is a finished sign-in');
+
+      lane = 401;
+      const refused = await signIn();
+      assert.equal(refused.status, 200, 'the sign-in itself still happened');
+      assert.equal(refused.body.codeAccess, false, 'and it says the key cannot reach DeepAI Code');
+
+      for (const [name, status] of [['a retired lane', 426], ['a server error', 502], ['a dead network', 'network']]) {
+        lane = status;
+        const unknown = await signIn();
+        assert.equal(unknown.body.ok, true, `${name} still signs in`);
+        assert.equal(unknown.body.codeAccess, undefined,
+          `${name} is not a refusal, so no verdict is invented about the account`);
+      }
+      assert.equal(exchangeCalls, 5, 'one exchange per attempt, never a second one for the same code');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+await checkAsync('the exchange reproduces the app, including the one retry that is safe', async () => {
+  /*
+   * The code is one-shot, so an exchange that fails *before it is sent* must be tried again -
+   * otherwise a dropped connection costs the visitor a whole sign-in. An exchange that may
+   * already have been received must not be repeated: DeepAI would refuse the second one and
+   * the key the first one minted would be lost, which is worse than an honest failure.
+   */
+  const { createCallbackLogin } = await import('../src/deepai/callback-login.js');
+  const { openDatabase } = await import('../src/db.js');
+  const express = (await import('express')).default;
+  const realFetch = globalThis.fetch;
+
+  const connectFailure = () => {
+    const error = new TypeError('fetch failed');
+    error.cause = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED', syscall: 'connect' });
+    return error;
+  };
+
+  let behaviour = 'refused-then-ok';
+  let attempts = 0;
+  globalThis.fetch = async (url, init) => {
+    const target = String(url);
+    if (target.includes('desktop_auth/exchange')) {
+      attempts += 1;
+      if (behaviour === 'refused-then-ok') {
+        if (attempts === 1) throw connectFailure();
+        return new Response(JSON.stringify({ api_key: 'k', username: 'u', is_pro: false }),
+          { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (behaviour === 'newline') {
+        return new Response(JSON.stringify({ api_key: 'k\r\ninjected', username: 'u' }),
+          { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (behaviour === 'used') return new Response('{}', { status: 401 });
+      throw new TypeError('fetch failed');
+    }
+    if (target.includes('deepai_code/models')) {
+      return new Response(JSON.stringify({ models: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return realFetch(url, init);
+  };
+
+  try {
+    const db = openDatabase(':memory:');
+    const login = createCallbackLogin(db, { log: () => {} });
+    const app = express();
+    app.use(express.json());
+    app.use(login.router);
+    app.post('/api/login/complete', login.complete);
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const signIn = async () => {
+      const start = await (await fetch(`${base}/login?json=1`)).json();
+      const state = new URL(start.url).searchParams.get('state');
+      const response = await fetch(`${base}/api/login/complete`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ url: `http://127.0.0.1:8080/callback?code=c&state=${state}` }),
+      });
+      return { status: response.status, body: await response.json() };
+    };
+    try {
+      // 1. A connection that never opened is tried once more, and the sign-in completes.
+      const first = await signIn();
+      assert.equal(attempts, 2, 'one retry, and only for a failure that never reached DeepAI');
+      assert.equal(first.body.ok, true, 'and the visitor is signed in rather than sent back to start');
+
+      // 2. A key with a newline in it is not a key, and is not stored.
+      attempts = 0;
+      behaviour = 'newline';
+      const newline = await signIn();
+      assert.equal(newline.body.ok, false, 'a mangled key is refused');
+      assert.equal(newline.body.code, 'exchange_failed');
+
+      // 3. A code DeepAI says was already used is not retried: only pre-send failures are.
+      attempts = 0;
+      behaviour = 'used';
+      const used = await signIn();
+      assert.equal(attempts, 1, 'a refusal is an answer, not a connection that failed');
+      assert.equal(used.body.ok, false);
+
+      // 4. A failure inside the request is not retried either: the key may have been minted.
+      attempts = 0;
+      behaviour = 'mid-flight';
+      const midFlight = await signIn();
+      assert.equal(attempts, 1, 'one attempt, because a second one would lose the key the first minted');
+      assert.equal(midFlight.body.ok, false);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 await checkAsync('the account can be asked what DeepAI makes of its key, endpoint by endpoint', async () => {
   /*
    * The dashboard used to hand down a verdict - "DeepAI rejects this account's key" - with no
@@ -5536,6 +5714,12 @@ await checkAsync('a sign-in whose key did not land is not reported as a sign-in'
     const target = String(url);
     if (target.includes('desktop_auth/exchange')) {
       return new Response(JSON.stringify({ api_key: 'fresh-key-from-deepai', username: 'someone', is_pro: false }),
+        { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    // The lane read that follows the exchange: this test is about the write, so the key is
+    // accepted. Without this the case would reach the real DeepAI with a made-up key.
+    if (target.includes('deepai_code/models')) {
+      return new Response(JSON.stringify({ models: [] }),
         { status: 200, headers: { 'content-type': 'application/json' } });
     }
     // Anything else here is a request to this test's own server, which the real fetch serves.

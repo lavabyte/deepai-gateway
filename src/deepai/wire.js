@@ -21,15 +21,16 @@ export const API_ORIGIN = 'https://api.deepai.org';
  * The number is the lane protocol revision, not this gateway's version, and DeepAI retires
  * them: a request carrying an old one is refused with
  * `426 lane_version_unsupported` - "This version of DeepAI Code is no longer supported.
- * Please update the app." - before the key is even looked at. `1` and `2` were retired;
- * `3` is the current revision and the oldest one still accepted, so it is what is sent.
+ * Please update the app." - before the key is even looked at. Measured against the live
+ * service, `5` through `7` are answered and `8` is refused with 426, so `7` - the number the
+ * current app sends - is what this gateway sends.
  *
  * If a 426 comes back, DeepAI has retired this number too. Probe
  * `POST /deepai_code/chat/completions` with an invalid key and a candidate value: a retired
  * lane answers `426 lane_version_unsupported` and a live one answers `401 auth_required`,
  * which makes the revision cheap to find again.
  */
-export const LANE_VERSION = '6';
+export const LANE_VERSION = '7';
 
 /**
  * An identifier for this process, sent with every Code-lane request.

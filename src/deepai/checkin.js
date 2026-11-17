@@ -29,8 +29,15 @@ export const CHECK_IN_HEADER = 'X-DeepAI-Code-Check-In';
 /** Header carrying the per-request self-description. As the app spells it. */
 export const BEACON_HEADER = 'X-DeepAI-Code-Beacon';
 
-/** What this deployment calls itself in the beacon. */
-const CLIENT_VERSION = '1.0';
+/**
+ * What this deployment calls itself in the beacon.
+ *
+ * The app sends its own release here (`v=0.3.40`), and the server reads it as "which revision
+ * of the protocol is this". This gateway implements the wire of 0.3.40 - the check-in mark,
+ * the beacon, lane revision 7 - so it names that revision rather than a version of its own
+ * that the server has never heard of, which is a client it has no way to recognise.
+ */
+const CLIENT_VERSION = '0.3.40';
 
 /** How long an idle relay still counts as "this gateway is serving a model", in ms. */
 const RELAY_WINDOW_MS = 10 * 60_000;

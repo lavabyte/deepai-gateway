@@ -414,6 +414,12 @@ async function finishBrowserLogin(prefix = '') {
        * said at once and in the place the fix is: the key field below. Saying "logged in" and
        * leaving a dash where the balance belongs is how this looked for a day.
        */
+      /*
+       * Three answers, not two: the key was accepted, it was refused, or the read that would
+       * tell was not one the lane answered. Only the middle one is the account's problem, and
+       * turning an unanswered read into "DeepAI Code does not accept this key" is how a
+       * working sign-in got reported as a broken one.
+       */
       toast(
         completed.codeAccess === false ? t('signin.noCodeAccess') : t('signin.loggedIn'),
         completed.codeAccess === false ? 'error' : undefined,
