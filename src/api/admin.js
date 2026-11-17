@@ -116,6 +116,8 @@ export function adminRouter(db, runtime) {
       username: view?.username ?? '',
       isPro: view?.isPro ?? false,
       allowance: view?.allowance ?? null,
+      // DeepAI's own code for why this account cannot be used, when it answered with one.
+      issue: view?.issue ?? null,
       signedInSince: view?.signedInSince ?? null,
       sessionExpiresAt: view?.sessionExpiresAt ?? null,
       defaultModel: account === undefined
@@ -627,6 +629,12 @@ export async function refreshAllowance(db, runtime, username) {
     // refusal repeated - and a code is stable where wording is not.
     recordAuthEvent(db, 'denied', { username, detail: check.reason ?? 'unreachable' });
     /*
+     * The code is kept on the account as well as in the trail. A refusal that names its cause
+     * is worth one line in the database: the dashboard reads it after a reload and says why
+     * the account cannot be used, instead of drawing a dash that looks like a slow network.
+     */
+    saveAllowance(db, username, null, check.reason ?? 'unreachable');
+    /*
      * `code` is what the dashboard translates; `error` is the English sentence, kept for the
      * log and for a client that has no string for the code. The dashboard used to print the
      * raw sentence at the visitor - "the key was rejected" - which is an internal phrase in
@@ -634,19 +642,9 @@ export async function refreshAllowance(db, runtime, username) {
      */
     return { ok: false, code: check.reason ?? 'unreachable', error: check.error };
   }
-  saveAllowance(db, username, check.allowance);
   if (typeof check.isPro === 'boolean') savePro(db, username, check.isPro);
-  /*
-   * A key can be accepted by the lane while the metering endpoint will not report a balance -
-   * it is where the daily grant is counted, and it answers some accounts with a refusal. That
-   * is a working account with an unreadable balance, so it is not an error: the allowance is
-   * cleared, which is what the dashboard draws as unknown, and `metering` says why.
-   */
-  if (check.metering === 'refused') {
-    recordAuthEvent(db, 'refresh', { username, detail: 'balance unavailable' });
-    runtime.log?.(`allowance unavailable for ${username}: the lane accepts the key but reports no balance`);
-    return { ok: true, allowance: null, metering: 'refused' };
-  }
+  // A successful read clears whatever reason an earlier refusal left behind.
+  saveAllowance(db, username, check.allowance);
   recordAuthEvent(db, 'refresh', { username, detail: `balance ${check.allowance.balance ?? '?'}` });
   runtime.log?.(`allowance refreshed for ${username}: ${check.allowance.balance ?? '?'} Credits`);
   return { ok: true, allowance: check.allowance };

@@ -421,14 +421,16 @@ async function finishBrowserLogin(prefix = '') {
        * working sign-in got reported as a broken one.
        */
       toast(
-        completed.codeAccess === false ? t('signin.noCodeAccess') : t('signin.loggedIn'),
-        completed.codeAccess === false ? 'error' : undefined,
+        completed.codeAccess === 'social-login-required'
+          ? t('signin.socialLoginRequired')
+          : t('signin.loggedIn'),
+        completed.codeAccess === 'social-login-required' ? 'error' : undefined,
       );
       /*
        * A refused sign-in is the moment the evidence is worth having, and asking for a second
        * click to get it is asking the reader to reproduce a failure on purpose.
        */
-      if (completed.codeAccess === false) await runDiagnose();
+      if (completed.codeAccess === 'social-login-required') await runDiagnose();
     } else {
       toast(t('error.http', { status: 401 }), 'error');
     }
@@ -1288,18 +1290,21 @@ async function runDiagnose() {
 }
 
 /**
- * Say why the balance is a dash when it is one.
+ * Say why this account cannot be used, when DeepAI named a reason.
  *
- * A dash in the badge is not the same as a broken account: DeepAI accepts some keys on its Code
- * lane and reports no balance for them, and a reader who is not told that goes looking for a
- * new key while the gateway is working.
+ * Not "no balance": a dash is also what a slow read looks like. When DeepAI answers
+ * `social_login_required` it has named the cause - DeepAI Code is for accounts signed in with
+ * Google or Apple - and that is the one thing that tells the reader what to do.
  *
- * @param {{ allowance: unknown }} account
- * @returns {string} markup, empty when there is a balance to show
+ * @param {{ issue?: string|null }} account
+ * @returns {string} markup, empty when there is nothing to explain
  */
-function renderMeteringNote(account) {
-  if (account.allowance !== null) return '';
-  return `<p class="tiny muted mt-2" id="metering-note">${esc(t('account.meteringUnavailable'))}</p>`;
+function accessIssueNote(account) {
+  if (typeof account.issue !== 'string' || account.issue === '') return '';
+  const reason = account.issue === 'social-login-required'
+    ? t('account.socialLoginRequired')
+    : t('account.issueUnavailable');
+  return `<p class="tiny muted mt-2" id="account-issue">${esc(reason)}</p>`;
 }
 
 /** The top-bar action: log out. */
@@ -1535,7 +1540,7 @@ function accountCard() {
         <span class="spacer"></span>
         <span class="tiny muted">${esc(keyQuotaLabel(account.keyQuota))}</span>
       </div>
-      ${renderMeteringNote(account)}
+      ${accessIssueNote(account)}
       <div id="diagnose-report" hidden></div>
       <div class="tiny muted mt-2">
         ${t('account.sessionNote', { when: account.sessionExpiresAt ? when(account.sessionExpiresAt) : t('common.never') })}
@@ -1723,16 +1728,7 @@ function wireAccountCard(rerender) {
     button.textContent = t('pricing.refreshing');
     try {
       const result = await api('/account/refresh', { method: 'POST' });
-      /*
-       * The lane can accept the key and still refuse to report a balance - that is the
-       * metering endpoint's own decision, not the account being broken - so the answer is
-       * "no balance to show", not a toast reading "Balance: undefined".
-       */
-      toast(
-        result.allowance === null
-          ? t('account.meteringUnavailable')
-          : t('account.balanceToast', { amount: result.allowance.balance }),
-      );
+      toast(t('account.balanceToast', { amount: result.allowance.balance }));
     } catch (error) {
       toast(failureMessage(error), 'error');
     }

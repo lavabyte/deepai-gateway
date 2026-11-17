@@ -12,11 +12,9 @@
   "account.lastActivity": "Última actividad: {events}",
   "account.lead": "Inicia sesión con tu cuenta de DeepAI para que el gateway pueda acceder a los modelos. La clave de la cuenta se guarda en la base de datos del gateway y nunca sale de esta máquina.",
   "account.lowBalance": "Saldo bajo",
-  "account.meteringUnavailable": "DeepAI no informa de saldo para esta clave, así que no hay nada que mostrar. La comprobación de abajo dice qué responde DeepAI.",
   "account.notSignedIn": "Sin sesión iniciada",
   "account.pro": "Pro",
   "account.refresh": "Actualizar saldo",
-  "account.refreshError.code-access-missing": "DeepAI acepta esta clave en su web, pero DeepAI Code no. Es una decisión de DeepAI sobre la cuenta en la que cayó el inicio de sesión, no algo que la pasarela pueda cambiar: inicia sesión con la cuenta de DeepAI que tiene acceso a DeepAI Code.",
   "account.refreshError.http": "DeepAI respondió con un error, así que el saldo no se pudo leer. Inténtalo en un momento.",
   "account.refreshError.lane-outdated": "DeepAI ha retirado la versión en la que esta puerta de enlace le habla, así que el saldo no se puede leer. Es un problema de la puerta de enlace, no de la cuenta.",
   "account.refreshError.machine-required": "DeepAI no pudo identificar la máquina donde se ejecuta esta puerta de enlace, que es contra la que se emite su asignación diaria de créditos. Define DEEPAI_MACHINE_ID para este host.",
@@ -229,7 +227,6 @@
   "signin.loggedIn": "Sesión iniciada",
   "signin.loggedInToast": "Has iniciado sesión en DeepAI",
   "signin.loginToGateway": "Entrar en la puerta de enlace",
-  "signin.noCodeAccess": "Sesión iniciada, pero la clave que emitió DeepAI no llega a DeepAI Code. Inicia sesión con la cuenta de DeepAI que sí tiene acceso - un inicio con correo y uno con Google de la misma dirección pueden ser dos cuentas distintas.",
   "signin.notLoggedIn": "Sin sesión iniciada",
   "signin.pasteTheAddress": "Pega primero la dirección de callback.",
   "signin.signingIn": "Iniciando sesión...",
@@ -249,5 +246,9 @@
   "time.minutesAgo": "hace {count} min",
   "window.day": "día",
   "window.hour": "hora",
-  "window.month": "mes"
+  "window.month": "mes",
+  "account.socialLoginRequired": "DeepAI Code solo está disponible para cuentas que iniciaron sesión con Google o Apple. Esta cuenta inició sesión con correo y contraseña, así que DeepAI rechaza sus peticiones. Cierra la sesión y vuelve a entrar con Google o Apple.",
+  "account.issueUnavailable": "DeepAI rechazó la última lectura de esta cuenta, así que no hay nada que mostrar. Ejecuta la comprobación de abajo para ver qué respondió.",
+  "account.refreshError.social-login-required": "DeepAI Code solo está disponible para cuentas que iniciaron sesión con Google o Apple. Cierra la sesión y vuelve a entrar con Google o Apple.",
+  "signin.socialLoginRequired": "Sesión iniciada, pero DeepAI Code solo atiende cuentas que entraron con Google o Apple. Cierra la sesión y vuelve a entrar con Google o Apple."
 }

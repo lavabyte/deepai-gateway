@@ -12,11 +12,9 @@
   "account.lastActivity": "Ostatnia aktywność: {events}",
   "account.lead": "Zaloguj się swoim kontem DeepAI, aby brama mogła korzystać z modeli. Klucz konta jest zapisany w bazie bramy i nigdy jej nie opuszcza.",
   "account.lowBalance": "Niskie saldo",
-  "account.meteringUnavailable": "DeepAI nie podaje salda dla tego klucza, więc nie ma tu czego pokazać. Sprawdzenie niżej pokazuje, co DeepAI na niego odpowiada.",
   "account.notSignedIn": "Nie zalogowano",
   "account.pro": "Pro",
   "account.refresh": "Odśwież saldo",
-  "account.refreshError.code-access-missing": "DeepAI przyjmuje ten klucz na swojej stronie, ale DeepAI Code go nie przyjmuje. To decyzja DeepAI o koncie, na które trafiło logowanie, a nie coś, co brama może zmienić: zaloguj się kontem DeepAI, które ma dostęp do DeepAI Code.",
   "account.refreshError.http": "DeepAI odpowiedział błędem, więc salda nie udało się odczytać. Spróbuj za chwilę.",
   "account.refreshError.lane-outdated": "DeepAI wycofał wersję, w której ta brama z nim rozmawia, więc salda nie można odczytać. To problem bramy, nie konta.",
   "account.refreshError.machine-required": "DeepAI nie rozpoznał maszyny, na której działa ta brama, a to na nią przyznaje dzienny przydział kredytów. Ustaw DEEPAI_MACHINE_ID dla tego hosta.",
@@ -237,7 +235,6 @@
   "signin.loggedIn": "Zalogowano",
   "signin.loggedInToast": "Zalogowano do DeepAI",
   "signin.loginToGateway": "Zaloguj do bramy",
-  "signin.noCodeAccess": "Zalogowano, ale klucz wydany przez DeepAI nie ma dostępu do DeepAI Code. Zaloguj się kontem DeepAI, które ten dostęp ma - logowanie mailem i przez Google na ten sam adres mogą być dwoma różnymi kontami.",
   "signin.notLoggedIn": "Nie zalogowano",
   "signin.pasteTheAddress": "Najpierw wklej adres zwrotny.",
   "signin.signingIn": "Logowanie...",
@@ -262,5 +259,9 @@
   "time.minutesAgo": "{count} min temu",
   "window.day": "dzień",
   "window.hour": "godzinę",
-  "window.month": "miesiąc"
+  "window.month": "miesiąc",
+  "account.socialLoginRequired": "DeepAI Code jest dostępny tylko dla kont zalogowanych przez Google lub Apple. To konto zalogowano adresem e-mail i hasłem, więc DeepAI odrzuca jego żądania. Wyloguj się i zaloguj ponownie przez Google albo Apple.",
+  "account.issueUnavailable": "DeepAI odrzucił ostatni odczyt tego konta, więc nie ma tu czego pokazać. Uruchom sprawdzenie niżej, żeby zobaczyć, co odpowiedział.",
+  "account.refreshError.social-login-required": "DeepAI Code jest dostępny tylko dla kont zalogowanych przez Google lub Apple. Wyloguj się i zaloguj ponownie przez Google albo Apple.",
+  "signin.socialLoginRequired": "Zalogowano, ale DeepAI Code obsługuje tylko konta zalogowane przez Google lub Apple. Wyloguj się i zaloguj ponownie przez Google albo Apple."
 }

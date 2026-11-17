@@ -12,11 +12,9 @@
   "account.lastActivity": "Letzte Aktivität: {events}",
   "account.lead": "Melde dich mit deinem DeepAI-Konto an, damit das Gateway die Modelle erreichen kann. Der Kontoschlüssel wird in der Gateway-Datenbank gespeichert und verlässt diesen Rechner nie.",
   "account.lowBalance": "Geringes Guthaben",
-  "account.meteringUnavailable": "DeepAI meldet für diesen Schlüssel kein Guthaben, daher gibt es hier nichts anzuzeigen. Die Prüfung unten zeigt, was DeepAI dazu antwortet.",
   "account.notSignedIn": "Nicht angemeldet",
   "account.pro": "Pro",
   "account.refresh": "Guthaben aktualisieren",
-  "account.refreshError.code-access-missing": "DeepAI akzeptiert diesen Schlüssel auf seiner Website, DeepAI Code jedoch nicht. Das ist DeepAIs Entscheidung über das Konto, bei dem die Anmeldung gelandet ist, und nichts, was das Gateway ändern kann: Melden Sie sich mit dem DeepAI-Konto an, das Zugriff auf DeepAI Code hat.",
   "account.refreshError.http": "DeepAI hat mit einem Fehler geantwortet; das Guthaben konnte nicht gelesen werden. Versuche es gleich noch einmal.",
   "account.refreshError.lane-outdated": "DeepAI hat die Version zurückgezogen, in der dieses Gateway mit ihm spricht; das Guthaben kann nicht gelesen werden. Das ist ein Gateway-Problem, kein Kontoproblem.",
   "account.refreshError.machine-required": "DeepAI konnte die Maschine dieses Gateways nicht erkennen, auf die der tägliche Guthaben-Zuschuss ausgestellt wird. Setze DEEPAI_MACHINE_ID für diesen Host.",
@@ -226,7 +224,6 @@
   "signin.loggedIn": "Angemeldet",
   "signin.loggedInToast": "Bei DeepAI angemeldet",
   "signin.loginToGateway": "Am Gateway anmelden",
-  "signin.noCodeAccess": "Angemeldet, aber der von DeepAI ausgestellte Schlüssel erreicht DeepAI Code nicht. Melden Sie sich mit dem DeepAI-Konto an, das Zugriff auf DeepAI Code hat - eine E-Mail-Anmeldung und eine Google-Anmeldung derselben Adresse können zwei verschiedene Konten sein.",
   "signin.notLoggedIn": "Nicht angemeldet",
   "signin.pasteTheAddress": "Füge zuerst die Callback-Adresse ein.",
   "signin.signingIn": "Anmeldung läuft...",
@@ -246,5 +243,9 @@
   "time.minutesAgo": "vor {count} Min.",
   "window.day": "Tag",
   "window.hour": "Stunde",
-  "window.month": "Monat"
+  "window.month": "Monat",
+  "account.socialLoginRequired": "DeepAI Code ist nur für Konten verfügbar, die sich mit Google oder Apple angemeldet haben. Dieses Konto wurde mit E-Mail-Adresse und Passwort angemeldet, daher lehnt DeepAI seine Anfragen ab. Melden Sie sich ab und mit Google oder Apple wieder an.",
+  "account.issueUnavailable": "DeepAI hat die letzte Abfrage dieses Kontos abgelehnt, daher gibt es hier nichts anzuzeigen. Starten Sie die Prüfung unten, um die Antwort zu sehen.",
+  "account.refreshError.social-login-required": "DeepAI Code ist nur für Konten verfügbar, die sich mit Google oder Apple angemeldet haben. Melden Sie sich ab und mit Google oder Apple wieder an.",
+  "signin.socialLoginRequired": "Angemeldet, aber DeepAI Code bedient nur Konten, die sich mit Google oder Apple angemeldet haben. Melden Sie sich ab und mit Google oder Apple wieder an."
 }

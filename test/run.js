@@ -2557,17 +2557,14 @@ await checkAsync('a retired key is told apart from a lane the key still owns', a
       'a key the website accepts is alive but is not a DeepAI Code key - its own state, not "rejected"');
 
     /*
-     * A key the lane itself hands the catalog to is a working key, whatever the metering
-     * endpoint says about its balance. `/theos` is where the daily grant is counted, and it
-     * refuses some accounts that DeepAI Code otherwise serves - the account signed in by email
-     * was one - so this must not be reported as "DeepAI rejects this account's key" while
-     * completions would go through.
+     * And the catalog is not a witness. Measured on a real account: `/models` answers 200 with
+     * the full list for an address that `/chat/completions` refuses outright, so a key that
+     * can read the catalog may still be unable to send a single request. Nothing is concluded
+     * from it.
      */
     laneCatalog = 200;
-    const metered = await checkKey('metered-refused-key', AbortSignal.timeout(5000));
-    assert.equal(metered.ok, true, 'the lane accepting the key is what makes it usable');
-    assert.equal(metered.metering, 'refused', 'and the balance is what is missing, not the access');
-    assert.equal(metered.allowance, null, 'no balance to show, rather than a made-up one');
+    const catalogOnly = await checkKey('catalog-only-key', AbortSignal.timeout(5000));
+    assert.equal(catalogOnly.ok, false, 'a key the lane refuses is refused, catalog or not');
     laneCatalog = 401;
 
     // The witness itself failing is not a second reason to invent: the generic refusal stands.
@@ -2994,9 +2991,11 @@ await checkAsync('inactive accounts are forgotten only when a deployment asks fo
       `FORGET_ACCOUNT_AFTER_DAYS=${JSON.stringify(value)} must read as ${expected}`);
   }
 
-  // --- A schema from before v6 gains the column, backfilled rather than left NULL.
+  // --- A fresh database lands on the current schema version, whatever it is.
   const older = openDatabase(':memory:');
-  assert.equal(older.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version').value, '6');
+  const { SCHEMA_VERSION: OPENED_VERSION } = await import('../src/db.js');
+  assert.equal(older.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version').value,
+    String(OPENED_VERSION));
   const columns = older.prepare('PRAGMA table_info(accounts)').all().map((row) => row.name);
   assert.ok(columns.includes('last_seen_at'), 'the accounts table must carry last_seen_at');
   saveAccount(older, { apiKey: 'k-old', username: 'backfilled', isPro: false });
@@ -5408,25 +5407,27 @@ await checkAsync('the sign-in routes are always served, because they are the onl
 });
 
 
-await checkAsync('a sign-in is refused only when DeepAI refuses the key, not when it does not answer', async () => {
+await checkAsync('a sign-in reports DeepAI\'s own refusal, and invents nothing when there is none', async () => {
   /*
-   * The verdict that decides whether a visitor is told their account works is one lane read:
-   * the catalog, exactly as the app reads it after signing in. Three outcomes, not two.
+   * What DeepAI says, measured on a real password account, byte for byte:
    *
-   * - the lane serves the catalog: the account works;
-   * - the lane refuses the key outright (401/403): it does not;
-   * - the lane says something else - a retired revision, a 5xx, a timeout, a dead network -
-   *   and the gateway does not know.
+   *   403 {"error": {"message": "DeepAI Code is available to accounts signed in with Google or
+   *        Apple.", "type": "social_login_required", "code": "social_login_required"}}
    *
-   * Folding the third case into the second is how a working sign-in was reported as "DeepAI
-   * Code does not accept this account's key", which sent the reader to sign in again, which
-   * produced the same read and the same sentence.
+   * That is a fact about the account, not about the key, and it is the one thing worth saying
+   * at the moment of signing in. Everything else - a retired lane, a 5xx, a timeout, a dead
+   * network - is the gateway not knowing, and an earlier build turned every one of those into
+   * "DeepAI Code does not accept this account's key", which sent the reader to sign in again
+   * to no effect.
+   *
+   * The catalog is deliberately not part of this: `/models` answers 200 for the same account
+   * that cannot send a completion.
    */
   const { createCallbackLogin } = await import('../src/deepai/callback-login.js');
   const { openDatabase } = await import('../src/db.js');
   const express = (await import('express')).default;
   const realFetch = globalThis.fetch;
-  let lane = 200;
+  let theos = 200;
   let exchangeCalls = 0;
   globalThis.fetch = async (url, init) => {
     const target = String(url);
@@ -5435,13 +5436,12 @@ await checkAsync('a sign-in is refused only when DeepAI refuses the key, not whe
       return new Response(JSON.stringify({ api_key: 'a-key', username: 'someone', is_pro: false }),
         { status: 200, headers: { 'content-type': 'application/json' } });
     }
-    if (target.includes('/theos')) {
-      throw new Error('the gateway must not ask the counter at sign-in');
-    }
-    if (target.includes('deepai_code/models')) {
-      if (lane === 'network') throw new TypeError('fetch failed');
-      return new Response(JSON.stringify(lane === 200 ? { models: [] } : { error: { code: 'auth_required' } }),
-        { status: lane, headers: { 'content-type': 'application/json' } });
+    if (target.includes('/deepai_code/theos')) {
+      if (theos === 'network') throw new TypeError('fetch failed');
+      const body = theos === 403
+        ? { error: { message: 'DeepAI Code is available to accounts signed in with Google or Apple.', type: 'social_login_required', code: 'social_login_required' } }
+        : { enabled: true, balance: '5.00000', granted: '5.00000' };
+      return new Response(JSON.stringify(body), { status: theos, headers: { 'content-type': 'application/json' } });
     }
     return realFetch(url, init);
   };
@@ -5468,15 +5468,16 @@ await checkAsync('a sign-in is refused only when DeepAI refuses the key, not whe
 
       const accepted = await signIn();
       assert.equal(accepted.status, 200);
-      assert.equal(accepted.body.codeAccess, true, 'a key the lane serves is a finished sign-in');
+      assert.equal(accepted.body.codeAccess, undefined, 'an ordinary sign-in says nothing extra');
 
-      lane = 401;
-      const refused = await signIn();
-      assert.equal(refused.status, 200, 'the sign-in itself still happened');
-      assert.equal(refused.body.codeAccess, false, 'and it says the key cannot reach DeepAI Code');
+      theos = 403;
+      const social = await signIn();
+      assert.equal(social.body.ok, true, 'the sign-in itself still happened');
+      assert.equal(social.body.codeAccess, 'social-login-required',
+        "and DeepAI's own reason reaches the dashboard");
 
       for (const [name, status] of [['a retired lane', 426], ['a server error', 502], ['a dead network', 'network']]) {
-        lane = status;
+        theos = status;
         const unknown = await signIn();
         assert.equal(unknown.body.ok, true, `${name} still signs in`);
         assert.equal(unknown.body.codeAccess, undefined,
@@ -5578,6 +5579,70 @@ await checkAsync('the exchange reproduces the app, including the one retry that 
       const midFlight = await signIn();
       assert.equal(attempts, 1, 'one attempt, because a second one would lose the key the first minted');
       assert.equal(midFlight.body.ok, false);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+await checkAsync('a password account is refused by name, and the reason stays on the record', async () => {
+  /*
+   * Reproduced against the live service with a real password account: the exchange succeeds,
+   * the key it returns is the account's own website key, `/models` answers 200 with all 27
+   * models - and `/theos` and `/chat/completions` both answer
+   *
+   *   403 social_login_required
+   *   "DeepAI Code is available to accounts signed in with Google or Apple."
+   *
+   * So this account cannot use DeepAI Code at all, and no client can change that. What the
+   * gateway owes the reader is DeepAI's own sentence, kept on the account so it survives a
+   * reload, instead of a dash that looks like a slow network or a verdict about the key.
+   */
+  const { checkKey } = await import('../src/deepai/account.js');
+  const { openDatabase } = await import('../src/db.js');
+  const { createApp } = await import('../server.js');
+  const { saveAccount, createSession, readAccount } = await import('../src/store.js');
+  const realFetch = globalThis.fetch;
+  const json = (body, status = 200) => new Response(JSON.stringify(body),
+    { status, headers: { 'content-type': 'application/json' } });
+  globalThis.fetch = async (url, init) => {
+    const target = String(url);
+    if (!target.startsWith('https://api.deepai.org')) return realFetch(url, init);
+    if (target.includes('/deepai_code/theos')) {
+      return json({ error: { message: 'DeepAI Code is available to accounts signed in with Google or Apple.', type: 'social_login_required', code: 'social_login_required' } }, 403);
+    }
+    if (target.includes('/deepai_code/models')) return json({ models: [{ id: 'glm-5.3-flash' }] });
+    if (target.includes('/get_usage_summary')) return json({ is_authenticated: true, is_pro: false, plan: 'free' });
+    throw new Error(`unexpected upstream: ${target}`);
+  };
+  try {
+    // 1. The key checker reports DeepAI's reason, not "the key was rejected".
+    const check = await checkKey('password-account-key', AbortSignal.timeout(5000));
+    assert.equal(check.ok, false, 'this account cannot use DeepAI Code');
+    assert.equal(check.reason, 'social-login-required', "with DeepAI's own code for why");
+
+    // 2. The dashboard keeps it on the account and answers with it.
+    const db = openDatabase(':memory:');
+    saveAccount(db, { apiKey: 'password-account-key', username: 'email@example.com', isPro: false });
+    const session = createSession(db, 'email@example.com');
+    const app = createApp(db, { log: () => {}, logRequests: false });
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise((resolve) => server.once('listening', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const cookie = `deepai_gateway_session=${session.token}`;
+    try {
+      const refresh = await fetch(`${base}/api/account/refresh`, { method: 'POST', headers: { cookie } });
+      const result = await refresh.json();
+      assert.equal(result.ok, false, 'a refused account is a failed refresh');
+      assert.equal(result.code, 'social-login-required', 'with a code the card translates');
+
+      assert.equal(readAccount(db, 'email@example.com').issue, 'social-login-required',
+        'the reason stays on the record, so a reload can still explain it');
+      const account = await (await fetch(`${base}/api/account`, { headers: { cookie } })).json();
+      assert.equal(account.issue, 'social-login-required');
+      assert.equal(account.allowance, null);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

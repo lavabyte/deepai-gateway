@@ -196,33 +196,33 @@ async function exchangeCode(code) {
 }
 
 /**
- * Ask the lane whether the key it just issued can use DeepAI Code.
+ * Ask DeepAI what the key it just returned is actually good for.
  *
- * This is the app's own post-sign-in step: the app reads the catalog with a five second
- * budget and nothing else. Asking `/theos` instead was a mistake with a cost - `/theos` is
- * the *counter*, and it refuses accounts the lane serves happily, so the gateway reported
- * "DeepAI Code does not accept this key" for keys that worked.
+ * The app reads the catalog here, and so did this, until a real account proved what that is
+ * worth: `/models` answers 200 with the whole catalog for an address that `/chat/completions`
+ * refuses outright. So the catalog is not evidence of anything, and a verdict drawn from it is
+ * worse than no verdict - it says "signed in" to somebody who cannot send a single request.
  *
- * Only an explicit refusal counts as one. A 426, a 5xx, a timeout or a network failure is the
- * gateway not knowing, and an unknown answer must never be turned into a verdict about
- * somebody's account.
+ * The one answer worth acting on is DeepAI's own `social_login_required`, which is not about
+ * the key at all: DeepAI Code is for accounts signed in with Google or Apple, and a password
+ * account is refused by name. That is a sentence the visitor can act on, so it is the one
+ * thing this reports. Everything else stays unsaid.
  *
  * @param {string} apiKey
- * @returns {Promise<true|false|undefined>} `false` only when DeepAI refused the key itself.
+ * @returns {Promise<'social-login-required'|undefined>}
  */
-async function laneServesKey(apiKey) {
+async function codeAccessAfterSignIn(apiKey) {
   try {
-    const response = await fetch(`${API_ORIGIN}/deepai_code/models`, {
+    const response = await fetch(`${API_ORIGIN}/deepai_code/theos`, {
       headers: { ...laneHeaders(), 'Api-Key': apiKey },
       redirect: 'error',
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(8_000),
     });
-    if (response.ok) {
-      noteCheckIn(await response.json().catch(() => undefined));
-      return true;
-    }
-    if (response.status === 401 || response.status === 403) return false;
-    return undefined;
+    const body = await response.json().catch(() => undefined);
+    // The refusal carries a check-in mark too, and keeping it is what makes the next call a
+    // client's call rather than a stranger's.
+    noteCheckIn(body);
+    return body?.error?.code === 'social_login_required' ? 'social-login-required' : undefined;
   } catch {
     return undefined;
   }
@@ -356,7 +356,8 @@ export function createCallbackLogin(db, runtime, options = {}) {
      * Three answers, not two: `true` accepted, `false` refused, `undefined` the gateway does
      * not know. Only the middle one becomes a sentence about the account.
      */
-    const codeAccess = stored ? await laneServesKey(account.apiKey) : undefined;
+    // Only DeepAI's own named refusal is reported; everything else stays unsaid.
+    const codeAccess = stored ? await codeAccessAfterSignIn(account.apiKey) : undefined;
     return { stored, codeAccess };
   };
 
@@ -406,10 +407,10 @@ export function createCallbackLogin(db, runtime, options = {}) {
       const { stored, codeAccess } = await finish(res, result);
       if (!stored) return res.status(500).type('html').send(page('Sign-in failed',
         'The DeepAI key could not be saved on this gateway. Sign in again after an operator fixes the database.'));
-      if (codeAccess === false) {
-        runtime.log?.('callback sign-in: the exchanged key has no DeepAI Code access');
-        return res.status(200).type('html').send(page('Signed in, but not to DeepAI Code',
-          'DeepAI issued a key for this account that DeepAI Code does not accept. Sign in with an account that has DeepAI Code access, or paste a DeepAI Code key in the dashboard.'));
+      if (codeAccess === 'social-login-required') {
+        runtime.log?.('callback sign-in: DeepAI wants a Google or Apple sign-in for DeepAI Code');
+        return res.status(200).type('html').send(page('Signed in, but DeepAI Code needs Google or Apple',
+          'DeepAI Code is available only to accounts signed in with Google or Apple. Sign out and sign in again with Google or Apple.'));
       }
       runtime.log?.('callback sign-in completed');
       return res.redirect(302, '/');

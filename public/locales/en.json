@@ -12,11 +12,9 @@
   "account.lastActivity": "Last activity: {events}",
   "account.lead": "Sign in with your DeepAI account to let the gateway reach the models. The account key is stored in the gateway database and never leaves this machine.",
   "account.lowBalance": "Low balance",
-  "account.meteringUnavailable": "DeepAI reports no balance for this key, so there is nothing to show here. The check below says what DeepAI answers for it.",
   "account.notSignedIn": "Not signed in",
   "account.pro": "Pro",
   "account.refresh": "Refresh balance",
-  "account.refreshError.code-access-missing": "DeepAI accepts this key on its website, but DeepAI Code does not. That is DeepAI's decision about the account the sign-in landed on, not something the gateway can change: sign in with the DeepAI account that has DeepAI Code access.",
   "account.refreshError.http": "DeepAI answered with an error, so the balance could not be read. Try again in a moment.",
   "account.refreshError.lane-outdated": "DeepAI has retired the version this gateway speaks to it in, so the balance cannot be read. This is a gateway problem, not an account problem.",
   "account.refreshError.machine-required": "DeepAI could not identify the machine this gateway runs on, which is what its daily Credits grant is issued against. Set DEEPAI_MACHINE_ID for this host.",
@@ -226,7 +224,6 @@
   "signin.loggedIn": "Logged in",
   "signin.loggedInToast": "Logged in to DeepAI",
   "signin.loginToGateway": "Login to gateway",
-  "signin.noCodeAccess": "Signed in, but the key DeepAI issued cannot reach DeepAI Code. Sign in with the DeepAI account that has DeepAI Code access - an email sign-in and a Google sign-in of the same address can be two different accounts.",
   "signin.notLoggedIn": "Not logged in",
   "signin.pasteTheAddress": "Paste the callback address first.",
   "signin.signingIn": "Signing in...",
@@ -246,5 +243,9 @@
   "time.minutesAgo": "{count}m ago",
   "window.day": "day",
   "window.hour": "hour",
-  "window.month": "month"
+  "window.month": "month",
+  "account.socialLoginRequired": "DeepAI Code is available only to accounts signed in with Google or Apple. This account signed in with an email address and a password, so DeepAI refuses its requests. Log out and sign in again with Google or Apple.",
+  "account.issueUnavailable": "DeepAI refused this account's last read, so there is nothing to show here. Run the check below to see what it answered.",
+  "account.refreshError.social-login-required": "DeepAI Code is available only to accounts signed in with Google or Apple. Log out and sign in again with Google or Apple.",
+  "signin.socialLoginRequired": "Signed in, but DeepAI Code only serves accounts signed in with Google or Apple. Log out and sign in again with Google or Apple."
 }

@@ -122,6 +122,29 @@ at DeepAI - once as a password account and once as a Google account - and those 
 accounts with their own credits and their own DeepAI Code access, so "signed in" was not enough
 to tell which one a sign-in landed on.
 
+### What DeepAI answers, measured
+
+Reproduced against the live service with a password account, end to end:
+
+| request | answer |
+| --- | --- |
+| `POST /deepai_code/desktop_auth/exchange/` | `200 {api_key, username, is_pro}` |
+| `GET /deepai_code/models` | `200`, all 27 models |
+| `GET /get_usage_summary` | `200`, `plan: "free"` |
+| `GET /deepai_code/theos` | `403 social_login_required` |
+| `POST /deepai_code/chat/completions` | `403 social_login_required` |
+
+with one message behind both refusals: **"DeepAI Code is available to accounts signed in with
+Google or Apple."** The exchange returns the account's own website key, so the key is not the
+variable - the account is. DeepAI Code has no path for an address registered with a password,
+and no client can produce one: the desktop app's sign-in is the same URL, the same exchange and
+the same headers, byte for byte.
+
+Two consequences are built in here. **The catalog is not proof of access** - it is served with
+200 to an account that cannot send a single completion - so nothing is concluded from it.
+And a refusal DeepAI named is said in its own terms, kept on the account so a reload still
+explains it, and never paraphrased as "the key was rejected".
+
 ### A balance is not the same as access
 
 DeepAI answers three different questions about one key, and they can disagree:

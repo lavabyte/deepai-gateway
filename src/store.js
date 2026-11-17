@@ -37,6 +37,8 @@ function accountOf(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     allowance: allowanceOf(row),
+    // DeepAI's own code for why this account cannot be used, when it refused the read.
+    issue: typeof row.metering === 'string' ? row.metering : null,
   };
 }
 
@@ -140,16 +142,27 @@ export function saveAccount(db, account) {
 }
 
 /** Record the latest allowance reading for one account. */
-export function saveAllowance(db, username, allowance) {
+/**
+ * Record an allowance read, and the reason when it produced no number.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {string} username
+ * @param {{balance?: string|null, granted?: string|null, refreshAt?: string|null}|null} allowance
+ * @param {string} [issue] - DeepAI's own code for why this account has no allowance and cannot
+ *   be used, when it answered with a refusal rather than a figure (the column keeps its
+ *   original name). Absent means the read either worked or never ran.
+ */
+export function saveAllowance(db, username, allowance, issue) {
   db.prepare(`
     UPDATE accounts
-       SET balance = ?, granted = ?, refresh_at = ?, checked_at = ?
+       SET balance = ?, granted = ?, refresh_at = ?, checked_at = ?, metering = ?
      WHERE username = ?
   `).run(
     allowance?.balance ?? null,
     allowance?.granted ?? null,
     allowance?.refreshAt ?? null,
     Date.now(),
+    issue ?? null,
     username,
   );
 }

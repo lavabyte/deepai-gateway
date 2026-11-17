@@ -16,7 +16,7 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 /** Current schema version. Bump when a migration below is added. */
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 /**
  * Open (creating if needed) the database at `file` and bring it to the current
@@ -78,6 +78,7 @@ export function openDatabase(file) {
   if (current < 4) migrateToV4(db);
   if (current < 5) migrateToV5(db);
   if (current < 6) migrateToV6(db);
+  if (current < 7) migrateToV7(db);
 
   // Only ever move forwards.
   if (current < SCHEMA_VERSION) {
@@ -335,6 +336,20 @@ function migrateToV6(db) {
   // Backfill rather than leave NULL, which would read as "never used" and make every
   // existing account look abandoned on the first sweep.
   db.prepare('UPDATE accounts SET last_seen_at = COALESCE(last_seen_at, updated_at, created_at) WHERE last_seen_at IS NULL').run();
+}
+
+/**
+ * Why the last balance read produced no number, when it did not.
+ *
+ * DeepAI answers `/theos` with a refusal code instead of a balance, and the code says what is
+ * wrong with the *account* rather than with the key: `social_login_required` is DeepAI Code
+ * refusing an address registered with a password, whatever the key is worth. Keeping the code
+ * is what lets the dashboard say that after a reload instead of showing a bare dash.
+ *
+ * NULL means the last read produced a balance, or none has run.
+ */
+function migrateToV7(db) {
+  addColumn(db, 'accounts', 'metering', 'TEXT');
 }
 
 /** Short stable digest used to derive a username when DeepAI gives none. */

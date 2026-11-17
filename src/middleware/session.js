@@ -66,6 +66,7 @@ export function publicAccount(account) {
     username: account.username,
     isPro: account.isPro,
     allowance: account.allowance ?? null,
+    issue: account.issue ?? null,
     signedInSince: account.createdAt,
     sessionExpiresAt: account.sessionExpiresAt ?? null,
   };

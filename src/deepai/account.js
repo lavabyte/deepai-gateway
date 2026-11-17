@@ -74,6 +74,24 @@ export async function checkKey(apiKey, signal) {
         return { ok: false, reason: 'machine-required', error: 'DeepAI requires a machine identity' };
       }
       /*
+       * Measured on a real account, end to end: an address registered with a password is
+       * answered `403 social_login_required`, with a message that has nothing to do with keys -
+       * "DeepAI Code is available to accounts signed in with Google or Apple."
+       *
+       * And it is not only the counter: `/chat/completions` answers the same 403 with the same
+       * sentence, while `/models` hands over the whole catalog. That last part is why the
+       * catalog cannot be used as proof of access - it is served to accounts that cannot send a
+       * single completion - and it is why this is a refusal, reported in DeepAI's own terms
+       * rather than as a broken key.
+       */
+      if (code === 'social_login_required') {
+        return {
+          ok: false,
+          reason: 'social-login-required',
+          error: 'DeepAI Code is available only to accounts signed in with Google or Apple',
+        };
+      }
+      /*
        * A Code-lane refusal is one of two very different states, and they need different
        * words. DeepAI issues a fresh key on every sign-in and stops accepting the previous
        * one, so a key stored here can be retired by a sign-in that happened somewhere else -
@@ -82,32 +100,6 @@ export async function checkKey(apiKey, signal) {
        * while a key the site still accepts points at the lane rather than the key.
        */
       if (code === 'auth_required') {
-        /*
-         * Ask the lane itself before believing it about the account.
-         *
-         * `/theos` is the *metering* endpoint - it is where the daily grant is counted, and the
-         * app's own source says the server withholds the grant from a build it does not
-         * recognise. `/models` is the lane's plain answer about whether this key can use DeepAI
-         * Code at all. A key that the counter refuses while the catalog comes back with it is a
-         * working key with an unreadable balance, and reporting that as "DeepAI rejects this
-         * account's key" turned a metering quirk into a dead account - which is exactly what an
-         * account signed in by email ran into while the same account worked in the app.
-         */
-        const lane = await fetch(`${API_ORIGIN}/deepai_code/models`, {
-          headers: { ...laneHeaders(), 'Api-Key': apiKey },
-          signal: AbortSignal.timeout(10_000),
-        }).catch(() => undefined);
-        if (lane?.ok === true) {
-          const catalog = await lane.json().catch(() => undefined);
-          noteCheckIn(catalog);
-          return {
-            ok: true,
-            metering: 'refused',
-            allowance: null,
-            error: 'the key is accepted, but DeepAI will not report a balance for it',
-          };
-        }
-
         /*
          * With its own deadline, not the caller's: the allowance read has just spent part of
          * that budget, and a witness that inherits it gets aborted by the clock rather than
