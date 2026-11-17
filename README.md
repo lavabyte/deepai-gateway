@@ -178,9 +178,30 @@ The DeepAI Code app never meets this wall because it truncates its own tool outp
 is capped, bash output is capped) and compacts as it goes, so it never sends a prompt that big.
 That the app works is not evidence about the size of the window.
 
-The gateway therefore refuses a prompt above 150,000 characters with OpenAI's own
-`context_length_exceeded`, which is the signal a client knows how to answer - compact and ask
-again - rather than forwarding one that will be answered from an empty conversation.
+The gateway therefore shortens the prompt here, the way the app does, instead of forwarding one
+that will be thrown away - three rules, in the order that loses the least:
+
+1. A message larger than one message may be - 40,000 characters, or 50,000 for a tool result -
+   loses its middle, keeping its start and its end, with the amount left out written where the
+   cut is. A file read is most useful at its start and a build log at its end, and a model has to
+   know it is looking at a shortened text.
+2. Whole turns go from the oldest end only when every message is already a reasonable size: what
+   is over the line then is how many turns there are, not what any one of them says. The system
+   prompt and the newest turn always survive.
+3. If a single turn alone still overflows the budget, it is cut to fit.
+
+Whatever is dropped or shortened is announced in one sentence at the top of the transcript - a
+model handed a shortened conversation has to know it is looking at one - and counted in the log
+as `trim=drop11` or `trim=cut1`. Nothing is touched while the prompt fits.
+
+Measured, against the same account that used to get nothing back:
+
+| sent | before | after |
+| --- | --- | --- |
+| one 250,000-character message | 330 tokens, answered "Unannounced." | `trim=cut1`, 12,623 tokens, read `MAGPIE-42` from its first line |
+| a 300,000-character tool result | 246 tokens, "I haven't been shown any file" | `trim=cut1`, 16,361 tokens, read `MAGPIE-42` from its first line |
+| ten turns of 20,000 characters | answer unrelated to the turn asked about | `trim=drop11`, 44,425 tokens, answered with the newest turn |
+| a 60,000-character message | read whole | read whole, no trim |
 
 ### A balance is not the same as access
 

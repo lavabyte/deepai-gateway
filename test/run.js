@@ -4191,62 +4191,125 @@ await checkAsync('an image the backend refuses is retried as text, not reported 
   }
 });
 
-await checkAsync('a prompt DeepAI would answer with nothing is refused, not sent', async () => {
+await checkAsync('a prompt past the wall is shortened here, as the app shortens it', async () => {
   /*
    * Measured on the live endpoint with incompressible content: 150,189 characters of prompt are
    * read whole (markers at 5%, 50% and 95% came back), 200,000 characters come back as a
    * completion with no content, and 300,000 as 246 prompt tokens with the model saying it was
    * never shown a file.
    *
-   * So this is not about a client's token estimate: above the wall the model receives an empty
-   * conversation and answers a question nobody asked, which is the greeting reported from a
-   * harness mid-task. The gateway refuses it instead, with the error clients already know how to
-   * recover from.
+   * So a prompt this large is not a shorter answer upstream - it is no conversation at all, and
+   * the model answers a question nobody asked, which is the greeting reported from a harness
+   * mid-task. Forwarding it unchanged is the one thing that cannot be right.
    */
   const { openDatabase } = await import('../src/db.js');
   const { saveAccount } = await import('../src/store.js');
   const { generateKey } = await import('../src/keys.js');
-  const { createApp: createAppForLimit } = await import('../server.js');
+  const { createApp: createAppForTrim } = await import('../server.js');
 
   const db2 = openDatabase(':memory:');
-  saveAccount(db2, { apiKey: 'upstream', username: 'limit-user', isPro: false });
+  saveAccount(db2, { apiKey: 'upstream', username: 'trim-user', isPro: false });
   const key = generateKey();
   db2.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
-    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'limit-user')`).run(key.hash);
+    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'trim-user')`).run(key.hash);
 
   const realFetch = globalThis.fetch;
-  let upstreamCalls = 0;
+  const sent = [];
+  const lines = [];
   globalThis.fetch = async (url, init) => {
     if (!String(url).includes('api.deepai.org')) return realFetch(url, init);
     if (String(url).includes('deepai_code/models')) {
       return new Response(JSON.stringify(CATALOG_PAYLOAD), { status: 200, headers: { 'content-type': 'application/json' } });
     }
-    upstreamCalls += 1;
+    sent.push(JSON.parse(init.body));
     return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
       { status: 200, headers: { 'content-type': 'text/event-stream' } });
   };
 
-  const app2 = createAppForLimit(db2, { log: () => {}, logRequests: false });
+  const app2 = createAppForTrim(db2, { log: (line) => lines.push(line), logRequests: true });
   const server2 = app2.listen(0, '127.0.0.1');
   await new Promise((resolve) => server2.once('listening', resolve));
   const base2 = `http://127.0.0.1:${server2.address().port}`;
-  const send = (chars) => realFetch(`${base2}/v1/chat/completions`, {
+  const send = (messages) => realFetch(`${base2}/v1/chat/completions`, {
     method: 'POST',
     headers: { authorization: `Bearer ${key.plaintext}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'x'.repeat(chars) }], stream: false }),
+    body: JSON.stringify({ model: 'glm-5.3-flash', messages, stream: false }),
   });
+  // The line that records the sizes is not the last one written - the request line follows it.
+  const promptLines = () => lines.filter((line) => line.includes('prompt '));
+  const chars = (payload) => payload.messages.reduce((total, message) =>
+    total + (typeof message.content === 'string' ? message.content.length : 0), 0);
 
   try {
-    const inside = await send(140_000);
-    assert.equal(inside.status, 200, 'a prompt below the wall is served');
-    assert.equal(upstreamCalls, 1);
+    // Under the wall: untouched, character for character.
+    const small = await send([{ role: 'user', content: 'x'.repeat(140_000) }]);
+    assert.equal(small.status, 200);
+    assert.equal(chars(sent[0]), 140_000, 'a prompt inside the budget is not touched');
+    assert.ok(!promptLines().at(-1).includes('trim='), 'and the log says nothing was trimmed');
 
-    const over = await send(160_000);
-    assert.equal(over.status, 400, 'one above it is refused');
-    const payload = await over.json();
-    assert.equal(payload.error?.code, 'context_length_exceeded');
-    assert.equal(upstreamCalls, 1, 'and nothing was sent upstream for it');
-    assert.match(payload.error?.message ?? '', /exceeds|DeepAI Code serves|Compact/i);
+    // Over it: the middle goes, both ends stay, and the model is told what it lost.
+    const head = 'HEAD-MARK ';
+    const tail = ' TAIL-MARK';
+    const large = await send([{ role: 'user', content: head + 'y'.repeat(200_000) + tail }]);
+    assert.equal(large.status, 200, 'an oversized prompt is served, not refused');
+    const second = sent.at(-1);
+    assert.ok(chars(second) <= 150_000, `forwarded ${chars(second)} characters, which must fit the budget`);
+    const cut = second.messages.find((message) => message.content.startsWith('HEAD-MARK'));
+    assert.ok(cut, 'the start is kept');
+    assert.ok(cut.content.endsWith('TAIL-MARK'), 'and the end is kept');
+    assert.match(cut.content, /\[gateway: [\d,]+ characters omitted here/);
+    assert.ok(promptLines().at(-1).includes('trim=cut1'), `log should report the cut: ${promptLines().at(-1)}`);
+
+    // A tool result larger than a whole prompt's budget: cut, and still a tool result.
+    const toolMessages = [
+      { role: 'user', content: 'read big.txt' },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_file', arguments: '{"path":"big.txt"}' } }] },
+      { role: 'tool', tool_call_id: 'c1', content: `START-OF-FILE ${'z'.repeat(200_000)} END-OF-FILE` },
+      { role: 'user', content: 'what is at the top?' },
+    ];
+    const toolCall = await send(toolMessages);
+    assert.equal(toolCall.status, 200);
+    const forwardedTool = sent.at(-1).messages.find((message) => message.role === 'tool');
+    assert.equal(forwardedTool.tool_call_id, 'c1', 'the result still belongs to its call');
+    assert.ok(forwardedTool.content.length <= 50_000,
+      `a tool result must be cut to the budget, got ${forwardedTool.content.length}`);
+    assert.ok(forwardedTool.content.startsWith('START-OF-FILE'), 'its start survives');
+    assert.ok(forwardedTool.content.endsWith('END-OF-FILE'), 'and so does its end');
+    assert.ok(promptLines().at(-1).includes('trim=cut1'), `log should report the tool trim: ${promptLines().at(-1)}`);
+
+    // A conversation too long for the budget: the oldest turns go, the system prompt and the
+    // newest turn stay, and a tool result never outlives the call it answers.
+    const longConversation = [{ role: 'system', content: 'You are a coding agent.' }];
+    for (let turn = 0; turn < 12; turn += 1) {
+      longConversation.push({ role: 'user', content: `turn ${turn} `.padEnd(20_000, 'w') });
+      longConversation.push({ role: 'assistant', content: `answer ${turn} `.padEnd(20_000, 'v') });
+    }
+    longConversation.push({ role: 'user', content: 'NEWEST-TURN what next?' });
+    const conversation = await send(longConversation);
+    assert.equal(conversation.status, 200);
+    const forwardedConversation = sent.at(-1).messages;
+    assert.equal(forwardedConversation[0].role, 'system', 'the standing instruction is never dropped');
+    assert.equal(forwardedConversation[0].content, 'You are a coding agent.');
+    assert.ok(forwardedConversation.at(-1).content.startsWith('NEWEST-TURN'), 'the newest turn is never dropped');
+    assert.ok(forwardedConversation.some((message) => message.content.startsWith('[gateway: ')),
+      'and the model is told the conversation was shortened');
+    assert.ok(promptLines().at(-1).includes('drop'), `log should report the drop: ${promptLines().at(-1)}`);
+
+    // Nothing left unpaired: a tool result without its call, or a call without results, is a
+    // transcript DeepAI throws away entirely.
+    for (const payload of sent) {
+      const calls = new Set();
+      for (const message of payload.messages) {
+        for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) calls.add(call.id);
+      }
+      const answered = new Set();
+      for (const message of payload.messages) {
+        if (message.role !== 'tool') continue;
+        assert.ok(calls.has(message.tool_call_id), `tool result ${message.tool_call_id} lost its call`);
+        answered.add(message.tool_call_id);
+      }
+      for (const id of calls) assert.ok(answered.has(id), `call ${id} lost its results`);
+    }
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server2.close(resolve));

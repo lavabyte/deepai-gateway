@@ -74,11 +74,28 @@ function promptShape(messages) {
 }
 
 /**
- * The largest prompt this gateway will forward, in characters of message content.
+ * The trimming, as a log field, and nothing at all when nothing was trimmed.
+ *
+ * `drop` counts messages removed from the start of the conversation, `cut` counts messages left
+ * in it with their middle taken out - a tool result larger than the whole budget, or a single
+ * message that alone overflows it.
+ *
+ * @param {{dropped: number, cut: number}} trimmed
+ * @returns {string}
+ */
+function trimNote(trimmed) {
+  const parts = [];
+  if (trimmed.dropped > 0) parts.push(`drop${trimmed.dropped}`);
+  if (trimmed.cut > 0) parts.push(`cut${trimmed.cut}`);
+  return parts.length === 0 ? '' : `trim=${parts.join('+')} `;
+}
+
+/**
+ * How much prompt DeepAI Code will actually read, in characters of message content, and how much
+ * of a single tool result is worth sending.
  *
  * Measured against the live endpoint with content that cannot be compressed by a tokenizer or
- * served from a prompt cache (random six-letter words), so the only variables left are size and
- * what DeepAI does with it:
+ * served from a prompt cache (random six-letter words), so size was the only variable:
  *
  *    150,189 chars  -> 73,195 prompt tokens, and markers placed at 5%, 50% and 95% of the body
  *                       were all read back
@@ -88,17 +105,193 @@ function promptShape(messages) {
  *    300,142 chars  -> 246 prompt tokens, "I haven't been shown any file in this conversation"
  *    600,189 chars  -> 216 prompt tokens, "No long text was provided"
  *
- * Cutting the oversized message into several smaller ones does not help: 200,000 characters
- * split into three messages still came back empty, and a 300,000-character tool result split
- * into four tool messages for the same call was dropped as well. The wall is the size of the
- * prompt, not the size of a message.
+ * Splitting an oversized prompt does not help: 200,000 characters cut into three messages still
+ * came back empty, and a 300,000-character tool result split into four tool messages for the
+ * same call was dropped as well. The wall is the size of the prompt, not of a message.
  *
- * So the largest size verified to arrive whole is 150,000 characters - roughly 73,000 tokens,
- * well under the 320,000 the catalog advertises for every model. Beyond it the endpoint does
- * not refuse; it answers as though the conversation were empty, which is the "Hi, how can I
- * help you today?" a harness gets in the middle of a task.
+ * So the largest prompt verified to arrive whole is about 150,000 characters - 73,000 tokens of
+ * incompressible text, closer to 36,000 of ordinary prose - well under the 320,000 the catalog
+ * advertises. Past it DeepAI does not refuse; it answers as though the conversation were empty,
+ * which is the "Hi, how can I help you today?" a harness gets in the middle of a task.
+ *
+ * The answer is therefore to shorten the prompt here, the way the app does, rather than forward
+ * one that will be thrown away: a tool result longer than the budget is cut in the middle with a
+ * note saying how much was left out, and if the conversation is still too long, its oldest turns
+ * are dropped until it fits - the system prompt and the newest turn always survive, because they
+ * are the ones being worked on.
  */
-const PROMPT_LIMIT_CHARS = 150_000;
+const PROMPT_BUDGET_CHARS = 150_000;
+
+/** One tool result keeps its start and its end, and says what it lost in between. */
+const TOOL_RESULT_CHARS = 50_000;
+
+/** And so does one message that is not a tool result: a pasted file, a whole test log. */
+const MESSAGE_CHARS = 40_000;
+
+/**
+ * Room kept aside for the sentence that tells the model its conversation was shortened.
+ *
+ * Cut to exactly the budget and then annotated, the note itself would push the prompt back over
+ * it - the note is part of the prompt like anything else.
+ */
+const NOTE_RESERVE_CHARS = 400;
+
+/**
+ * Cut the middle out of text that is too long, and say so where the cut is.
+ *
+ * The middle rather than the tail: a file read is most useful at its start, a build log at its
+ * end, and a model reading either needs to know that something was removed rather than silently
+ * believing it has the whole thing.
+ *
+ * The result is at most `keep` characters, note included - a budget that is only respected after
+ * the note is appended is not a budget.
+ *
+ * @param {string} text
+ * @param {number} keep
+ * @returns {string}
+ */
+function middleCut(text, keep) {
+  if (text.length <= keep) return text;
+  const note = (omitted) => `\n\n[gateway: ${omitted.toLocaleString('en-US')} characters omitted here - `
+    + `DeepAI Code reads about ${PROMPT_BUDGET_CHARS.toLocaleString('en-US')} characters of prompt per request]\n\n`;
+  // The note's own length depends on how many digits the omitted count has, so it is measured
+  // twice: once to make room for itself, once for the count the final text will report.
+  let room = Math.max(2, keep - note(text.length).length);
+  let fitted = Math.max(2, keep - note(text.length - room).length);
+  if (fitted !== room) {
+    room = fitted;
+    fitted = Math.max(2, keep - note(text.length - room).length);
+  }
+  const head = Math.max(1, Math.floor(fitted / 2));
+  const tail = Math.max(1, fitted - head);
+  return `${text.slice(0, head)}${note(text.length - head - tail)}${text.slice(-tail)}`;
+}
+
+/**
+ * Group messages so a tool call and its results are dropped together.
+ *
+ * Dropped separately they leave a tool result whose call is gone, or a call whose results are
+ * gone - and measured, DeepAI drops a request whose transcript has an unpaired tool result
+ * entirely, which would be a far worse failure than the one being fixed.
+ *
+ * @param {Array<object>} messages
+ * @returns {Array<Array<object>>}
+ */
+function promptUnits(messages) {
+  const units = [];
+  let index = 0;
+  while (index < messages.length) {
+    const message = messages[index];
+    const ids = new Set((Array.isArray(message?.tool_calls) ? message.tool_calls : [])
+      .map((call) => call?.id)
+      .filter((id) => typeof id === 'string'));
+    const unit = [message];
+    index += 1;
+    if (ids.size > 0) {
+      while (index < messages.length && messages[index]?.role === 'tool' && ids.has(messages[index]?.tool_call_id)) {
+        unit.push(messages[index]);
+        index += 1;
+      }
+    }
+    units.push(unit);
+  }
+  return units;
+}
+
+/**
+ * Shorten a conversation until DeepAI will read all of it.
+ *
+ * Reported in the log and marked in the transcript, because a model that is handed a shortened
+ * conversation has to know it is looking at one.
+ *
+ * @param {unknown} messages
+ * @returns {{messages: Array<object>, trimmed: {dropped: number, cut: number}}}
+ */
+function fitPrompt(messages) {
+  const trimmed = { dropped: 0, cut: 0 };
+  /** What one message may keep: a tool result has more room than a message because it is output. */
+  const allowance = (message) => (message?.role === 'tool' ? TOOL_RESULT_CHARS : MESSAGE_CHARS);
+  /*
+   * Nothing is touched while the prompt fits: a message is only worth shortening when the whole
+   * prompt is over the line, and a 120,000-character tool result that DeepAI reads without
+   * complaint should be read without complaint.
+   */
+  // The system prompt is the standing instruction, never a turn to be dropped.
+  const head = [];
+  let rest = Array.isArray(messages) ? messages : [];
+  while (rest.length > 0 && rest[0]?.role === 'system') {
+    head.push(rest[0]);
+    rest = rest.slice(1);
+  }
+  let units = promptUnits(rest);
+
+  const room = PROMPT_BUDGET_CHARS - NOTE_RESERVE_CHARS;
+  const flat = () => units.flat();
+  const size = () => promptShape([...head, ...flat()]).chars;
+  const largest = () => {
+    let found = null;
+    for (const message of [...head, ...flat()]) {
+      if (typeof message?.content !== 'string') continue;
+      if (found === null || message.content.length > found.content.length) found = message;
+    }
+    return found;
+  };
+
+  /*
+   * Three ways to make room, tried in the order that loses the least.
+   *
+   * A message larger than one message is allowed to be is cut down to that size first - it holds
+   * something worth reading, and it is the reason the prompt is over the line. Whole turns are
+   * dropped only when every message is already a reasonable size, because then what is over the
+   * line is how many turns there are, not what any one of them says. Cutting a turn that a drop
+   * would have removed anyway is the last resort.
+   */
+  for (let attempt = 0; attempt < 256 && size() > room; attempt += 1) {
+    const biggest = largest();
+    if (biggest !== null && biggest.content.length > allowance(biggest)) {
+      const shortened = { ...biggest, content: middleCut(biggest.content, allowance(biggest)) };
+      units = units.map((unit) => unit.map((message) => (message === biggest ? shortened : message)));
+      if (head.includes(biggest)) head[head.indexOf(biggest)] = shortened;
+      continue;
+    }
+    if (units.length > 1) {
+      // Oldest first, never the last unit: that is where the request being worked on lives.
+      trimmed.dropped += units.shift().length;
+      continue;
+    }
+    if (biggest === null) break;
+    const keep = Math.max(2_000, biggest.content.length - (size() - room));
+    const shortened = { ...biggest, content: middleCut(biggest.content, keep) };
+    if (shortened.content.length >= biggest.content.length) break;
+    units = units.map((unit) => unit.map((message) => (message === biggest ? shortened : message)));
+    if (head.includes(biggest)) head[head.indexOf(biggest)] = shortened;
+  }
+
+  let final = [...head, ...flat()];
+  /*
+   * Counted from the messages themselves, not from the number of passes: the loop above can meet
+   * the same message twice, and a log that said "2 shortened" for one file would send a reader
+   * looking for a second one.
+   */
+  trimmed.cut = final.filter((message) => typeof message?.content === 'string'
+    && message.content.includes('characters omitted here')).length;
+
+  if (trimmed.dropped > 0 || trimmed.cut > 0) {
+    /*
+     * Said once, up front, where a model reading the transcript will meet it before the turns it
+     * is missing: otherwise the conversation appears to start mid-thought with no explanation.
+     */
+    const parts = [];
+    if (trimmed.dropped > 0) parts.push(`${trimmed.dropped} earlier messages were dropped`);
+    if (trimmed.cut > 0) parts.push(`${trimmed.cut} oversized messages were shortened`);
+    final = [...head, {
+      role: 'user',
+      content: `[gateway: ${parts.join(' and ')} to fit DeepAI Code's prompt limit of about `
+        + `${PROMPT_BUDGET_CHARS.toLocaleString('en-US')} characters per request]`,
+    }, ...final.slice(head.length)];
+  }
+  return { messages: final, trimmed };
+}
 
 /**
  * The text of one message, for hashing and for counting.
@@ -423,29 +616,14 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * explain a strange answer.
    */
   const arrived = promptShape(body.messages);
-  const forwarded = promptShape(messages);
-
   /*
-   * Refused before it is sent, because the alternative is not a shorter answer - it is no
-   * conversation at all.
-   *
-   * The code and the wording are OpenAI's own context-overflow error, which is what makes a
-   * client compact the conversation and ask again with a summary: a shortening it chose, that
-   * it can see, instead of the model silently answering a prompt it never received.
+   * Shortened here rather than forwarded as it is. Above the budget DeepAI does not refuse the
+   * request: it answers from an empty conversation, so the model sees nothing and says hello.
+   * A conversation cut down to fit is worse than the whole one and much better than nothing -
+   * and the log records the difference, so a shortened turn is never a mystery.
    */
-  if (forwarded.chars > PROMPT_LIMIT_CHARS) {
-    return apiError(
-      res,
-      400,
-      `This conversation carries ${forwarded.chars.toLocaleString('en-US')} characters of prompt, and DeepAI Code serves about `
-      + `${PROMPT_LIMIT_CHARS.toLocaleString('en-US')} (roughly ${Math.round(PROMPT_LIMIT_CHARS / 2.05).toLocaleString('en-US')} tokens) per request - `
-      + `far less than the ${(model?.contextWindow ?? 320000).toLocaleString('en-US')} its catalog advertises. `
-      + 'Beyond that it does not refuse the request; it answers as though the conversation were empty, which loses everything it was given. '
-      + 'Compact the conversation or start a new chat.',
-      'context_length_exceeded',
-      'invalid_request_error',
-    );
-  }
+  const { messages: sentMessages, trimmed } = fitPrompt(messages);
+  const forwarded = promptShape(sentMessages);
 
   const imageNote = imageCount === 0
     ? 'images=0'
@@ -458,7 +636,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
   const params = {
     apiKey: account.apiKey,
     model: upstreamModel,
-    messages,
+    messages: sentMessages,
     tools: body.tools,
     maxTokens: numberOrUndefined(body.max_completion_tokens ?? body.max_tokens),
     temperature: numberOrUndefined(body.temperature),
@@ -669,7 +847,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
     errorCode = undefined;
     failure = undefined;
     try {
-      await runAttempt({ ...params, messages: withoutImages(body.messages) });
+      await runAttempt({ ...params, messages: fitPrompt(withoutImages(body.messages)).messages });
     } catch (retryError) {
       status = retryError?.code === 'ABORTED' ? 499 : (retryError?.status ?? 502);
       errorCode = retryError?.code === 'ABORTED' ? 'client_closed' : (retryError?.code ?? 'gateway_error');
@@ -800,6 +978,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
     + `total=${Date.now() - startedAt}ms${waitedMs > 0 ? ` waited=${waitedMs}ms` : ''} `
     + `prompt ${arrived.count}msg/${arrived.chars}ch in, ${forwarded.count}msg/${forwarded.chars}ch out `
     + `session=${sessionId.slice(0, 8)} ${transcriptShape(body.messages)} `
+    + `${trimNote(trimmed)}`
     + imageNote);
 
   record(db, {
