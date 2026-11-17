@@ -40,6 +40,39 @@ import {
   stopSequences,
 } from '../openai.js';
 
+/**
+ * How big a prompt is, in the two units that answer different questions.
+ *
+ * `count` is how many messages the caller sent, `chars` how much text they carry. Both are
+ * counted on what arrived and again on what is forwarded, because those two numbers are the
+ * only way to answer "did this gateway cut my conversation?" from the log instead of from
+ * memory - and the answer has been asked for by someone whose history was arriving short.
+ *
+ * Nothing is decided from them: no limit, no refusal. They are written down.
+ *
+ * @param {unknown} messages - OpenAI-shaped messages.
+ * @returns {{count: number, chars: number}}
+ */
+function promptShape(messages) {
+  let chars = 0;
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (message === null || typeof message !== 'object') continue;
+    const content = message.content;
+    if (typeof content === 'string') chars += content.length;
+    else if (Array.isArray(content)) {
+      for (const part of content) {
+        if (part === null || typeof part !== 'object') continue;
+        if (typeof part.text === 'string') chars += part.text.length;
+        else if (typeof part.image_url?.url === 'string') chars += part.image_url.url.length;
+      }
+    }
+    for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
+      if (typeof call?.function?.arguments === 'string') chars += call.function.arguments.length;
+    }
+  }
+  return { count: Array.isArray(messages) ? messages.length : 0, chars };
+}
+
 /** Model used when a request omits one. */
 const FALLBACK_MODEL = 'glm-5.3-flash';
 
@@ -278,6 +311,14 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * DeepAI saying the model has no vision, `refused-recently` is this gateway's own memory
    * of a refusal (it expires), and `sent` means the image left the gateway.
    */
+  /*
+   * The same measurement on both sides of this proxy: what the caller sent, and what DeepAI is
+   * given. Images can take messages out of the second one, so the two are not always equal -
+   * and a log that only showed the first would hide that.
+   */
+  const arrived = promptShape(body.messages);
+  const forwarded = promptShape(messages);
+
   const imageNote = imageCount === 0
     ? 'images=0'
     : !catalogAcceptsImages
@@ -629,6 +670,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
   log?.(`v1 chat/completions ${upstreamModel} stream=${streamed ? 'yes' : 'no'} status=${status} `
     + `catalog=${catalogMs}ms first-event=${firstEventMs ?? '-'}ms first-token=${firstTokenMs ?? '-'}ms `
     + `total=${Date.now() - startedAt}ms${waitedMs > 0 ? ` waited=${waitedMs}ms` : ''} `
+    + `prompt ${arrived.count}msg/${arrived.chars}ch in, ${forwarded.count}msg/${forwarded.chars}ch out `
     + imageNote);
 
   record(db, {
