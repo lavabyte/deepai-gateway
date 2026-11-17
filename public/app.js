@@ -307,7 +307,7 @@ function signInRoutes(prefix = '') {
   const callback = signInCallbackUrl();
   return `
     <section class="step" id="${prefix}signin-step">
-      <p class="note note--attention" id="${prefix}signin-social-only">${t('signin.socialOnly')}</p>
+      <p class="note note--info" id="${prefix}signin-social-only">${t('signin.socialOnly')}</p>
       <div class="note note--attention">
         <ol class="step__list">
           <li>${t('signin.stepAuthenticate')} <strong>DeepAI</strong></li>

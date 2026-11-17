@@ -394,6 +394,19 @@ html[data-theme="dark"] .brand__logo--on-dark { display: block; }
 .note--attention .step__list { margin: 0; padding-left: 20px; }
 .note--attention li { margin: 4px 0; }
 .note--attention strong { font-weight: 600; }
+/*
+ * The rule about which DeepAI accounts work, stated before the steps rather than after them.
+ *
+ * Blue, not amber: nothing has gone wrong here and nothing needs fixing - it is how the
+ * service is built - and the amber box below it is the instructions, which must not look like
+ * the same kind of message. Margin above and below, because this line introduces the steps and
+ * has to sit apart from both the heading and the box it explains.
+ */
+.note--info {
+  background: var(--badge-blue-bg); border-color: var(--badge-blue-tx); color: var(--badge-blue-tx);
+  margin: 16px 0;
+}
+
 /* The short film of the three steps, at the foot of the box it belongs to. */
 .signin-tutorial { margin-top: 10px; font-weight: 600; }
 .signin-video {
