@@ -350,12 +350,12 @@ export function createCallbackLogin(db, runtime, options = {}) {
      * Ask the lane about the key it just issued, before this is called a sign-in.
      *
      * DeepAI keeps ordinary API keys and DeepAI Code keys apart, and an exchange can produce
-     * the first kind - the website accepts it and `/deepai_code` refuses it - or an account
-     * without Code access can sign in and get nothing usable. Either way the account card
-     * showed "Active", the balance a dash and a refusal nobody could act on. The read costs one
-     * request and turns that into a sentence at the moment of signing in.
+     * the first kind - the website accepts it and `/deepai_code` refuses it - so the account
+     * card would show "Active", the balance a dash, and a refusal nobody could act on.
+     *
+     * Three answers, not two: `true` accepted, `false` refused, `undefined` the gateway does
+     * not know. Only the middle one becomes a sentence about the account.
      */
-    // `true` accepted, `false` refused, `undefined` not known - and unknown is not a refusal.
     const codeAccess = stored ? await laneServesKey(account.apiKey) : undefined;
     return { stored, codeAccess };
   };
