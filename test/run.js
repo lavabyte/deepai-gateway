@@ -5425,6 +5425,7 @@ await checkAsync('a sign-in reports DeepAI\'s own refusal, and invents nothing w
    */
   const { createCallbackLogin } = await import('../src/deepai/callback-login.js');
   const { openDatabase } = await import('../src/db.js');
+  const { readAccount } = await import('../src/store.js');
   const express = (await import('express')).default;
   const realFetch = globalThis.fetch;
   let theos = 200;
@@ -5433,7 +5434,8 @@ await checkAsync('a sign-in reports DeepAI\'s own refusal, and invents nothing w
     const target = String(url);
     if (target.includes('desktop_auth/exchange')) {
       exchangeCalls += 1;
-      return new Response(JSON.stringify({ api_key: 'a-key', username: 'someone', is_pro: false }),
+      // A distinct account per attempt, so "nothing was stored" is a statement about this one.
+      return new Response(JSON.stringify({ api_key: 'a-key', username: `user${exchangeCalls}`, is_pro: false }),
         { status: 200, headers: { 'content-type': 'application/json' } });
     }
     if (target.includes('/deepai_code/theos')) {
@@ -5463,18 +5465,30 @@ await checkAsync('a sign-in reports DeepAI\'s own refusal, and invents nothing w
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ url: `http://127.0.0.1:8080/callback?code=c&state=${state}` }),
         });
-        return { status: response.status, body: await response.json() };
+        return {
+          status: response.status,
+          body: await response.json(),
+          cookie: response.headers.get('set-cookie') ?? '',
+        };
       };
 
       const accepted = await signIn();
       assert.equal(accepted.status, 200);
       assert.equal(accepted.body.codeAccess, undefined, 'an ordinary sign-in says nothing extra');
 
+      /*
+       * And an account DeepAI will not serve is not signed in at all. No session, no row: a
+       * dashboard showing somebody signed in while every request of theirs is refused is a
+       * worse answer than a plain refusal, because nothing they do there can work.
+       */
       theos = 403;
       const social = await signIn();
-      assert.equal(social.body.ok, true, 'the sign-in itself still happened');
-      assert.equal(social.body.codeAccess, 'social-login-required',
-        "and DeepAI's own reason reaches the dashboard");
+      assert.equal(social.status, 403, 'a refused account is refused, not warned about');
+      assert.equal(social.body.ok, false);
+      assert.equal(social.body.code, 'social-login-required');
+      assert.equal(social.cookie, '', 'no session cookie is handed to an account DeepAI refuses');
+      assert.notEqual(readAccount(db, 'user1'), undefined, 'an accepted account is stored');
+      assert.equal(readAccount(db, 'user2'), undefined, 'a refused one is not');
 
       for (const [name, status] of [['a retired lane', 426], ['a server error', 502], ['a dead network', 'network']]) {
         theos = status;
@@ -5501,6 +5515,7 @@ await checkAsync('the exchange reproduces the app, including the one retry that 
    */
   const { createCallbackLogin } = await import('../src/deepai/callback-login.js');
   const { openDatabase } = await import('../src/db.js');
+  const { readAccount } = await import('../src/store.js');
   const express = (await import('express')).default;
   const realFetch = globalThis.fetch;
 

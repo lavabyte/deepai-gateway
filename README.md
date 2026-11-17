@@ -140,6 +140,11 @@ variable - the account is. DeepAI Code has no path for an address registered wit
 and no client can produce one: the desktop app's sign-in is the same URL, the same exchange and
 the same headers, byte for byte.
 
+A refused account is therefore **not signed in**: the gateway probes DeepAI before it writes
+anything, so a sign-in that DeepAI will not serve leaves no session, no stored account and no
+dashboard that pretends otherwise. It answers 403 with the reason, and the sign-in card states
+the rule before anybody starts.
+
 Two consequences are built in here. **The catalog is not proof of access** - it is served with
 200 to an account that cannot send a single completion - so nothing is concluded from it.
 And a refusal DeepAI named is said in its own terms, kept on the account so a reload still

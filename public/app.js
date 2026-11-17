@@ -307,6 +307,7 @@ function signInRoutes(prefix = '') {
   const callback = signInCallbackUrl();
   return `
     <section class="step" id="${prefix}signin-step">
+      <p class="note note--attention" id="${prefix}signin-social-only">${t('signin.socialOnly')}</p>
       <div class="note note--attention">
         <ol class="step__list">
           <li>${t('signin.stepAuthenticate')} <strong>DeepAI</strong></li>
@@ -405,37 +406,31 @@ async function finishBrowserLogin(prefix = '') {
     button.textContent = t('signin.signingIn');
   }
   try {
-    const completed = await api('/login/complete', { method: 'POST', body: { url: text } });
+    /*
+     * A refused account never arrives here as a success: the server does not store it, does
+     * not start a session and answers 403, so there is no "signed in" state to correct
+     * afterwards. What comes back through `api()` is the refusal itself.
+     */
+    await api('/login/complete', { method: 'POST', body: { url: text } });
     if (field) field.value = '';
     await afterSignIn();
     if (state.account?.signedIn === true) {
-      /*
-       * A sign-in whose key DeepAI Code refuses is not a sign-in anybody can use, so it is
-       * said at once and in the place the fix is: the key field below. Saying "logged in" and
-       * leaving a dash where the balance belongs is how this looked for a day.
-       */
-      /*
-       * Three answers, not two: the key was accepted, it was refused, or the read that would
-       * tell was not one the lane answered. Only the middle one is the account's problem, and
-       * turning an unanswered read into "DeepAI Code does not accept this key" is how a
-       * working sign-in got reported as a broken one.
-       */
-      toast(
-        completed.codeAccess === 'social-login-required'
-          ? t('signin.socialLoginRequired')
-          : t('signin.loggedIn'),
-        completed.codeAccess === 'social-login-required' ? 'error' : undefined,
-      );
-      /*
-       * A refused sign-in is the moment the evidence is worth having, and asking for a second
-       * click to get it is asking the reader to reproduce a failure on purpose.
-       */
-      if (completed.codeAccess === 'social-login-required') await runDiagnose();
+      toast(t('signin.loggedIn'));
     } else {
       toast(t('error.http', { status: 401 }), 'error');
     }
   } catch (error) {
-    toast(failureMessage(error), 'error');
+    /*
+     * DeepAI Code does not serve this account - it is not a bad key, and no amount of signing
+     * in again changes it - so it is said in those words, and the endpoint report is run so
+     * the answer that said it is on the screen rather than in a log the visitor cannot read.
+     */
+    if (error?.code === 'social-login-required') {
+      toast(t('signin.socialNotSupported'), 'error');
+      await runDiagnose();
+    } else {
+      toast(failureMessage(error), 'error');
+    }
     if (button) {
       button.disabled = false;
       button.textContent = label ?? t('signin.loginToGateway');

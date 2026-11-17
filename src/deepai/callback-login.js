@@ -229,6 +229,18 @@ async function codeAccessAfterSignIn(apiKey) {
 }
 
 /**
+ * What a visitor whose account DeepAI Code will not serve is told.
+ *
+ * The same words on the HTML page and in the JSON: DeepAI Code is for accounts signed in with
+ * Google or Apple, and an address registered with a password is not something this gateway
+ * can fix, fake or work around. Saying "signed in" and then failing every request would be
+ * the same refusal in a friendlier voice.
+ */
+const NOT_SUPPORTED = 'DeepAI Code is available only to accounts signed in with Google or Apple. '
+  + 'This account uses an email address and a password, which DeepAI Code does not support yet. '
+  + 'Sign in to DeepAI with Google or Apple instead.';
+
+/**
  * What each completion failure says to the visitor.
  *
  * Read by someone looking at a page that would not load, not at a protocol.
@@ -339,6 +351,23 @@ export function createCallbackLogin(db, runtime, options = {}) {
    */
   const finish = async (res, account) => {
     const username = account.username !== '' ? account.username : usernameForKey(account.apiKey);
+    /*
+     * Ask DeepAI about this account before anything is written, because the answer decides
+     * whether this sign-in happens at all.
+     *
+     * DeepAI Code refuses accounts it cannot serve - today every address registered with a
+     * password, answered `403 social_login_required` - and that refusal is about the account,
+     * not about the key it was just handed. Storing the account anyway would leave somebody
+     * signed in to a gateway in which every single request of theirs fails, and no later
+     * screen could undo that first impression.
+     *
+     * So the order matters: probe, then decide. For a refused account nothing is written, no
+     * session cookie is set and no row is created. The caller turns this into the one honest
+     * answer - "this account is not supported" - instead of a welcome and a silent failure.
+     */
+    const codeAccess = await codeAccessAfterSignIn(account.apiKey);
+    if (codeAccess === 'social-login-required') return { stored: false, codeAccess };
+
     const completed = completeLogin(db, runtime, {
       apiKey: account.apiKey,
       username,
@@ -346,18 +375,6 @@ export function createCallbackLogin(db, runtime, options = {}) {
     }, { secure: runtime.trustProxy === true });
     res.setHeader('set-cookie', completed.cookie);
     const stored = readAccount(db, completed.username)?.apiKey === account.apiKey;
-    /*
-     * Ask the lane about the key it just issued, before this is called a sign-in.
-     *
-     * DeepAI keeps ordinary API keys and DeepAI Code keys apart, and an exchange can produce
-     * the first kind - the website accepts it and `/deepai_code` refuses it - so the account
-     * card would show "Active", the balance a dash, and a refusal nobody could act on.
-     *
-     * Three answers, not two: `true` accepted, `false` refused, `undefined` the gateway does
-     * not know. Only the middle one becomes a sentence about the account.
-     */
-    // Only DeepAI's own named refusal is reported; everything else stays unsaid.
-    const codeAccess = stored ? await codeAccessAfterSignIn(account.apiKey) : undefined;
     return { stored, codeAccess };
   };
 
@@ -405,13 +422,15 @@ export function createCallbackLogin(db, runtime, options = {}) {
     const result = await redeem(req.query.code, req.query.state);
     if (result.ok) {
       const { stored, codeAccess } = await finish(res, result);
+      // Asked before `stored`: an account DeepAI refuses was never written, and "the key could
+      // not be saved" would send the visitor to their operator about something nobody controls.
+      if (codeAccess === 'social-login-required') {
+        // A refusal, not a warning: nothing was stored and there is no session to hand out.
+        runtime.log?.('callback sign-in refused: DeepAI Code does not serve this account');
+        return res.status(403).type('html').send(page('This account is not supported', NOT_SUPPORTED));
+      }
       if (!stored) return res.status(500).type('html').send(page('Sign-in failed',
         'The DeepAI key could not be saved on this gateway. Sign in again after an operator fixes the database.'));
-      if (codeAccess === 'social-login-required') {
-        runtime.log?.('callback sign-in: DeepAI wants a Google or Apple sign-in for DeepAI Code');
-        return res.status(200).type('html').send(page('Signed in, but DeepAI Code needs Google or Apple',
-          'DeepAI Code is available only to accounts signed in with Google or Apple. Sign out and sign in again with Google or Apple.'));
-      }
       runtime.log?.('callback sign-in completed');
       return res.redirect(302, '/');
     }
@@ -446,6 +465,15 @@ export function createCallbackLogin(db, runtime, options = {}) {
        * process cannot write) rather than leaving the reader to infer it from a refusal later.
        */
       const { stored, codeAccess } = await finish(res, result);
+      /*
+       * The refused account is answered first: `stored` is false for it too, and saying the
+       * database was not writable would send the visitor to their operator about something no
+       * operator can change.
+       */
+      if (codeAccess === 'social-login-required') {
+        runtime.log?.('sign-in refused: DeepAI Code does not serve this account');
+        return res.status(403).json({ ok: false, error: NOT_SUPPORTED, code: 'social-login-required' });
+      }
       if (stored !== true) {
         runtime.log?.('sign-in: the exchanged key could not be stored - refusing to report success');
         return res.status(500).json({
