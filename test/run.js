@@ -4191,6 +4191,94 @@ await checkAsync('an image the backend refuses is retried as text, not reported 
   }
 });
 
+await checkAsync('every conversation gets its own session, as it does in the app', async () => {
+  /*
+   * The desktop app gives each conversation an id of its own and sends it as the session
+   * affinity headers. This gateway sent one value - the gateway key's id - for every
+   * conversation of every caller, which is a thing the app never does.
+   *
+   * DeepAI's own `409 session_busy` is the tell that a session means one conversation: it is
+   * how the endpoint says "that session is in use", and it can only mean that if a session is
+   * a conversation. Unrelated conversations sharing one id were therefore sharing a session,
+   * and the symptom reported from a harness on the other end of this proxy was a working
+   * conversation answered as though it had just been opened - "Hi, how can I help you today?"
+   * in the middle of a task.
+   *
+   * So the id is derived from the conversation's opening - the system prompt and the first
+   * user message - which is stable for every turn of one conversation and different between
+   * conversations. Only a caller that sends its own id overrides it, because then it knows
+   * its conversations better than this does.
+   */
+  const { openDatabase } = await import('../src/db.js');
+  const { saveAccount } = await import('../src/store.js');
+  const { generateKey } = await import('../src/keys.js');
+  const { createApp } = await import('../server.js');
+
+  const db = openDatabase(':memory:');
+  saveAccount(db, { apiKey: 'upstream', username: 'session-user', isPro: false });
+  const key = generateKey();
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'session-user')`).run(key.hash);
+
+  const realFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url, init) => {
+    if (!String(url).includes('api.deepai.org')) return realFetch(url, init);
+    if (String(url).includes('deepai_code/models')) {
+      return new Response(JSON.stringify(CATALOG_PAYLOAD), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    seen.push({ session: String(init.headers?.session_id ?? init.headers?.get?.('session_id') ?? ''), body: JSON.parse(init.body) });
+    return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+
+  const app = createApp(db, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const ask = (messages, extraHeaders = {}) => realFetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key.plaintext}`, 'content-type': 'application/json', ...extraHeaders },
+    body: JSON.stringify({ model: 'glm-5.3-flash', messages, stream: true }),
+  });
+
+  const system = { role: 'system', content: 'You are a coding agent.' };
+  const task = { role: 'user', content: 'Refactor the login form.' };
+  const turn = (n) => [
+    system,
+    task,
+    ...Array.from({ length: n }, (_, i) => ({ role: i % 2 === 0 ? 'assistant' : 'user', content: `turn ${i}` })),
+    { role: 'user', content: 'go on' },
+  ];
+
+  try {
+    await ask(turn(0));
+    await ask(turn(2));
+    await ask(turn(4));
+    assert.equal(seen.length, 3);
+    const [first, second, third] = seen.map((call) => call.session);
+    assert.equal(second, first, 'the same conversation keeps its session id as it grows');
+    assert.equal(third, first, 'and still does forty turns later');
+    assert.notEqual(first, 'k1', 'the gateway key is not a conversation');
+    assert.equal(first.length, 32, 'the id has the shape DeepAI uses');
+
+    // A different conversation, from the same key, is a different session.
+    await ask([system, { role: 'user', content: 'Write a changelog.' }]);
+    assert.notEqual(seen[3].session, first, 'a second conversation does not join the first one');
+
+    // A caller that knows better wins.
+    await ask(turn(0), { 'x-session-id': 'caller-chosen-session' });
+    assert.equal(seen[4].session, 'caller-chosen-session', 'an id the caller sends is forwarded as sent');
+
+    // And the transcript reaches DeepAI with its system prompt first, as it arrived.
+    assert.equal(seen[1].body.messages[0].role, 'system', 'the system prompt is still first');
+    assert.equal(seen[1].body.messages.length, turn(2).length, 'and no message went missing');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 await checkAsync('the reasoning effort reaches DeepAI however the caller spells it', async () => {
   /*
    * Reported as "effort is not sent". Three separate reasons it could be, and all were real:

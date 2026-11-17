@@ -11,7 +11,7 @@
  * @module deepai-gateway/api/v1
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import express from 'express';
 import {
   CatalogUnavailable,
@@ -71,6 +71,69 @@ function promptShape(messages) {
     }
   }
   return { count: Array.isArray(messages) ? messages.length : 0, chars };
+}
+
+/**
+ * The text of one message, for hashing and for counting.
+ *
+ * @param {unknown} message
+ * @returns {string}
+ */
+function messageText(message) {
+  if (message === null || typeof message !== 'object') return '';
+  const content = message.content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  let text = '';
+  for (const part of content) {
+    if (part !== null && typeof part === 'object' && typeof part.text === 'string') text += part.text;
+  }
+  return text;
+}
+
+/**
+ * A stable id for one conversation, derived from how it begins.
+ *
+ * The system prompt and the first user message are what every turn of a conversation carries
+ * unchanged, so hashing them gives an id that is the same on turn 1 and turn 40 and different
+ * from another conversation's. Only the first few thousand characters are hashed: enough to
+ * tell conversations apart, little enough that the hash costs nothing on a long prompt.
+ *
+ * @param {unknown} messages
+ * @returns {string} 32 hex characters, the shape DeepAI's own session ids have.
+ */
+function conversationId(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  const system = list.find((message) => message?.role === 'system' || message?.role === 'developer');
+  const firstUser = list.find((message) => message?.role === 'user');
+  const seed = `${messageText(system).slice(0, 4096)}\u0000${messageText(firstUser).slice(0, 4096)}`;
+  return createHash('sha256').update(seed, 'utf8').digest('hex').slice(0, 32);
+}
+
+/**
+ * The transcript in one readable line: how many of each role, and whether a system prompt is
+ * among them.
+ *
+ * An answer that says "Hi, how can I help you today?" to a working conversation and an answer
+ * to a conversation that arrived without its system prompt look identical from outside. This
+ * is what tells them apart in a log, without writing anybody's prompt into it.
+ *
+ * @param {unknown} messages
+ * @returns {string}
+ */
+function transcriptShape(messages) {
+  const counts = new Map();
+  let systemFirst = false;
+  const list = Array.isArray(messages) ? messages : [];
+  for (const [index, message] of list.entries()) {
+    const role = typeof message?.role === 'string' ? message.role : 'none';
+    if (index === 0 && (role === 'system' || role === 'developer')) systemFirst = true;
+    const toolCall = Array.isArray(message?.tool_calls) && message.tool_calls.length > 0;
+    const label = toolCall ? `${role}+tool_calls` : role;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const parts = [...counts].map(([label, count]) => `${label}:${count}`);
+  return `${systemFirst ? 'sys-first' : 'NO-SYSTEM-FIRST'} ${parts.join(',')}`;
 }
 
 /** Model used when a request omits one. */
@@ -277,8 +340,23 @@ async function handleChatCompletion(db, req, res, options = {}) {
   const usesResponses = model?.api === 'openai-responses';
 
   const streamed = body.stream === true;
-  // The session id groups a caller's requests for upstream prompt-cache affinity.
-  const sessionId = req.get('x-session-id') ?? req.gatewayKey.id;
+  /*
+   * The session id is what DeepAI keeps a conversation's affinity on, and this gateway used to
+   * send one value - the gateway key's id - for every conversation of every caller.
+   *
+   * That is not what the desktop app does: it sends an id of its own per conversation, and the
+   * endpoint uses it for more than caching. Its own error code is `session_busy`, a `409` it
+   * answers by waiting for the same session, which is only coherent if a session means one
+   * conversation. Sending one id for all of them put unrelated conversations into the same
+   * session, and the visible symptom was the model answering a working conversation as though
+   * it had just been opened: "Hi, how can I help you today?" in the middle of a task.
+   *
+   * So a caller's own id still wins, and otherwise one is derived from the conversation's own
+   * beginning - the system prompt and the first user message - which stays the same for every
+   * turn of that conversation and differs between conversations. Two identical conversations
+   * share an id, which is right: their prompts are identical anyway.
+   */
+  const sessionId = req.get('x-session-id') ?? conversationId(body.messages);
 
   /*
    * An image is only sent to a model that can actually take one.
@@ -671,6 +749,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
     + `catalog=${catalogMs}ms first-event=${firstEventMs ?? '-'}ms first-token=${firstTokenMs ?? '-'}ms `
     + `total=${Date.now() - startedAt}ms${waitedMs > 0 ? ` waited=${waitedMs}ms` : ''} `
     + `prompt ${arrived.count}msg/${arrived.chars}ch in, ${forwarded.count}msg/${forwarded.chars}ch out `
+    + `session=${sessionId.slice(0, 8)} ${transcriptShape(body.messages)} `
     + imageNote);
 
   record(db, {
