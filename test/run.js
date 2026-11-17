@@ -4191,6 +4191,68 @@ await checkAsync('an image the backend refuses is retried as text, not reported 
   }
 });
 
+await checkAsync('a prompt DeepAI would answer with nothing is refused, not sent', async () => {
+  /*
+   * Measured on the live endpoint with incompressible content: 150,189 characters of prompt are
+   * read whole (markers at 5%, 50% and 95% came back), 200,000 characters come back as a
+   * completion with no content, and 300,000 as 246 prompt tokens with the model saying it was
+   * never shown a file.
+   *
+   * So this is not about a client's token estimate: above the wall the model receives an empty
+   * conversation and answers a question nobody asked, which is the greeting reported from a
+   * harness mid-task. The gateway refuses it instead, with the error clients already know how to
+   * recover from.
+   */
+  const { openDatabase } = await import('../src/db.js');
+  const { saveAccount } = await import('../src/store.js');
+  const { generateKey } = await import('../src/keys.js');
+  const { createApp: createAppForLimit } = await import('../server.js');
+
+  const db2 = openDatabase(':memory:');
+  saveAccount(db2, { apiKey: 'upstream', username: 'limit-user', isPro: false });
+  const key = generateKey();
+  db2.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'limit-user')`).run(key.hash);
+
+  const realFetch = globalThis.fetch;
+  let upstreamCalls = 0;
+  globalThis.fetch = async (url, init) => {
+    if (!String(url).includes('api.deepai.org')) return realFetch(url, init);
+    if (String(url).includes('deepai_code/models')) {
+      return new Response(JSON.stringify(CATALOG_PAYLOAD), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    upstreamCalls += 1;
+    return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+
+  const app2 = createAppForLimit(db2, { log: () => {}, logRequests: false });
+  const server2 = app2.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server2.once('listening', resolve));
+  const base2 = `http://127.0.0.1:${server2.address().port}`;
+  const send = (chars) => realFetch(`${base2}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key.plaintext}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'glm-5.3-flash', messages: [{ role: 'user', content: 'x'.repeat(chars) }], stream: false }),
+  });
+
+  try {
+    const inside = await send(140_000);
+    assert.equal(inside.status, 200, 'a prompt below the wall is served');
+    assert.equal(upstreamCalls, 1);
+
+    const over = await send(160_000);
+    assert.equal(over.status, 400, 'one above it is refused');
+    const payload = await over.json();
+    assert.equal(payload.error?.code, 'context_length_exceeded');
+    assert.equal(upstreamCalls, 1, 'and nothing was sent upstream for it');
+    assert.match(payload.error?.message ?? '', /exceeds|DeepAI Code serves|Compact/i);
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server2.close(resolve));
+  }
+});
+
 await checkAsync('every conversation gets its own session, as it does in the app', async () => {
   /*
    * The desktop app gives each conversation an id of its own and sends it as the session

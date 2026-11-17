@@ -150,6 +150,38 @@ Two consequences are built in here. **The catalog is not proof of access** - it 
 And a refusal DeepAI named is said in its own terms, kept on the account so a reload still
 explains it, and never paraphrased as "the key was rejected".
 
+### The context window: 320,000 is what the catalog says, not what is served
+
+Measured against the live endpoint with content that cannot be compressed by a tokenizer and
+cannot be served from a prompt cache (random six-letter words), so size is the only variable:
+
+| prompt sent | reported | what came back |
+| --- | --- | --- |
+| 150,189 chars | 73,195 tokens | whole - markers placed at 5%, 50% and 95% of the body were all read back |
+| 190,062 chars | 93,463 tokens | answered |
+| 200,111 chars | none | a completion with **no content at all** |
+| 200,062 chars | 291 tokens | the model answered as though nothing had been sent |
+| 300,142 chars (tool result) | 246 tokens | "I haven't been shown any file in this conversation" |
+| 600,189 chars | 216 tokens | "No long text was provided" |
+
+Splitting the oversized message does not help: 200,000 characters cut into three messages still
+came back empty, and a 300,000-character tool result split into four tool messages for the same
+call was dropped as well. The wall is the size of the prompt, not of a message.
+
+So the largest prompt verified to arrive whole is about 150,000 characters - 73,000 tokens of
+incompressible text, about 36,000 of ordinary prose - well under the 320,000 every model
+advertises. Past it the endpoint does not refuse: it answers as though the conversation were
+empty, which is exactly the "Hi, how can I help you today?" a harness gets in the middle of a
+task, depending on whether that turn happened to carry a large tool output.
+
+The DeepAI Code app never meets this wall because it truncates its own tool output (a file read
+is capped, bash output is capped) and compacts as it goes, so it never sends a prompt that big.
+That the app works is not evidence about the size of the window.
+
+The gateway therefore refuses a prompt above 150,000 characters with OpenAI's own
+`context_length_exceeded`, which is the signal a client knows how to answer - compact and ask
+again - rather than forwarding one that will be answered from an empty conversation.
+
 ### A balance is not the same as access
 
 DeepAI answers three different questions about one key, and they can disagree:

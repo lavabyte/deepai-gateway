@@ -74,6 +74,33 @@ function promptShape(messages) {
 }
 
 /**
+ * The largest prompt this gateway will forward, in characters of message content.
+ *
+ * Measured against the live endpoint with content that cannot be compressed by a tokenizer or
+ * served from a prompt cache (random six-letter words), so the only variables left are size and
+ * what DeepAI does with it:
+ *
+ *    150,189 chars  -> 73,195 prompt tokens, and markers placed at 5%, 50% and 95% of the body
+ *                       were all read back
+ *    190,062 chars  -> 93,463 prompt tokens, answered
+ *    200,111 chars  -> the completion came back empty; DeepAI reported no usage at all
+ *    200,062 chars  -> 291 prompt tokens, the model answered as though nothing had been sent
+ *    300,142 chars  -> 246 prompt tokens, "I haven't been shown any file in this conversation"
+ *    600,189 chars  -> 216 prompt tokens, "No long text was provided"
+ *
+ * Cutting the oversized message into several smaller ones does not help: 200,000 characters
+ * split into three messages still came back empty, and a 300,000-character tool result split
+ * into four tool messages for the same call was dropped as well. The wall is the size of the
+ * prompt, not the size of a message.
+ *
+ * So the largest size verified to arrive whole is 150,000 characters - roughly 73,000 tokens,
+ * well under the 320,000 the catalog advertises for every model. Beyond it the endpoint does
+ * not refuse; it answers as though the conversation were empty, which is the "Hi, how can I
+ * help you today?" a harness gets in the middle of a task.
+ */
+const PROMPT_LIMIT_CHARS = 150_000;
+
+/**
  * The text of one message, for hashing and for counting.
  *
  * @param {unknown} message
@@ -391,11 +418,34 @@ async function handleChatCompletion(db, req, res, options = {}) {
    */
   /*
    * The same measurement on both sides of this proxy: what the caller sent, and what DeepAI is
-   * given. Images can take messages out of the second one, so the two are not always equal -
-   * and a log that only showed the first would hide that.
+   * given. An image can take a message out of the second one, so the two are not always equal -
+   * and a log that only showed the first would hide exactly the change a reader would need to
+   * explain a strange answer.
    */
   const arrived = promptShape(body.messages);
   const forwarded = promptShape(messages);
+
+  /*
+   * Refused before it is sent, because the alternative is not a shorter answer - it is no
+   * conversation at all.
+   *
+   * The code and the wording are OpenAI's own context-overflow error, which is what makes a
+   * client compact the conversation and ask again with a summary: a shortening it chose, that
+   * it can see, instead of the model silently answering a prompt it never received.
+   */
+  if (forwarded.chars > PROMPT_LIMIT_CHARS) {
+    return apiError(
+      res,
+      400,
+      `This conversation carries ${forwarded.chars.toLocaleString('en-US')} characters of prompt, and DeepAI Code serves about `
+      + `${PROMPT_LIMIT_CHARS.toLocaleString('en-US')} (roughly ${Math.round(PROMPT_LIMIT_CHARS / 2.05).toLocaleString('en-US')} tokens) per request - `
+      + `far less than the ${(model?.contextWindow ?? 320000).toLocaleString('en-US')} its catalog advertises. `
+      + 'Beyond that it does not refuse the request; it answers as though the conversation were empty, which loses everything it was given. '
+      + 'Compact the conversation or start a new chat.',
+      'context_length_exceeded',
+      'invalid_request_error',
+    );
+  }
 
   const imageNote = imageCount === 0
     ? 'images=0'
