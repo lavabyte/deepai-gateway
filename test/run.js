@@ -4191,6 +4191,90 @@ await checkAsync('an image the backend refuses is retried as text, not reported 
   }
 });
 
+await checkAsync('a conversation longer than DeepAI serves is refused, not silently cut', async () => {
+  /*
+   * Measured against the live endpoint: the catalog advertises 320,000 tokens of context, and
+   * past about 38,500 tokens of prompt DeepAI keeps part of the request and answers anyway - no
+   * error, `finish_reason: "stop"`, and the beginning of the conversation gone. A caller cannot
+   * see that from the answer, and a model that never read the first half of a conversation
+   * still answers confidently about it.
+   *
+   * So the gateway refuses what would be cut, in the shape of OpenAI's own context-overflow
+   * error: that is the signal clients understand, and the one that makes them compact the
+   * conversation and ask again instead of showing a mystery.
+   */
+  const { openDatabase } = await import('../src/db.js');
+  const { saveAccount } = await import('../src/store.js');
+  const { generateKey } = await import('../src/keys.js');
+  const { createApp } = await import('../server.js');
+  const { PROMPT_BUDGET_CHARS, promptSize } = await import('../src/deepai/limits.js');
+
+  const db = openDatabase(':memory:');
+  saveAccount(db, { apiKey: 'upstream', username: 'long-user', isPro: false });
+  const key = generateKey();
+  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'long-user')`).run(key.hash);
+
+  const realFetch = globalThis.fetch;
+  let upstreamCalls = 0;
+  globalThis.fetch = async (url, init) => {
+    if (!String(url).includes('api.deepai.org')) return realFetch(url, init);
+    if (String(url).includes('deepai_code/models')) {
+      return new Response(JSON.stringify(CATALOG_PAYLOAD), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    upstreamCalls += 1;
+    return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+
+  const app = createApp(db, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const ask = (messages) => realFetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key.plaintext}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'glm-5.3-flash', messages, stream: false }),
+  });
+
+  try {
+    // A prompt comfortably inside the budget is served.
+    const inside = await ask([{ role: 'user', content: 'x'.repeat(100_000) }]);
+    assert.equal(inside.status, 200, 'a 100k-character prompt is inside what DeepAI serves');
+    assert.equal(upstreamCalls, 1);
+
+    // One over it is refused before anything is sent, and the sentence says what to do.
+    const tooLong = await ask([{ role: 'user', content: 'x'.repeat(PROMPT_BUDGET_CHARS + 1_000) }]);
+    assert.equal(tooLong.status, 400);
+    const error = await tooLong.json();
+    assert.equal(error.error?.code, 'context_length_exceeded');
+    assert.equal(upstreamCalls, 1, 'nothing was sent upstream for a request that would be cut');
+    /*
+     * A client recognises its own overflow handling by these words - the same ones OpenAI uses -
+     * so the sentence has to contain them rather than a phrase of this gateway's own.
+     */
+    assert.match(error.error?.message ?? '', /exceeds the maximum context length/i);
+    assert.match(error.error?.message ?? '', /compact/i);
+
+    /*
+     * The measurement itself, so the budget cannot drift away from what it claims while the
+     * gateway keeps saying 180,000 as though it still meant something.
+     */
+    const size = promptSize([{ role: 'user', content: 'x'.repeat(5_000) }]);
+    assert.equal(size.chars >= 5_000, true, 'content is counted');
+    assert.equal(size.tokens, Math.ceil(size.chars / 5), 'and reported in tokens at the measured ratio');
+    /*
+     * Nothing is concluded from `prompt_tokens` afterwards: DeepAI reports cached prefix tokens
+     * separately, so a 21,000-token prompt can come back as `prompt_tokens: 5` while the answer
+     * proves it read all of it. A warning built on that number would be wrong more often than
+     * right, and a false alarm about a truncated history is worse than none.
+     */
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 await checkAsync('the reasoning effort reaches DeepAI however the caller spells it', async () => {
   /*
    * Reported as "effort is not sent". Three separate reasons it could be, and all were real:
