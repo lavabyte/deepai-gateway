@@ -25,7 +25,6 @@ import {
 import { streamChatCompletion, streamResponsesCompletion } from '../deepai/client.js';
 import { UpstreamError } from '../deepai/wire.js';
 import { acceptsImages, countImages, withoutImages } from '../deepai/images.js';
-import { PROMPT_BUDGET_CHARS, promptSize } from '../deepai/limits.js';
 import { isMultimodalRejection, noteMultimodalRejection, rejectsImages } from '../deepai/multimodal.js';
 import { allowsModel } from '../keys.js';
 import { authenticate, enforceModel, apiError } from '../middleware/auth.js';
@@ -279,34 +278,6 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * DeepAI saying the model has no vision, `refused-recently` is this gateway's own memory
    * of a refusal (it expires), and `sent` means the image left the gateway.
    */
-  /*
-   * DeepAI serves about 38,500 tokens of prompt per request, and its catalog says 320,000.
-   *
-   * Past that budget it does not fail - it keeps part of the prompt and answers anyway, with
-   * `finish_reason: "stop"` and no error anywhere; measured, a 260 KB body arrived as 38,713
-   * tokens, a quarter of it gone, and the quarter it drops is the oldest turns. A long
-   * conversation is therefore answered by a model that never saw its beginning, which is the
-   * "my history got cut" this gateway used to be blamed for.
-   *
-   * So it is refused instead, in the shape OpenAI uses for its own context limit. Clients that
-   * know the pattern compact the conversation and ask again with a summary - a deliberate
-   * shortening they can see - rather than a silent one they cannot.
-   */
-  const size = promptSize(messages);
-  if (size.chars > PROMPT_BUDGET_CHARS) {
-    const budgetTokens = Math.ceil(PROMPT_BUDGET_CHARS / 5);
-    return apiError(
-      res,
-      400,
-      `This conversation is ${size.chars.toLocaleString('en-US')} characters (about ${size.tokens.toLocaleString('en-US')} tokens), `
-      + `which exceeds the maximum context length DeepAI Code serves: about ${PROMPT_BUDGET_CHARS.toLocaleString('en-US')} characters (about ${budgetTokens.toLocaleString('en-US')} tokens). `
-      + `DeepAI advertises ${model?.contextWindow ?? 'a larger'} tokens for "${upstreamModel}", but past that budget its endpoint silently drops the beginning of the prompt instead of refusing it. `
-      + 'Compact the conversation, start a new chat, or send less of it at once.',
-      'context_length_exceeded',
-      'invalid_request_error',
-    );
-  }
-
   const imageNote = imageCount === 0
     ? 'images=0'
     : !catalogAcceptsImages
@@ -658,7 +629,6 @@ async function handleChatCompletion(db, req, res, options = {}) {
   log?.(`v1 chat/completions ${upstreamModel} stream=${streamed ? 'yes' : 'no'} status=${status} `
     + `catalog=${catalogMs}ms first-event=${firstEventMs ?? '-'}ms first-token=${firstTokenMs ?? '-'}ms `
     + `total=${Date.now() - startedAt}ms${waitedMs > 0 ? ` waited=${waitedMs}ms` : ''} `
-    + `prompt~${size.tokens}tok `
     + imageNote);
 
   record(db, {

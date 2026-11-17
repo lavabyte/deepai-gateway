@@ -150,36 +150,6 @@ Two consequences are built in here. **The catalog is not proof of access** - it 
 And a refusal DeepAI named is said in its own terms, kept on the account so a reload still
 explains it, and never paraphrased as "the key was rejected".
 
-### Context: the catalog says 320,000 tokens, the endpoint serves about 38,500
-
-Every model's `contextWindow` in DeepAI's catalog is 320,000. Measured with uniform English
-prose, the endpoint stops accepting whole prompts far below that, and it does not say so - no
-error, `finish_reason: "stop"`, and only a `prompt_tokens` smaller than the request as a trace:
-
-| content sent | reported `prompt_tokens` | what happened |
-| --- | --- | --- |
-| 160,102 chars | 34,091 | all of it |
-| 180,010 chars | 38,291 | all of it |
-| 190,438 chars | 38,691 | all of it |
-| 200,392 chars | 38,583 | cut |
-| 260,000 chars | 38,713 | cut |
-| 300,000 chars | 38,804 | cut |
-
-A single message over about 190,000 characters collapses harder: a 200,000-character message
-arrived as 1,835 tokens. The premier `glm-5.3` plateaus at the same 39,791 tokens as
-`glm-5.3-flash` on an identical 800 KB body, so it is the endpoint's budget and not the model's.
-
-What the endpoint keeps is the *newest* part, so what disappears is the beginning of the
-conversation - which is why a long chat through a proxy "loses its history" while the answer
-still looks finished. The gateway refuses a prompt above 180,000 characters of content (about
-36,000 tokens) with OpenAI's own `context_length_exceeded` error, because that is the signal a
-client understands: it compacts the conversation and asks again, instead of the model answering
-confidently about a history it never read.
-
-Nothing is concluded from `prompt_tokens` afterwards. DeepAI counts cached prefix tokens
-separately, so a 21,000-token prompt can come back as `prompt_tokens: 5` while the answer proves
-it read all of it - a warning built on that number would be wrong more often than right.
-
 ### A balance is not the same as access
 
 DeepAI answers three different questions about one key, and they can disagree:
