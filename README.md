@@ -249,10 +249,9 @@ Credits was tried and read wrongly: price 2, 3, 5, 5, 8 and 10 all collapsed to 
 sixteen paid models appeared to cost nothing. A price list where most paid models read as free is
 worse than no price list, and a test now refuses a paid tier that renders as zero.
 
-Beside it, in its own column, sits DeepAI's own figure exactly as the catalog sends it - `2`, `3`,
-`10`, `50` - so the derived minute can be checked against the number the provider publishes. That
-column is a catalog price and not a charge: a MiniMax M3 request measured 0.0082 Credits against a
-row that says 2.
+The catalog's own figure - `2`, `3`, `10`, `50` - stays out of the table on purpose. It is a price
+per request and not a charge: a MiniMax M3 request measured 0.0082 Credits against a row that says
+2, which is why the page states a rate the reader can check rather than the provider's label.
 
 A minute is the token rate times a measured speed, and the speed was measured the same way the
 prices were, by reading the balance before and after a long paid run:

@@ -251,6 +251,5 @@
   "account.issueUnavailable": "DeepAI rechazó la última lectura de esta cuenta, así que no hay nada que mostrar. Ejecuta la comprobación de abajo para ver qué respondió.",
   "account.refreshError.social-login-required": "DeepAI Code solo está disponible para cuentas que iniciaron sesión con Google o Apple. Cierra la sesión y vuelve a entrar con Google o Apple.",
   "signin.socialOnly": "DeepAI Code solo funciona con cuentas de DeepAI que iniciaron sesión con Google o Apple. Una cuenta creada con correo y contraseña aún no es compatible: DeepAI responde a todas sus peticiones con 403 social_login_required. Inicia sesión en DeepAI con Google o Apple y luego empieza este inicio de sesión.",
-  "signin.socialNotSupported": "Esta cuenta no es compatible. DeepAI Code solo atiende cuentas que iniciaron sesión con Google o Apple; esta inició sesión con correo y contraseña, y DeepAI rechaza sus peticiones. Inicia sesión en DeepAI con Google o Apple e inténtalo de nuevo.",
-  "metric.deepaiPrice": "Precio de DeepAI"
+  "signin.socialNotSupported": "Esta cuenta no es compatible. DeepAI Code solo atiende cuentas que iniciaron sesión con Google o Apple; esta inició sesión con correo y contraseña, y DeepAI rechaza sus peticiones. Inicia sesión en DeepAI con Google o Apple e inténtalo de nuevo."
 }

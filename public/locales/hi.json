@@ -239,6 +239,5 @@
   "account.issueUnavailable": "DeepAI ने इस खाते का पिछला पढ़ना अस्वीकार किया, इसलिए यहाँ दिखाने के लिए कुछ नहीं है। नीचे जाँच चलाएँ और देखें कि उसने क्या उत्तर दिया।",
   "account.refreshError.social-login-required": "DeepAI Code केवल उन खातों के लिए है जो Google या Apple से साइन इन हुए हैं। साइन आउट करके Google या Apple से दोबारा साइन इन करें।",
   "signin.socialOnly": "DeepAI Code केवल उन DeepAI खातों के साथ काम करता है जो Google या Apple से साइन इन हुए हैं। ईमेल और पासवर्ड से बनाया गया खाता अभी समर्थित नहीं है - DeepAI उसके हर अनुरोध का उत्तर 403 social_login_required से देता है। DeepAI में Google या Apple से साइन इन करें, फिर यह साइन-इन शुरू करें।",
-  "signin.socialNotSupported": "यह खाता समर्थित नहीं है। DeepAI Code केवल उन खातों को सेवा देता है जो Google या Apple से साइन इन हुए हैं; यह खाता ईमेल और पासवर्ड से साइन इन हुआ है और DeepAI इसके अनुरोध अस्वीकार करता है। DeepAI में Google या Apple से साइन इन करें और फिर कोशिश करें।",
-  "metric.deepaiPrice": "DeepAI मूल्य"
+  "signin.socialNotSupported": "यह खाता समर्थित नहीं है। DeepAI Code केवल उन खातों को सेवा देता है जो Google या Apple से साइन इन हुए हैं; यह खाता ईमेल और पासवर्ड से साइन इन हुआ है और DeepAI इसके अनुरोध अस्वीकार करता है। DeepAI में Google या Apple से साइन इन करें और फिर कोशिश करें।"
 }

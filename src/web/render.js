@@ -131,26 +131,6 @@ function metricCard(t, { eyebrow, value, label }) {
  * @param {(key: string, vars?: object) => string} options.t
  * @returns {string} markup for `#view`.
  */
-/**
- * The price DeepAI itself sent for a model, passed through untouched.
- *
- * It is a per-request figure and it overstates a real charge by two orders of magnitude - a
- * MiniMax M3 request measured 0.0082 Credits against a row that says 2 - so it is shown as the
- * catalog's own number, beside the rate this gateway derives, and never as the rate. Seeing both
- * is the point: the reader can check the derived minute against the figure the provider publishes,
- * and nothing here has to pretend the second one is a charge.
- *
- * A model with no price at all keeps the dash, so an absent number never reads as zero.
- *
- * @param {object} model
- * @returns {string}
- */
-function deepaiFigure(model) {
-  const value = model?.theosPerRequest;
-  if (value === undefined || value === null || value === '') return '-';
-  return String(value);
-}
-
 export function modelsView({ models, usage = null, t }) {
   const free = models.filter((model) => !model.premier);
   const premier = models.filter((model) => model.premier);
@@ -170,7 +150,6 @@ export function modelsView({ models, usage = null, t }) {
       <td class="num tiny muted">${escapeHtml(tokens(model.maxTokens))}</td>
       <td class="tiny muted">${model.reasoning ? 'none, low, medium, high' : '-'}</td>
       <td class="tiny muted">${model.input.includes('image') ? 'text, image' : 'text'}</td>
-      <td class="num tiny muted">${escapeHtml(deepaiFigure(model))}</td>
       <td class="num tiny muted">${model.premier ? escapeHtml(model.rateLabel) : t('common.unmetered')}</td>
       ${usage === null
         ? ''
@@ -205,7 +184,7 @@ export function modelsView({ models, usage = null, t }) {
           <table class="table">
             <thead><tr>
               <th>${t('metric.model')}</th><th>${t('metric.tier')}</th><th class="num">${t('metric.context')}</th><th class="num">${t('metric.maxOut')}</th>
-              <th class="hide-sm">${t('metric.reasoning')}</th><th class="hide-sm">${t('metric.input')}</th><th class="num">${t('metric.deepaiPrice')}</th><th class="num">${t('metric.rate')}</th>${usedHeader}
+              <th class="hide-sm">${t('metric.reasoning')}</th><th class="hide-sm">${t('metric.input')}</th><th class="num">${t('metric.rate')}</th>${usedHeader}
             </tr></thead>
             <tbody>${models.map(row).join('')}</tbody>
           </table>
