@@ -113,11 +113,14 @@ export function creditsPerThousand(theosPerRequest) {
 /**
  * The rate as a label a reader can check against a token count.
  *
- * Per thousand tokens, in the unit the pages already name: `0.21 Credits / 1k`. Two decimal places
- * and no more, because the equation's own uncertainty is far wider than that - every fitted point
- * is within 8% of it - and trailing zeros are dropped so the cheap tiers read as `0.11` and not
- * `0.11 Credits`. A free model is `Unmetered`; a model with no price at all is `Unknown`, never
- * `0`.
+ * Per thousand tokens, in the unit the pages already name: `0.21 Credits / 1k`. Three decimal
+ * places below 0.1 and two above it, which is the shape this label had from the start, when the
+ * numbers came from a measured table: a fraction of a Credit needs the third digit or the cheapest
+ * tiers collapse into each other and into zero, while a tier that costs whole Credits does not.
+ * The equation is only good to about 8%, so nothing here claims more precision than that - the
+ * digits exist to keep neighbouring prices apart, not to be trusted to the last one.
+ *
+ * A free model is `Unmetered`; a model with no price at all is `Unknown`, never `0`.
  *
  * @param {string|number|null|undefined} theosPerRequest
  * @returns {string}
@@ -126,8 +129,6 @@ export function rateLabelFor(theosPerRequest) {
   const rate = creditsPerThousand(theosPerRequest);
   if (rate === null) return 'Unknown';
   if (rate === 0) return 'Unmetered';
-  // Rounded to the place a reader can use, then formatted so a tier over ten Credits keeps its
-  // thousands separator instead of running together.
-  const shown = Number(rate.toFixed(2));
-  return `${shown.toLocaleString('en-US')} Credits / 1k`;
+  const digits = rate >= 0.1 ? 2 : 3;
+  return `${rate.toFixed(digits)} Credits / 1k`;
 }

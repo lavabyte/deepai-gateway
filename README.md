@@ -240,7 +240,8 @@ The gateway therefore shows the equation's rate in the model list, in the unit a
 multiply its own token count by - `0.21 Credits / 1k`, the same rate as the 214 per million above -
 and never the catalog's per-request figure. Per thousand because that is the size a person can use:
 every tier below 20 is a fraction of a Credit per thousand tokens, and a caller pricing its own
-request divides by a thousand, not by a million.
+request divides by a thousand, not by a million. Three decimals below 0.1 and two above, so the
+cheapest tiers - `0.071` at price 2, `0.081` at 3, `0.11` at 5 - do not round into each other.
 The top tier is extrapolated far past anything measured: price 50 doubles four more times, to
 54.78 Credits per thousand, and nothing on this account could be bought at that price to check it
 against, because the endpoint answers 404 for GPT-6 Astra.

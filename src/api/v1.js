@@ -482,8 +482,8 @@ export function v1Router(db, options = {}) {
            * The first is DeepAI's own number and it is a ceiling: measured, a real MiniMax M3
            * request cost 0.0082 Credits against a catalog figure of 2. The second is the rate in
            * the unit a caller can multiply by its own token count - Credits per thousand tokens,
-           * the same unit the pages show - and is `null` for a model the catalog sent no price
-           * for: a missing number, not an invented one.
+           * the same unit the pages show as `0.21 Credits / 1k` - and is `null` for a model the
+           * catalog sent no price for: a missing number, not an invented one.
            */
           credits_per_request: model.theosPerRequest ?? null,
           credits_per_thousand_tokens: creditsPerThousand(model.theosPerRequest),
