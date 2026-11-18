@@ -484,8 +484,8 @@ export function v1Router(db, options = {}) {
            * rate in the unit a caller can multiply by its own token count, and is `null` for a
            * model this gateway has never measured - a missing number, not an invented one.
            */
-          theos_per_request: model.theosPerRequest ?? null,
-          theos_per_million_tokens: theosPerMillion(model.id),
+          credits_per_request: model.theosPerRequest ?? null,
+          credits_per_million_tokens: theosPerMillion(model.id),
           rate_label: rateLabel(model),
         })),
       });

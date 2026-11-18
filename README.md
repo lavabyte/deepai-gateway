@@ -393,15 +393,18 @@ picker, and the form then says the catalog is unavailable.
 
 The price shown is `theosPerRequest`, which is what DeepAI charges per call.
 
-### The context window is the one the catalog declares, and it is real
+### The declared context window is passed through, and what is actually served
 
-A revision here once clamped the advertised window to 63,000, derived from a synthetic probe:
-a single giant message of repeated filler collapsed at that size, so it looked like the wire's
-limit. Real conversations then disproved it - a live session through this gateway was served
-whole at **841,502 tokens**, and the desktop app's provider at **1,033,848**, matching the
-catalog's 1,048,576. The declared window is passed through unchanged, and the clamp is gone.
-What the probe measured is a property of massively repeated content in one message, not of the
-wire - worth knowing before trusting any synthetic size benchmark against this API.
+The advertised window is passed through unchanged - 1,048,576 for a model that declares it -
+because the numbers on both sides of that argument have not survived re-measuring. A revision
+here once clamped it to 63,000 after a single giant message of repeated filler collapsed at that
+size; a later session reported 841,502 tokens served whole through this gateway and 1,033,848
+from the desktop app's provider. Neither is reproducible today with fresh content.
+
+What is reproducible is in **"The context window: 320,000 is what the catalog says, not what is
+served"** above: above roughly 190,000 characters of prompt the endpoint answers from an empty
+conversation. That is a property of this wire, so the gateway shortens an oversized prompt before
+sending it rather than clamping a declared number.
 
 
 ### Log in / log out

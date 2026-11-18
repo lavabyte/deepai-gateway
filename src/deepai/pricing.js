@@ -1,11 +1,13 @@
 /**
  * What a paid model actually costs, measured rather than read out of the catalog.
  *
- * The catalog says `theosPerRequest` - `~2 Theos/request` for MiniMax M3, `~50` for GPT-6 Astra -
- * and the desktop app prints it in the same shape, with the note that "actual charges depend on
- * token usage". They do, and by a factor nobody would guess: a real request on MiniMax M3 cost
- * **0.0082 Theos**, not 2, and the most expensive model measured here costs 0.87 Theos per 1,000
- * prompt tokens, which is 0.87 for a small request rather than the 20 its catalog row claims.
+ * The catalog says `theosPerRequest` - about 2 for MiniMax M3, about 50 for GPT-6 Astra - and the
+ * desktop app prints it in the same shape, with the note that "actual charges depend on token
+ * usage". They do, and by a factor nobody would guess: a real request on MiniMax M3 cost
+ * **0.0082 Credits**, not 2, and the most expensive model measured here costs 0.87 Credits per
+ * 1,000 prompt tokens, which is 0.87 for a small request rather than the 20 its catalog row
+ * claims. In this file a Credit is the account's balance unit, one for one; DeepAI calls the same
+ * number a Theos, and that name stops at this module.
  *
  * Nothing in the payload carries the real price: `usage` has token counts and no cost, and the
  * response headers say nothing. What is left is the balance, `GET /deepai_code/theos`, read
@@ -18,7 +20,7 @@
  *     every call). Repeating the same prompt measures the cache, not the price: ten identical
  *     requests billed half of what one fresh prompt did.
  *   - the balance moves in batches, so a single read after a small request can catch the previous
- *     request's charge or none at all. Deltas below about 0.05 Theos were therefore measured
+ *     request's charge or none at all. Deltas below about 0.05 Credits were therefore measured
  *     again and the values here are the consistent ones.
  *   - completion tokens cost four times a prompt token. Measured directly: on MiniMax M3 a
  *     request of 201 prompt and 900 completion tokens cost 0.12030, and one of 29,282 and 20 cost
@@ -28,7 +30,7 @@
  *
  * What this is not: a price list. It is one account's measurement of one endpoint on one day, it
  * carries a few tens of percent of uncertainty on the cheap models, and DeepAI can change it
- * without telling anyone. It is here because "2 Theos per request" is wrong by two orders of
+ * without telling anyone. It is here because "2 per request" is wrong by two orders of
  * magnitude, and a measured number that is roughly right is worth more than a catalog number that
  * is exactly wrong.
  *
@@ -36,7 +38,7 @@
  */
 
 /**
- * Measured Theos per million weighted tokens, by model id.
+ * Measured Credits per million weighted tokens, by model id.
  *
  * Weighted means `prompt + 4 * completion`: the completion rate was measured to be four times the
  * prompt rate, so one million weighted tokens cost the same whichever side they came from.
@@ -70,7 +72,7 @@ export const COMPLETION_WEIGHT = 4;
  * An invented rate would not be.
  *
  * @param {string} modelId
- * @returns {number|null} Theos per million weighted tokens.
+ * @returns {number|null} Credits per million weighted tokens.
  */
 export function theosPerMillion(modelId) {
   const value = MEASURED_THEOS_PER_MILLION[modelId];
@@ -86,7 +88,7 @@ export function theosPerMillion(modelId) {
  * @param {string} modelId
  * @param {number} promptTokens
  * @param {number} completionTokens
- * @returns {number|null} Theos, or `null` when the model was never measured.
+ * @returns {number|null} Credits, or `null` when the model was never measured.
  */
 export function theosForUsage(modelId, promptTokens, completionTokens) {
   const rate = theosPerMillion(modelId);
@@ -100,8 +102,7 @@ export function theosForUsage(modelId, promptTokens, completionTokens) {
 /**
  * The measured rate as a short label, in the unit a reader can check against a token count.
  *
- * Per thousand tokens rather than per million, because a request carries thousands: `0.032
-Theos / 1k tokens` says what one request costs in a way that `31.7 per million` does not. Three
+ * Per thousand tokens rather than per million, because a request carries thousands: `0.032 Credits / 1k tokens` says what one request costs in a way that `31.7 per million` does not. Three
  * decimals below 0.05 so the cheapest models stay distinguishable from each other and from zero.
  *
  * @param {string} modelId
@@ -112,5 +113,5 @@ export function measuredRateLabel(modelId) {
   if (rate === null) return null;
   const perThousand = rate / 1_000;
   const digits = perThousand >= 0.1 ? 2 : 3;
-  return `${perThousand.toFixed(digits)} Theos / 1k`;
+  return `${perThousand.toFixed(digits)} Credits / 1k`;
 }

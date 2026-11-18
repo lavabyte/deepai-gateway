@@ -15,11 +15,13 @@
  * previous list, logs itself, and is retried on the next tick - it never replaces a working
  * catalog with an empty one, and never invents one. See `CatalogUnavailable`.
  *
- * The window the catalog declares is real. Measured on live conversations through this
- * gateway: a request of 841,502 tokens was served whole, and the desktop app's own provider
- * served 1,033,848. A synthetic single-message probe with massively repeated filler collapses
- * to a fraction of its size on the same wire, which is how a "63,000 limit" was once derived
- * here and then disproved; do not clamp on the strength of such probes.
+ * The window the catalog declares is passed through unchanged, because nothing here can prove a
+ * smaller one is the wire's: sizes reported by earlier live sessions (841,502 tokens here,
+ * 1,033,848 from the desktop app's provider) are not reproducible with fresh content today, and
+ * neither is the "63,000 limit" a synthetic probe once produced. What *is* reproducible is
+ * recorded in the README: above roughly 190,000 characters of prompt the endpoint answers from
+ * an empty conversation, which is a fact about this wire and not about the declared window - so a
+ * prompt is shortened before it is sent (`fitPrompt` in `api/v1.js`), and no number is clamped.
  *
  * @module deepai-gateway/deepai/catalog
  */
@@ -47,7 +49,7 @@ export function displayName(model) {
  * What a paid model costs, in the unit that can be checked against a token count.
  *
  * The catalog's `theosPerRequest` is not what DeepAI charges - measured, a real MiniMax M3
- * request cost 0.0082 Theos against a catalog figure of 2, and the desktop app prints that figure
+ * request cost 0.0082 Credits against a catalog figure of 2, and the desktop app prints that figure
  * with the note that "actual charges depend on token usage". Showing it alone is showing a number
  * two orders of magnitude too large, which is why the measured rate leads here.
  *
@@ -71,7 +73,7 @@ export function rateLabel(model, level) {
   if (value === 0) return 'Unmetered';
   const measured = measuredRateLabel(model?.id);
   if (measured !== null) return measured;
-  return `~ ${value} Theos/req (list)`;
+  return `~ ${value} Credits/req (list)`;
 }
 
 /**
