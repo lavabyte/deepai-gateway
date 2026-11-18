@@ -716,14 +716,49 @@ await checkAsync('free models are labelled and Premier are not', async () => {
   }
 });
 
-await checkAsync('rate labels show approximate Credits, not per-request', async () => {
+await checkAsync('a rate is per thousand tokens when measured, and the list figure otherwise', async () => {
+  /*
+   * The catalog's `theosPerRequest` is not a charge: measured, a real MiniMax M3 request cost
+   * 0.0082 Theos against a catalog figure of 2. So a model this gateway has measured is priced
+   * in tokens a caller can count, and a model it has not measured falls back to DeepAI's own
+   * figure - labelled as the list price, because that is what it is.
+   */
   const models = await catalogFrom(CATALOG_PAYLOAD);
   assert.equal(rateLabel(findModel(models, 'glm-5.3-flash')), 'Unmetered');
-  assert.equal(rateLabel(findModel(models, 'glm-5.3')), '~ 3 Credits');
-  assert.equal(rateLabel(findModel(models, 'gpt-6-astra')), '~ 10 Credits');
+  assert.equal(rateLabel(findModel(models, 'glm-5.3')), '0.009 Theos / 1k');
+  assert.equal(rateLabel(findModel(models, 'gpt-6-astra')), '~ 10 Theos/req (list)');
   assert.equal(findModel(models, 'does-not-exist'), undefined, 'and an unknown id is nothing');
   // A price DeepAI did not send is unknown, never zero - a paid model must not read as free.
   assert.equal(rateLabel({ id: 'x', theosPerRequest: undefined }), 'Unknown');
+});
+
+await checkAsync('the measured rate turns a token count into Theos', async () => {
+  const { MEASURED_THEOS_PER_MILLION, theosForUsage, theosPerMillion, measuredRateLabel } =
+    await import('../src/deepai/pricing.js');
+
+  assert.equal(theosPerMillion('claude-opus-5-5'), 435, 'a measured model has a rate');
+  assert.equal(theosPerMillion('gpt-6-astra'), null, 'an unmeasured one has none, not a guess');
+
+  // One million prompt tokens at the measured rate, to the digit.
+  assert.equal(theosForUsage('claude-opus-5-5', 1_000_000, 0), 435);
+  /*
+   * A completion token weighs four prompt tokens, which is the ratio the two-rate fit produced
+   * from a 201/900-token request (0.12030) and a 29,282/20-token one (0.92931).
+   */
+  assert.equal(theosForUsage('claude-opus-5-5', 0, 250_000), 435);
+  assert.equal(theosForUsage('claude-opus-5-5', 200_000, 50_000), 174,
+    '200k prompt plus 50k completion is 400k weighted tokens, and 435 * 0.4');
+  assert.equal(theosForUsage('gpt-6-astra', 1_000_000, 0), null, 'and nothing is invented for it');
+
+  // A real request: MiniMax M3 measured 0.0082 Theos for 280 prompt and 20 completion tokens.
+  const real = theosForUsage('minimax-m3', 280, 20);
+  assert.ok(real > 0.008 && real < 0.012, `a small request costs thousandths, got ${real}`);
+
+  assert.equal(measuredRateLabel('minimax-m3'), '0.032 Theos / 1k');
+  assert.equal(measuredRateLabel('glm-5.3'), '0.009 Theos / 1k');
+  assert.equal(measuredRateLabel('claude-fable-5-2'), '0.87 Theos / 1k');
+  assert.equal(measuredRateLabel('gpt-6-astra'), null);
+  assert.ok(Object.keys(MEASURED_THEOS_PER_MILLION).length >= 15, 'the table is the measured set');
 });
 
 /* ------------------------------------------------------------------- server */
@@ -1302,7 +1337,9 @@ await checkAsync('/v1/models carries modalities, reasoning levels and names', as
 
     const premier = payload.data.find((model) => model.id === 'glm-5.3');
     assert.equal(premier.tier, 'premier');
-    assert.equal(premier.rate_label, '~ 3 Credits');
+    assert.equal(premier.rate_label, '0.009 Theos / 1k');
+    assert.equal(premier.theos_per_million_tokens, 9, 'and the raw measured rate rides along');
+    assert.equal(premier.theos_per_request, '3', 'next to DeepAI\'s own per-request figure');
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));
@@ -1321,7 +1358,7 @@ await checkAsync('publicModel reports the price DeepAI charges, and the levels i
   assert.equal(model.reasoningLevels.find((level) => level.id === 'high').name, 'High');
   assert.ok(!('creditsPerSecond' in model), 'no per-second rate is invented');
   assert.equal(model.theosPerRequest, '3');
-  assert.equal(model.rateLabel, '~ 3 Credits');
+  assert.equal(model.rateLabel, '0.009 Theos / 1k', 'the measured rate leads, not the catalog figure');
 
   const free = publicModel(findModel(models, 'glm-5.3-flash'));
   assert.equal(free.rateLabel, 'Unmetered');
@@ -2475,7 +2512,7 @@ await checkAsync('a balance that was never read does not look like one that was'
   // --- A balance is shown, and the account reads as active.
   const read = await boot({ ...base, allowance: { balance: '4.5', granted: '10' } });
   vm.runInContext('renderAccountBadge()', read.sandbox);
-  assert.equal(read.nodes.get('account-badge-text').textContent, '4.5 Credits');
+  assert.equal(read.nodes.get('account-badge-text').textContent, '4.5 Theos');
   assert.equal(read.nodes.get('account-badge').className, 'badge badge--green');
 
   // --- A refusal is translated, whatever the server's wording was.
@@ -3185,7 +3222,7 @@ await checkAsync('a dialog and a tooltip speak the visitor\'s language too', asy
   // The sentences are gone from the source: asking for them is the only way to show them.
   for (const gone of ['Revoke this key?', 'is deleted and stops working immediately',
     'This cannot be undone', 'Usage already recorded is kept', 'Revoke key',
-    'Premium - billed in Credits', 'Free - unmetered']) {
+    'Premium - billed in Theos', 'Free - unmetered']) {
     assert.ok(!app.includes(gone), `${JSON.stringify(gone)} must not be hardcoded in the client`);
   }
 

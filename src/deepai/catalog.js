@@ -25,6 +25,7 @@
  */
 
 import { API_ORIGIN, codeHeaders } from './wire.js';
+import { measuredRateLabel } from './pricing.js';
 
 /** Human labels for the thinking levels, in the order the API exposes them. */
 export const REASONING_LEVELS = Object.freeze([
@@ -43,21 +44,24 @@ export function displayName(model) {
 }
 
 /**
- * What one request costs, or `Unmetered` when it is free.
+ * What a paid model costs, in the unit that can be checked against a token count.
  *
- * DeepAI bills a Premier model per request (`theosPerRequest`), a flat number of Credits
- * for one completion. The per-second rates this used to read were replaced by the provider
- * and the field no longer exists, so the label follows the price that is actually charged.
+ * The catalog's `theosPerRequest` is not what DeepAI charges - measured, a real MiniMax M3
+ * request cost 0.0082 Theos against a catalog figure of 2, and the desktop app prints that figure
+ * with the note that "actual charges depend on token usage". Showing it alone is showing a number
+ * two orders of magnitude too large, which is why the measured rate leads here.
  *
- * The label names the unit in full - `3 Credits / req` - rather than leaving it to the column
- * header. A price read on its own, in an API answer or a copied row, has to say what it is
- * counting: Credits, per request.
+ * So three answers, in order of what is known:
  *
- * The `level` argument is kept for the call sites that name a thinking level: the price is
- * the same at every level now, and a caller passing one still gets the right answer.
+ *   - a measured rate per thousand tokens, for a model this gateway has measured: `0.032 Theos / 1k`
+ *   - the catalog's per-request figure, marked as the list price it is - `~ 50 Theos/req (list)`
+ *   - `Unmetered` for a free model, and `Unknown` when the catalog carried no figure at all
  *
- * @param {{theosPerRequest?: string}} model
- * @param {string} [level] - ignored; DeepAI no longer prices by level.
+ * The `level` argument is kept for the call sites that name a thinking level: the price does not
+ * vary by level, and a caller passing one still gets the right answer.
+ *
+ * @param {{id?: string, theosPerRequest?: string}} model
+ * @param {string} [level] - ignored; DeepAI does not price by level.
  * @returns {string}
  */
 export function rateLabel(model, level) {
@@ -65,7 +69,9 @@ export function rateLabel(model, level) {
   const value = Number(model?.theosPerRequest);
   if (!Number.isFinite(value)) return 'Unknown';
   if (value === 0) return 'Unmetered';
-  return `~ ${value} Credits`;
+  const measured = measuredRateLabel(model?.id);
+  if (measured !== null) return measured;
+  return `~ ${value} Theos/req (list)`;
 }
 
 /**

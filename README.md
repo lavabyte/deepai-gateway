@@ -203,6 +203,49 @@ Measured, against the same account that used to get nothing back:
 | ten turns of 20,000 characters | answer unrelated to the turn asked about | `trim=drop11`, 44,425 tokens, answered with the newest turn |
 | a 60,000-character message | read whole | read whole, no trim |
 
+### What a paid request costs: Theos, per token, measured
+
+The catalog carries `theosPerRequest` - `~2` for MiniMax M3, `~50` for GPT-6 Astra - and the
+desktop app prints it as `2 Theos/request` with the note that "actual charges depend on token
+usage". They do, and by two orders of magnitude: a real MiniMax M3 request measured **0.0082
+Theos**. Nothing in the payload carries the price (`usage` has tokens and no cost, the headers say
+nothing), so the only way to know it is the balance, `GET /deepai_code/theos`, read before and
+after a request. Every number below comes from that, on one account, through this gateway's own
+headers, with a prompt the model had never seen - a repeated prompt measures the cache, not the
+price: ten identical requests billed half of what one fresh prompt did.
+
+Measured rates, in Theos per thousand prompt tokens (a completion token costs four):
+
+| model | catalog says | measured |
+| --- | --- | --- |
+| GLM 5.3 | 3 /req | 0.009 Theos / 1k |
+| Kimi K3 | 3 /req | 0.028 Theos / 1k |
+| MiniMax M3 | 2 /req | 0.032 Theos / 1k |
+| GPT-6.1 Terra | 5 /req | 0.10 Theos / 1k |
+| Muse Spark 1.3 | 6 /req | 0.13 Theos / 1k |
+| Gemini 4 Hydrogen | 8 /req | 0.16 Theos / 1k |
+| Claude Sonnet 5.5 | 10 /req | 0.21 Theos / 1k |
+| Gemini 4 Carbon, Gemini 4 Argon, GPT-6.1 Sol | 10 /req | 0.22 Theos / 1k |
+| Kimi K3.1 Pro | 3 /req | 0.22 Theos / 1k |
+| Qwen 3.8 Max Prime | 15 /req | 0.40 Theos / 1k |
+| Claude Opus 5.5, Muse Wonder | 15 /req | 0.43 Theos / 1k |
+| Claude Fable 5.2 | 20 /req | 0.87 Theos / 1k |
+| GPT-6 Astra | 50 /req | not measured - the endpoint answers `404` for it |
+
+The catalog figure is not proportional to the charge in either direction: Kimi K3 and GLM 5.3 are
+both listed at 3 and differ by three times, and Kimi K3.1 Pro is listed at 3 and costs more than a
+model listed at 10.
+
+The balance's unit is **Theos**, which is what DeepAI calls it (`X-DeepAI-Code-Theos`, `/theos`,
+"Theos left" in the app); this gateway used to say "Credits" and no longer does.
+
+The gateway therefore shows the measured rate in the model list, in the unit a caller can count
+against its own token usage: `0.032 Theos / 1k`. A model it has never measured shows DeepAI's own
+figure, labelled as the list price it is - `~ 50 Theos/req (list)` - rather than a guess. The
+weighting, the method and the size of the uncertainty are documented at the top of
+`src/deepai/pricing.js`; `usage` in an API answer now carries `theos_per_million_tokens` next to
+DeepAI's `theos_per_request`, so a caller can price a request itself.
+
 ### A balance is not the same as access
 
 DeepAI answers three different questions about one key, and they can disagree:

@@ -23,6 +23,7 @@ import {
   rateLabel,
 } from '../deepai/catalog.js';
 import { streamChatCompletion, streamResponsesCompletion } from '../deepai/client.js';
+import { theosForUsage, theosPerMillion } from '../deepai/pricing.js';
 import { UpstreamError } from '../deepai/wire.js';
 import { acceptsImages, countImages, withoutImages } from '../deepai/images.js';
 import { isMultimodalRejection, noteMultimodalRejection, rejectsImages } from '../deepai/multimodal.js';
@@ -475,8 +476,16 @@ export function v1Router(db, options = {}) {
           context_window: model.contextWindow,
           max_output_tokens: model.maxTokens,
           api: model.api,
-          // What one request costs, which is how DeepAI bills.
+          /*
+           * The catalog's per-request figure, and what a request actually costs.
+           *
+           * The first is DeepAI's own number and it is a ceiling: measured, a real MiniMax M3
+           * request cost 0.0082 Theos against a catalog figure of 2. The second is the measured
+           * rate in the unit a caller can multiply by its own token count, and is `null` for a
+           * model this gateway has never measured - a missing number, not an invented one.
+           */
           theos_per_request: model.theosPerRequest ?? null,
+          theos_per_million_tokens: theosPerMillion(model.id),
           rate_label: rateLabel(model),
         })),
       });
