@@ -482,7 +482,7 @@ export function v1Router(db, options = {}) {
            * The first is DeepAI's own number and it is a ceiling: measured, a real MiniMax M3
            * request cost 0.0082 Credits against a catalog figure of 2. The second is where the
            * equation puts that tier, in two units: per minute of generation, which is what the
-           * pages show as `~1 Credits / min`, and per thousand tokens, for a caller pricing its
+           * pages show as `~0.60 Credits / min`, and per thousand tokens, for a caller pricing its
            * own token count. Both are `null` for a model the catalog sent no price for: a missing
            * number, not an invented one.
            */

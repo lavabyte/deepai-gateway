@@ -248,5 +248,6 @@
   "account.issueUnavailable": "DeepAI hat die letzte Abfrage dieses Kontos abgelehnt, daher gibt es hier nichts anzuzeigen. Starten Sie die Prüfung unten, um die Antwort zu sehen.",
   "account.refreshError.social-login-required": "DeepAI Code ist nur für Konten verfügbar, die sich mit Google oder Apple angemeldet haben. Melden Sie sich ab und mit Google oder Apple wieder an.",
   "signin.socialOnly": "DeepAI Code funktioniert nur mit DeepAI-Konten, die sich über Google oder Apple angemeldet haben. Ein mit E-Mail-Adresse und Passwort angelegtes Konto wird noch nicht unterstützt - DeepAI beantwortet jede seiner Anfragen mit 403 social_login_required. Melden Sie sich bei DeepAI mit Google oder Apple an und starten Sie dann diese Anmeldung.",
-  "signin.socialNotSupported": "Dieses Konto wird nicht unterstützt. DeepAI Code bedient nur Konten, die sich mit Google oder Apple angemeldet haben; dieses Konto wurde mit E-Mail-Adresse und Passwort angemeldet, und DeepAI lehnt seine Anfragen ab. Melden Sie sich bei DeepAI mit Google oder Apple an und versuchen Sie es erneut."
+  "signin.socialNotSupported": "Dieses Konto wird nicht unterstützt. DeepAI Code bedient nur Konten, die sich mit Google oder Apple angemeldet haben; dieses Konto wurde mit E-Mail-Adresse und Passwort angemeldet, und DeepAI lehnt seine Anfragen ab. Melden Sie sich bei DeepAI mit Google oder Apple an und versuchen Sie es erneut.",
+  "metric.deepaiPrice": "DeepAI-Preis"
 }

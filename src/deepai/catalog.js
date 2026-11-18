@@ -50,7 +50,7 @@ export function displayName(model) {
  *
  * The catalog's `theosPerRequest` is a price tier and not an amount: a real MiniMax M3 request
  * measured 0.0082 Credits against a row that says 2. The rate follows from the tier by a doubling
- * every five points, so the label is what a minute of generation costs - `~1 Credits / min` - and
+ * every five points, so the label is what a minute of generation costs - `~0.60 Credits / min` - and
  * not a per-request figure that overstates the charge by two orders of magnitude.
  *
  * `Unmetered` for a free model, `Unknown` when the catalog carried no price at all: a paid model

@@ -240,14 +240,19 @@ The gateway therefore shows the equation's rate in the model list, and in the un
 itself prices in: **per minute of generation**. The app's own picker says "Theos are spent per
 minute of active session time at a rate set by the model and reasoning effort", so a minute is the
 quantity a reader is already being asked to think in. The per-thousand rate stays in the answer for
-a caller pricing its own token count, but the page shows `~1 Credits / min` for the price-10 group
-and `~0` for the cheapest paid tier.
+a caller pricing its own token count, but the page shows `~0.60 Credits / min` for the price-10
+group and `~0.20` for the cheapest paid tier.
 
-Whole Credits with a tilde, because nothing in that number is exact: the equation fits the
-measurements to within a few tens of percent and the minute is a measured speed. A decimal point
-would claim a precision the number does not have. The cheap tiers round to `~0`, which is honest -
-a fifth of a Credit a minute is nothing beside the model that answers at sixty times the price -
-and the unrounded rate stays in the API as `credits_per_minute` for anyone multiplying it out.
+With a tilde because nothing in that number is exact - the equation fits the measurements to within
+a few tens of percent and the minute is a measured speed - and unrounded because rounding to whole
+Credits was tried and read wrongly: price 2, 3, 5, 5, 8 and 10 all collapsed to `~0`, so six of the
+sixteen paid models appeared to cost nothing. A price list where most paid models read as free is
+worse than no price list, and a test now refuses a paid tier that renders as zero.
+
+Beside it, in its own column, sits DeepAI's own figure exactly as the catalog sends it - `2`, `3`,
+`10`, `50` - so the derived minute can be checked against the number the provider publishes. That
+column is a catalog price and not a charge: a MiniMax M3 request measured 0.0082 Credits against a
+row that says 2.
 
 A minute is the token rate times a measured speed, and the speed was measured the same way the
 prices were, by reading the balance before and after a long paid run:
@@ -263,7 +268,7 @@ costs nothing. The figure is therefore a rate during generation, never a charge 
 open, and a test pins the constant so it cannot be moved without re-measuring.
 
 The top tier is extrapolated far past anything measured: price 50 doubles four more times, to
-`~153 Credits / min`, and nothing on this account could be bought at that price to check it
+`~153.40 Credits / min`, and nothing on this account could be bought at that price to check it
 against, because the endpoint answers 404 for GPT-6 Astra.
 
 `usage` in an API answer carries `credits_per_minute` and `credits_per_thousand_tokens` next to

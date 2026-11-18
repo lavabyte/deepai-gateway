@@ -248,5 +248,6 @@
   "account.issueUnavailable": "DeepAI refused this account's last read, so there is nothing to show here. Run the check below to see what it answered.",
   "account.refreshError.social-login-required": "DeepAI Code is available only to accounts signed in with Google or Apple. Log out and sign in again with Google or Apple.",
   "signin.socialOnly": "DeepAI Code works only with DeepAI accounts signed in through Google or Apple. An account registered with an email address and a password is not supported yet - DeepAI answers every one of its requests with 403 social_login_required. Sign in to DeepAI with Google or Apple, then start this sign-in.",
-  "signin.socialNotSupported": "This account is not supported. DeepAI Code only serves accounts signed in with Google or Apple; this one signed in with an email address and a password, and DeepAI refuses its requests. Sign in to DeepAI with Google or Apple and try again."
+  "signin.socialNotSupported": "This account is not supported. DeepAI Code only serves accounts signed in with Google or Apple; this one signed in with an email address and a password, and DeepAI refuses its requests. Sign in to DeepAI with Google or Apple and try again.",
+  "metric.deepaiPrice": "DeepAI price"
 }
