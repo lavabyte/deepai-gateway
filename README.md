@@ -825,9 +825,27 @@ client - the refusal a fresh account's key ran into.
 onto the value DeepAI takes, the way the DeepAI Code app maps it: `none|off` becomes `none`,
 `minimal` becomes `low`, and `high|xhigh|max` collapse onto `high`.
 
-**DeepAI answers with its reasoning whatever level it is sent.** That was measured on every
-level - `off` and `none` included - and on a request with no level at all: the amount of
-reasoning is the same in each case. The level is still sent, for a backend that honours it.
+**DeepAI answers with its reasoning whatever level it is sent.** Measured again on
+`deepseek-v4.1-flash`, through the gateway, three requests per level:
+
+| asked | reasoning tokens that came back |
+| --- | --- |
+| `none` (off) | 127, 183, 68 |
+| `low` | 243, 75, 195 |
+| `high` | 195, 174, 95 |
+
+`off` produced as much thinking as `low`, and in that run more than `high`. Eleven spellings of
+"turn it off" were then sent straight at the endpoint - `reasoning_effort: none`, `minimal`,
+`reasoning: {effort: none}`, `reasoning: {enabled: false}`, `thinking: {type: disabled}`,
+`thinking: {type: disabled, budget_tokens: 0}`, `thinking_level: off`, `enable_thinking: false`,
+`chat_template_kwargs: {enable_thinking: false}`, and `none` combined with `thinking: disabled` -
+three requests each, and **not one of them came back with a single reasoning token less**. The
+field is also never validated: `reasoning_effort: banana` and `999` are answered exactly like
+`high`, so the endpoint is not reading the value at all.
+
+Nothing here can fix that: a gateway can send a switch, it cannot make the other end read it. What
+it can do is stop a log from looking like evidence the switch worked, so the request line records
+both halves - `effort=none reasoning=127` - what was asked for and what came back.
 
 The reasoning is **passed through**, not hidden. A model's thinking is part of its answer, and
 a gateway that deleted it would be deciding what the caller may see - and would hide the very

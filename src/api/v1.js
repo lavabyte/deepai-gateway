@@ -975,6 +975,20 @@ async function handleChatCompletion(db, req, res, options = {}) {
   }
 
   /*
+   * What the effort setting did, as opposed to what it asked for.
+   *
+   * Measured on the free models and on the paid ones: DeepAI accepts `reasoning_effort` and
+   * ignores it. A request sent with `none` still comes back with a hundred-odd reasoning tokens,
+   * every shape of "off" the API can express was tried, and no value is ever refused - `banana`
+   * and `999` are answered like `high`. So the log says both halves: what was asked for, and what
+   * came back. A line reading `effort=none reasoning=127` is not a bug report about this gateway.
+   */
+  const askedEffort = effortOf(requestedEffort(body));
+  const effortNote = askedEffort === undefined && (usage?.reasoningTokens ?? 0) === 0
+    ? ' '
+    : `effort=${askedEffort ?? 'unset'} reasoning=${usage?.reasoningTokens ?? 0} `;
+
+  /*
    * Where the time went, on one line.
    *
    * The three numbers answer the only question a slow request raises: the catalog read
@@ -988,6 +1002,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
     + `prompt ${arrived.count}msg/${arrived.chars}ch in, ${forwarded.count}msg/${forwarded.chars}ch out `
     + `session=${sessionId.slice(0, 8)} ${transcriptShape(body.messages)} `
     + `${trimNote(trimmed)}`
+    + `${effortNote}`
     + imageNote);
 
   record(db, {

@@ -4314,6 +4314,14 @@ await checkAsync('a prompt past the wall is shortened here, as the app shortens 
     assert.equal(small.status, 200);
     assert.equal(chars(sent[0]), 140_000, 'a prompt inside the budget is not touched');
     assert.ok(!promptLines().at(-1).includes('trim='), 'and the log says nothing was trimmed');
+    /*
+     * The effort setting is recorded as asked *and* as answered. DeepAI takes `reasoning_effort`
+     * and ignores it - a request sent with `none` still comes back with its hundred-odd reasoning
+     * tokens, and no spelling of "off" this API can express was ever answered with none - so a
+     * log line that only said what was sent would look like evidence that it worked.
+     */
+    assert.ok(!promptLines().at(-1).includes('effort='),
+      `nothing is noted when no level was asked for and none was thought: ${promptLines().at(-1)}`);
 
     // Over it: the middle goes, both ends stay, and the model is told what it lost.
     const head = 'HEAD-MARK ';
@@ -4327,6 +4335,20 @@ await checkAsync('a prompt past the wall is shortened here, as the app shortens 
     assert.ok(cut.content.endsWith('TAIL-MARK'), 'and the end is kept');
     assert.match(cut.content, /\[gateway: [\d,]+ characters omitted here/);
     assert.ok(promptLines().at(-1).includes('trim=cut1'), `log should report the cut: ${promptLines().at(-1)}`);
+
+    const askedOff = await realFetch(`${base2}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${key.plaintext}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'glm-5.3-flash',
+        messages: [{ role: 'user', content: 'think hard' }],
+        reasoning_effort: 'none',
+        stream: false,
+      }),
+    });
+    assert.equal(askedOff.status, 200);
+    assert.match(promptLines().at(-1), / effort=none reasoning=0 /,
+      `a level that was asked for is on the line with what came back: ${promptLines().at(-1)}`);
 
     // A tool result larger than a whole prompt's budget: cut, and still a tool result.
     const toolMessages = [
