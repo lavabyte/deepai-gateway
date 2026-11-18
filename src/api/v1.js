@@ -983,6 +983,24 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * and `999` are answered like `high`. So the log says both halves: what was asked for, and what
    * came back. A line reading `effort=none reasoning=127` is not a bug report about this gateway.
    */
+  /*
+   * How fast the model talked, measured the way a caller would measure it: the tokens that came
+   * back over the time it took to produce them, starting from the first one.
+   *
+   * Both halves are on the same line as the request's own timings, so a caller comparing "the app
+   * feels twice as fast" with this gateway has something to compare: a rate per request, for the
+   * same model and the same prompt, instead of an impression. Reasoning tokens are excluded on
+   * purpose - they are not what the reader sees arrive - and counted separately, which is why the
+   * two can differ by a factor of two on a model that thinks.
+   */
+  const generationMs = firstTokenMs === undefined
+    ? 0
+    : Math.max(1, Date.now() - startedAt - firstTokenMs);
+  const outputTokens = usage?.outputTokens ?? 0;
+  const speedNote = generationMs > 0 && outputTokens > 0
+    ? `speed=${(outputTokens / (generationMs / 1000)).toFixed(1)}tok/s `
+    : '';
+
   const askedEffort = effortOf(requestedEffort(body));
   const effortNote = askedEffort === undefined && (usage?.reasoningTokens ?? 0) === 0
     ? ' '
@@ -1002,6 +1020,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
     + `prompt ${arrived.count}msg/${arrived.chars}ch in, ${forwarded.count}msg/${forwarded.chars}ch out `
     + `session=${sessionId.slice(0, 8)} ${transcriptShape(body.messages)} `
     + `${trimNote(trimmed)}`
+    + `${speedNote}`
     + `${effortNote}`
     + imageNote);
 

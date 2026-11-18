@@ -1061,12 +1061,22 @@ is published on the answer as `server-timing: gwcatalog;dur=<ms>`, and every
 completion writes one line to the log when `LOG_REQUESTS` is on:
 
 ```
-v1 chat/completions glm-5.3-flash stream=yes status=200 catalog=143ms first-event=612ms first-token=2486ms total=5300ms
+v1 chat/completions glm-5.3-flash stream=yes status=200 catalog=143ms first-event=612ms first-token=2486ms total=5300ms prompt 1msg/30ch in, 1msg/30ch out session=066e3c76 sys-first user:1 speed=100.7tok/s effort=unset reasoning=597 images=0
 ```
 
 `first-event` is DeepAI accepting the call, `first-token` its first delta. If
 `catalog` is large, this gateway is the problem; if it is small and
 `first-token` is large, the model is.
+
+`speed` is the rate over the generation itself, starting from the first delta;
+`first-token` and `reasoning` are what that rate leaves out. A model that thinks
+before answering spends seconds in `first-token` producing tokens nobody sees,
+and a caller timing the whole request - `total` - therefore reads roughly half
+of `speed`: measured, 600 answer tokens in 5,940 ms of generation is 100.7 tok/s,
+while the same 600 over the request's 11,904 ms is 50.4. Both numbers are true and
+they answer different questions; the pair here is what tells them apart, and
+neither belongs in an argument about a proxy being slow, since a proxy adds time
+to `first-token` at most, never to `speed`.
 
 ### The stream opens before the model speaks
 
