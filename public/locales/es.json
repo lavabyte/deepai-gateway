@@ -180,7 +180,7 @@
   "metric.modelsAvailable": "Modelos disponibles",
   "metric.owner": "Propietario",
   "metric.perWindow": "por {window}",
-  "metric.rate": "Créditos / 1k tokens (medido)",
+  "metric.rate": "Créditos / min de generación (medido)",
   "metric.reasoning": "Razonamiento",
   "metric.requests": "Solicitudes",
   "metric.requestsCount": {
@@ -205,7 +205,7 @@
   "models.lastUsed": "usada por última vez {when}",
   "models.pillFree": "Gratis - sin límite",
   "models.pillPremium": "Premium - se cobra en créditos",
-  "models.subtitle": "Los modelos disponibles aquí. Los gratuitos no cuestan nada; los Premium consumen tus Créditos y se tarifan por 1k tokens, medido a partir de lo que cuestan de verdad las peticiones.",
+  "models.subtitle": "Los modelos disponibles aquí. Los gratuitos no cuestan nada; los Premium consumen tus Créditos y se tarifan por minuto de generación, medido a partir de lo que cuestan de verdad las peticiones.",
   "models.title": "Modelos",
   "models.unavailable": "Lista de modelos no disponible.",
   "models.usedNote": "Tokens usados muestra el tráfico de este mes a través del gateway.",

@@ -49,10 +49,9 @@ export function displayName(model) {
  * What a paid model costs, from the catalog price by way of the equation in `pricing.js`.
  *
  * The catalog's `theosPerRequest` is a price tier and not an amount: a real MiniMax M3 request
- * measured 0.0082 Credits against a row that says 2. The rate per thousand tokens follows from the
- * tier by a doubling every five points, so the label is that rate in the unit a caller can
- * multiply its own token count by - `0.21 Credits / 1k` - and not a per-request figure that
- * overstates the charge by two orders of magnitude.
+ * measured 0.0082 Credits against a row that says 2. The rate follows from the tier by a doubling
+ * every five points, so the label is what a minute of generation costs - `0.60 Credits / min` - and
+ * not a per-request figure that overstates the charge by two orders of magnitude.
  *
  * `Unmetered` for a free model, `Unknown` when the catalog carried no price at all: a paid model
  * must never read as free.

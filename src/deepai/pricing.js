@@ -34,9 +34,10 @@
  * measurement, and it is wrong by less than the catalog was wrong by.
  *
  * The equation is written per million because that is the unit the measurements are in. What the
- * pages show is the same rate per thousand tokens - `0.21 Credits / 1k` for the price-10 group -
- * because a reader can multiply a token count by that in their head, and because every tier below
- * 20 would otherwise be a fraction of a Credit per million.
+ * pages show is the same rate per minute of generation - `0.60 Credits / min` for the price-10
+ * group - because DeepAI Code itself prices in minutes ("Theos are spent per minute of active
+ * session time"), and because a minute is the quantity a person can picture. The per-thousand rate
+ * stays in the answer for a caller pricing its own token count.
  *
  * The top tier is an extrapolation too, and a much larger one: price 50 doubles past the last
  * measured tier four more times, to 54,784 Credits per million. Nothing was sold at that price on
@@ -56,6 +57,25 @@ export const COMPLETION_WEIGHT = 4;
  * Credits, and 214 sits in the middle of the four measurements at this price.
  */
 export const CREDITS_PER_MILLION_AT_TEN = 214;
+
+/**
+ * How many tokens a paid model gets through in a minute of generation, measured.
+ *
+ * The number the pages need is not per token but per minute, because that is how the desktop app
+ * states its own price - "Theos are spent per minute of active session time at a rate set by the
+ * model and reasoning effort" - and because a minute is a quantity a person can picture.
+ *
+ * Two runs, balance read before and after, both on tiers this account can afford:
+ *
+ *     minimax-m3   price 2   3,000 completion tokens in 65.9 s   2,730 tokens/min
+ *     claude-sonnet-5-5  10  2,500 completion tokens in 52.3 s   2,866 tokens/min
+ *
+ * 2,800 is the middle of those two. It is a speed, not a price: a faster model buys more tokens
+ * per minute and a slower one fewer, and a session that streams nothing costs nothing, which is
+ * why the figure is labelled as a rate during generation and never as a charge per minute of
+ * being open.
+ */
+export const TOKENS_PER_MINUTE = 2_800;
 
 /** How much catalog price doubles the rate. Measured 5.01 across the fitted tiers. */
 export const PRICE_DOUBLING_POINTS = 5;
@@ -111,14 +131,32 @@ export function creditsPerThousand(theosPerRequest) {
 }
 
 /**
- * The rate as a label a reader can check against a token count.
+ * What a minute of that model's generation costs, by the equation and the measured speed.
  *
- * Per thousand tokens, in the unit the pages already name: `0.21 Credits / 1k`. Three decimal
- * places below 0.1 and two above it, which is the shape this label had from the start, when the
- * numbers came from a measured table: a fraction of a Credit needs the third digit or the cheapest
- * tiers collapse into each other and into zero, while a tier that costs whole Credits does not.
- * The equation is only good to about 8%, so nothing here claims more precision than that - the
- * digits exist to keep neighbouring prices apart, not to be trusted to the last one.
+ * The same rate as `creditsPerThousand`, with the token count a minute buys applied to it:
+ * `creditsPerMillion * TOKENS_PER_MINUTE / 1e6`. Nothing new is being claimed - this is the token
+ * price restated in the unit the desktop app uses for its own prices.
+ *
+ * @param {string|number|null|undefined} theosPerRequest
+ * @returns {number|null} Credits per minute of generation.
+ */
+export function creditsPerMinute(theosPerRequest) {
+  const rate = creditsPerMillion(theosPerRequest);
+  return rate === null ? null : (rate * TOKENS_PER_MINUTE) / 1_000_000;
+}
+
+/**
+ * The rate as a label: what a minute of generation costs.
+ *
+ * Per minute because that is the unit the desktop app prices in and the one that survives being
+ * read at a glance: `0.60 Credits / min` for the price-10 group, `0.20` for the cheapest paid tier.
+ * Per thousand tokens is still in the API for a caller pricing its own request, and is the same
+ * number divided by the tokens a minute buys.
+ *
+ * Two decimal places at 0.1 and above, three below, which is the rule this label has always had:
+ * a fraction of a Credit needs the third digit or the cheap tiers round into each other, and a
+ * tier that costs whole Credits does not. The equation is only good to a few tens of percent, so
+ * nothing here claims more precision than the digits needed to keep neighbouring prices apart.
  *
  * A free model is `Unmetered`; a model with no price at all is `Unknown`, never `0`.
  *
@@ -126,9 +164,9 @@ export function creditsPerThousand(theosPerRequest) {
  * @returns {string}
  */
 export function rateLabelFor(theosPerRequest) {
-  const rate = creditsPerThousand(theosPerRequest);
+  const rate = creditsPerMinute(theosPerRequest);
   if (rate === null) return 'Unknown';
   if (rate === 0) return 'Unmetered';
   const digits = rate >= 0.1 ? 2 : 3;
-  return `${rate.toFixed(digits)} Credits / 1k`;
+  return `${rate.toFixed(digits)} Credits / min`;
 }

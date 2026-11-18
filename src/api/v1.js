@@ -23,7 +23,7 @@ import {
   rateLabel,
 } from '../deepai/catalog.js';
 import { streamChatCompletion, streamResponsesCompletion } from '../deepai/client.js';
-import { creditsPerThousand } from '../deepai/pricing.js';
+import { creditsPerMinute, creditsPerThousand } from '../deepai/pricing.js';
 import { UpstreamError } from '../deepai/wire.js';
 import { acceptsImages, countImages, withoutImages } from '../deepai/images.js';
 import { isMultimodalRejection, noteMultimodalRejection, rejectsImages } from '../deepai/multimodal.js';
@@ -480,12 +480,14 @@ export function v1Router(db, options = {}) {
            * The catalog's per-request figure, and what a request actually costs.
            *
            * The first is DeepAI's own number and it is a ceiling: measured, a real MiniMax M3
-           * request cost 0.0082 Credits against a catalog figure of 2. The second is the rate in
-           * the unit a caller can multiply by its own token count - Credits per thousand tokens,
-           * the same unit the pages show as `0.21 Credits / 1k` - and is `null` for a model the
-           * catalog sent no price for: a missing number, not an invented one.
+           * request cost 0.0082 Credits against a catalog figure of 2. The second is where the
+           * equation puts that tier, in two units: per minute of generation, which is what the
+           * pages show as `0.60 Credits / min`, and per thousand tokens, for a caller pricing its
+           * own token count. Both are `null` for a model the catalog sent no price for: a missing
+           * number, not an invented one.
            */
           credits_per_request: model.theosPerRequest ?? null,
+          credits_per_minute: creditsPerMinute(model.theosPerRequest),
           credits_per_thousand_tokens: creditsPerThousand(model.theosPerRequest),
           rate_label: rateLabel(model),
         })),

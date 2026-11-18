@@ -177,7 +177,7 @@
   "metric.modelsAvailable": "Verfügbare Modelle",
   "metric.owner": "Inhaber",
   "metric.perWindow": "pro {window}",
-  "metric.rate": "Credits / 1k Token (gemessen)",
+  "metric.rate": "Credits / Min. Generierung (gemessen)",
   "metric.reasoning": "Reasoning",
   "metric.requests": "Anfragen",
   "metric.requestsCount": {
@@ -202,7 +202,7 @@
   "models.lastUsed": "zuletzt verwendet {when}",
   "models.pillFree": "Kostenlos - ohne Limit",
   "models.pillPremium": "Premium - in Credits abgerechnet",
-  "models.subtitle": "Die hier verfügbaren Modelle. Kostenlose Modelle kosten nichts; Premium-Modelle belasten dein Credits-Guthaben und sind pro 1k Token bepreist, gemessen daran, was Anfragen tatsächlich kosten.",
+  "models.subtitle": "Die hier verfügbaren Modelle. Kostenlose Modelle kosten nichts; Premium-Modelle belasten dein Credits-Guthaben und sind pro Minute Generierung bepreist, gemessen daran, was Anfragen tatsächlich kosten.",
   "models.title": "Modelle",
   "models.unavailable": "Modellliste nicht verfügbar.",
   "models.usedNote": "Verwendete Tokens zeigt den Traffic dieses Monats durch das Gateway.",

@@ -236,18 +236,36 @@ cheapest paid tiers measured below it - MiniMax M3 at 31.7 where the equation sa
 resolve, so the fit is on the tiers from 5 up and those two are an extrapolation. A small request
 still costs thousandths either way, which is the point.
 
-The gateway therefore shows the equation's rate in the model list, in the unit a caller can
-multiply its own token count by - `0.21 Credits / 1k`, the same rate as the 214 per million above -
-and never the catalog's per-request figure. Per thousand because that is the size a person can use:
-every tier below 20 is a fraction of a Credit per thousand tokens, and a caller pricing its own
-request divides by a thousand, not by a million. Three decimals below 0.1 and two above, so the
-cheapest tiers - `0.071` at price 2, `0.081` at 3, `0.11` at 5 - do not round into each other.
-The top tier is extrapolated far past anything measured: price 50 doubles four more times, to
-54.78 Credits per thousand, and nothing on this account could be bought at that price to check it
-against, because the endpoint answers 404 for GPT-6 Astra.
-`usage` in an API answer carries `credits_per_thousand_tokens` next to `credits_per_request`, so a
-caller can price a request itself. `src/deepai/pricing.js` holds the equation, the measurements it
-was fitted to and the tolerance a future edit has to keep.
+The gateway therefore shows the equation's rate in the model list, and in the unit DeepAI Code
+itself prices in: **per minute of generation**. The app's own picker says "Theos are spent per
+minute of active session time at a rate set by the model and reasoning effort", so a minute is the
+quantity a reader is already being asked to think in. The per-thousand rate stays in the answer for
+a caller pricing its own token count, but the page shows `0.60 Credits / min` for the price-10
+group and `0.20` for the cheapest paid tier.
+
+A minute is the token rate times a measured speed, and the speed was measured the same way the
+prices were, by reading the balance before and after a long paid run:
+
+| model | price | completion tokens | wall time | tokens per minute |
+| --- | --- | --- | --- | --- |
+| minimax-m3 | 2 | 3,000 | 65.9 s | 2,730 |
+| claude-sonnet-5-5 | 10 | 2,500 | 52.3 s | 2,866 |
+
+`TOKENS_PER_MINUTE = 2_800` is their middle, and it is a speed rather than a price: a faster model
+buys more tokens for the same minute and a slower one fewer, and a session that streams nothing
+costs nothing. The figure is therefore a rate during generation, never a charge for having a page
+open, and a test pins the constant so it cannot be moved without re-measuring.
+
+Three decimals below 0.1 and two above, the rounding this label has always had, so the cheapest
+tiers - `0.20` at price 2, `0.23` at 3, `0.30` at 5 - do not round into each other. The top tier is
+extrapolated far past anything measured: price 50 doubles four more times, to `153.40 Credits /
+min`, and nothing on this account could be bought at that price to check it against, because the
+endpoint answers 404 for GPT-6 Astra.
+
+`usage` in an API answer carries `credits_per_minute` and `credits_per_thousand_tokens` next to
+`credits_per_request`, so a caller can price a request itself either way. `src/deepai/pricing.js`
+holds the equation, the measurements it was fitted to, the measured speed and the tolerance a
+future edit has to keep.
 
 ### A balance is not the same as access
 
