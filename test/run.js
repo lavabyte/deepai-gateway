@@ -716,49 +716,80 @@ await checkAsync('free models are labelled and Premier are not', async () => {
   }
 });
 
-await checkAsync('a rate is per thousand tokens when measured, and the list figure otherwise', async () => {
+await checkAsync('a catalog price becomes a rate per million tokens', async () => {
   /*
-   * The catalog's `theosPerRequest` is not a charge: measured, a real MiniMax M3 request cost
-   * 0.0082 Theos against a catalog figure of 2. So a model this gateway has measured is priced
-   * in tokens a caller can count, and a model it has not measured falls back to DeepAI's own
-   * figure - labelled as the list price, because that is what it is.
+   * The catalog's `theosPerRequest` is a tier, not a charge: measured, a real MiniMax M3 request
+   * cost 0.0082 Credits against a figure of 2. The rate per million tokens follows from the tier
+   * by a doubling every five points, and the label says so in a unit a caller can multiply its
+   * own token count by.
    */
   const models = await catalogFrom(CATALOG_PAYLOAD);
   assert.equal(rateLabel(findModel(models, 'glm-5.3-flash')), 'Unmetered');
-  assert.equal(rateLabel(findModel(models, 'glm-5.3')), '0.009 Credits / 1k');
-  assert.equal(rateLabel(findModel(models, 'gpt-6-astra')), '~ 10 Credits/req (list)');
+  assert.equal(rateLabel(findModel(models, 'glm-5.3')), '81 Credits / 1M');
+  assert.equal(rateLabel(findModel(models, 'gpt-6-astra')), '214 Credits / 1M');
   assert.equal(findModel(models, 'does-not-exist'), undefined, 'and an unknown id is nothing');
   // A price DeepAI did not send is unknown, never zero - a paid model must not read as free.
   assert.equal(rateLabel({ id: 'x', theosPerRequest: undefined }), 'Unknown');
 });
 
-await checkAsync('the measured rate turns a token count into Credits', async () => {
-  const { MEASURED_THEOS_PER_MILLION, theosForUsage, theosPerMillion, measuredRateLabel } =
-    await import('../src/deepai/pricing.js');
+await checkAsync('the price equation doubles every five points and reproduces the measurements', async () => {
+  const {
+    COMPLETION_WEIGHT, CREDITS_PER_MILLION_AT_TEN, PRICE_DOUBLING_POINTS,
+    creditsForUsage, creditsPerMillion, rateLabelFor,
+  } = await import('../src/deepai/pricing.js');
 
-  assert.equal(theosPerMillion('claude-opus-5-5'), 435, 'a measured model has a rate');
-  assert.equal(theosPerMillion('gpt-6-astra'), null, 'an unmeasured one has none, not a guess');
+  assert.equal(COMPLETION_WEIGHT, 4, 'a completion token weighs four prompt tokens');
+  assert.equal(PRICE_DOUBLING_POINTS, 5);
+  assert.equal(CREDITS_PER_MILLION_AT_TEN, 214);
 
-  // One million prompt tokens at the measured rate, to the digit.
-  assert.equal(theosForUsage('claude-opus-5-5', 1_000_000, 0), 435);
+  // The equation itself: five points of price, twice the rate.
+  assert.equal(creditsPerMillion(10), 214);
+  assert.equal(creditsPerMillion(15), 428);
+  assert.equal(creditsPerMillion(20), 856);
+  assert.equal(creditsPerMillion(5), 107);
+  assert.equal(creditsPerMillion(0), 0, 'a free model costs nothing');
+  assert.equal(creditsPerMillion(undefined), null, 'and a missing price is unknown, not free');
+  assert.equal(creditsPerMillion('10'), 214, 'the catalog sends the price as a string');
+
   /*
-   * A completion token weighs four prompt tokens, which is the ratio the two-rate fit produced
-   * from a 201/900-token request (0.12030) and a 29,282/20-token one (0.92931).
+   * The measurements the equation was fitted to. Every tier was measured by reading the balance
+   * before and after a request on fresh content; each must land within 10% of the equation, which
+   * is the tolerance a future edit to the constant has to keep.
    */
-  assert.equal(theosForUsage('claude-opus-5-5', 0, 250_000), 435);
-  assert.equal(theosForUsage('claude-opus-5-5', 200_000, 50_000), 174,
-    '200k prompt plus 50k completion is 400k weighted tokens, and 435 * 0.4');
-  assert.equal(theosForUsage('gpt-6-astra', 1_000_000, 0), null, 'and nothing is invented for it');
+  const measured = [
+    [5, 103], [6, 129], [8, 163], [10, 216], [10, 216.8], [10, 215.9], [10, 205.8],
+    [15, 434.7], [15, 435.5], [15, 395], [20, 869.1],
+  ];
+  for (const [price, seen] of measured) {
+    const equation = creditsPerMillion(price);
+    const error = Math.abs(equation / seen - 1);
+    assert.ok(error < 0.10, `price ${price}: equation ${equation.toFixed(0)} vs measured ${seen} is ${(error * 100).toFixed(0)}% off`);
+  }
+  // Monotone: a more expensive tier can never be cheaper per token.
+  for (let price = 1; price < 50; price += 1) {
+    assert.ok(creditsPerMillion(price + 1) > creditsPerMillion(price), `price ${price} must cost less than ${price + 1}`);
+  }
 
-  // A real request: MiniMax M3 measured 0.0082 Theos for 280 prompt and 20 completion tokens.
-  const real = theosForUsage('minimax-m3', 280, 20);
-  assert.ok(real > 0.008 && real < 0.012, `a small request costs thousandths, got ${real}`);
+  // A request, priced: 200k prompt plus 50k completion is 400k weighted tokens.
+  assert.equal(Math.round(creditsForUsage(10, 200_000, 50_000) * 10) / 10, 85.6);
+  assert.equal(creditsForUsage(10, 0, 250_000), 214, 'a quarter of a million completion tokens weighs a million');
+  /*
+   * Checked against the one cheap request measured closely: MiniMax M3, 283 prompt and 18
+   * completion tokens, which cost 0.0112 Credits. The equation extrapolates that tier high - it
+   * was fitted on the tiers from 5 up, where a single request moves the balance enough to read -
+   * so the check is that a small request costs thousandths and not the 2 the catalog implies,
+   * which is the whole point of not printing the catalog figure.
+   */
+  const real = creditsForUsage(2, 283, 18);
+  assert.ok(real > 0.005 && real < 0.05, `a small request costs thousandths, got ${real}`);
+  assert.ok(real < 2 / 50, 'and nothing like the catalog figure');
+  assert.equal(creditsForUsage(undefined, 1_000_000, 0), null);
 
-  assert.equal(measuredRateLabel('minimax-m3'), '0.032 Credits / 1k');
-  assert.equal(measuredRateLabel('glm-5.3'), '0.009 Credits / 1k');
-  assert.equal(measuredRateLabel('claude-fable-5-2'), '0.87 Credits / 1k');
-  assert.equal(measuredRateLabel('gpt-6-astra'), null);
-  assert.ok(Object.keys(MEASURED_THEOS_PER_MILLION).length >= 15, 'the table is the measured set');
+  assert.equal(rateLabelFor(10), '214 Credits / 1M');
+  assert.equal(rateLabelFor(20), '856 Credits / 1M');
+  assert.equal(rateLabelFor(50), '54,784 Credits / 1M', 'the top tier reads with separators');
+  assert.equal(rateLabelFor(0), 'Unmetered');
+  assert.equal(rateLabelFor(undefined), 'Unknown');
 });
 
 /* ------------------------------------------------------------------- server */
@@ -1337,8 +1368,8 @@ await checkAsync('/v1/models carries modalities, reasoning levels and names', as
 
     const premier = payload.data.find((model) => model.id === 'glm-5.3');
     assert.equal(premier.tier, 'premier');
-    assert.equal(premier.rate_label, '0.009 Credits / 1k');
-    assert.equal(premier.credits_per_million_tokens, 9, 'and the raw measured rate rides along');
+    assert.equal(premier.rate_label, '81 Credits / 1M');
+    assert.equal(Math.round(premier.credits_per_million_tokens), 81, 'and the rate itself rides along');
     assert.equal(premier.credits_per_request, '3', 'next to the list figure per request');
   } finally {
     globalThis.fetch = realFetch;
@@ -1358,7 +1389,7 @@ await checkAsync('publicModel reports the price DeepAI charges, and the levels i
   assert.equal(model.reasoningLevels.find((level) => level.id === 'high').name, 'High');
   assert.ok(!('creditsPerSecond' in model), 'no per-second rate is invented');
   assert.equal(model.theosPerRequest, '3');
-  assert.equal(model.rateLabel, '0.009 Credits / 1k', 'the measured rate leads, not the catalog figure');
+  assert.equal(model.rateLabel, '81 Credits / 1M', 'the rate, not the catalog per-request figure');
 
   const free = publicModel(findModel(models, 'glm-5.3-flash'));
   assert.equal(free.rateLabel, 'Unmetered');

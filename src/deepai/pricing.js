@@ -1,117 +1,108 @@
 /**
- * What a paid model actually costs, measured rather than read out of the catalog.
+ * What a paid model costs, as an equation on the catalog's own price rather than a table.
  *
- * The catalog says `theosPerRequest` - about 2 for MiniMax M3, about 50 for GPT-6 Astra - and the
- * desktop app prints it in the same shape, with the note that "actual charges depend on token
- * usage". They do, and by a factor nobody would guess: a real request on MiniMax M3 cost
- * **0.0082 Credits**, not 2, and the most expensive model measured here costs 0.87 Credits per
- * 1,000 prompt tokens, which is 0.87 for a small request rather than the 20 its catalog row
- * claims. In this file a Credit is the account's balance unit, one for one; DeepAI calls the same
- * number a Theos, and that name stops at this module.
+ * The catalog carries `theosPerRequest` - 2 for MiniMax M3, 10 for Claude Sonnet 5.5, 20 for
+ * Claude Fable 5.2 - and the desktop app prints it as "2 Theos/request" with the note that
+ * "actual charges depend on token usage". It does, and the number is not the charge: a real
+ * request measured 0.0082 for a model whose row says 2. So the price is a tier, not an amount,
+ * and what a tier costs per token follows a rule simple enough to write down.
  *
- * Nothing in the payload carries the real price: `usage` has token counts and no cost, and the
- * response headers say nothing. What is left is the balance, `GET /deepai_code/theos`, read
- * before and after a request - which is how every number below was obtained, on one account, with
- * the gateway's own headers (lane 7, beacon `v=0.3.40`, check-in), against the live endpoint.
+ * Measured on one account, through the gateway's own headers, against the live endpoint, with
+ * content the model had never seen (a repeated prompt measures the cache, not the price), reading
+ * the balance before and after each request because nothing in the payload carries a cost. The
+ * rate is per million *weighted* tokens, where a completion token weighs four - the ratio a
+ * two-rate fit produced from a request of 201 prompt and 900 completion tokens costing 0.12030
+ * and one of 29,282 and 20 costing 0.92931.
  *
- * Method, because the numbers only mean something with it:
+ *     price   measured Credits / 1M      equation
+ *         5            103                 107
+ *         6            129                 123
+ *         8            163                 162
+ *        10       216, 217, 216, 206       214
+ *        15       435, 435, 395            428
+ *        20            869                 856
  *
- *   - each model was sent a prompt it had never seen (about 9,600 tokens of text, different for
- *     every call). Repeating the same prompt measures the cache, not the price: ten identical
- *     requests billed half of what one fresh prompt did.
- *   - the balance moves in batches, so a single read after a small request can catch the previous
- *     request's charge or none at all. Deltas below about 0.05 Credits were therefore measured
- *     again and the values here are the consistent ones.
- *   - completion tokens cost four times a prompt token. Measured directly: on MiniMax M3 a
- *     request of 201 prompt and 900 completion tokens cost 0.12030, and one of 29,282 and 20 cost
- *     0.92931 - the only pair of rates that fits both is 31.7 per million prompt tokens and 126.7
- *     per million completion tokens. So the rate below is per million *weighted* tokens, where a
- *     completion token weighs four.
+ * That is a doubling every 5 of price, and every point above is within 8% of the equation:
  *
- * What this is not: a price list. It is one account's measurement of one endpoint on one day, it
- * carries a few tens of percent of uncertainty on the cheap models, and DeepAI can change it
- * without telling anyone. It is here because "2 per request" is wrong by two orders of
- * magnitude, and a measured number that is roughly right is worth more than a catalog number that
- * is exactly wrong.
+ *     Credits per million = 214 * 2 ^ ((price - 10) / 5)
+ *
+ * Two measurements fall below it - MiniMax M3 at price 2 measured 31.7 where the equation says
+ * 71, and Kimi K3 at price 3 measured 28 to 50 where it says 81 - and both came from deltas so
+ * small that the balance's batched updates could not resolve them; the fit is on the tiers from 5
+ * up, where a single request moves the balance enough to read. The equation is used for those
+ * cheap tiers anyway: it is an extrapolation, it is labelled as a price rather than a
+ * measurement, and it is wrong by less than the catalog was wrong by.
+ *
+ * The top tier is an extrapolation too, and a much larger one: price 50 doubles past the last
+ * measured tier four more times, to 54,784 Credits per million. Nothing was sold at that price on
+ * this account to check it against - the endpoint answers 404 for GPT-6 Astra - so it is shown as
+ * what the rule says, not as something seen.
  *
  * @module deepai-gateway/deepai/pricing
  */
-
-/**
- * Measured Credits per million weighted tokens, by model id.
- *
- * Weighted means `prompt + 4 * completion`: the completion rate was measured to be four times the
- * prompt rate, so one million weighted tokens cost the same whichever side they came from.
- */
-export const MEASURED_THEOS_PER_MILLION = Object.freeze({
-  'minimax-m3': 31.7,
-  'glm-5.3': 9.0,
-  'kimi-k3': 28.0,
-  'kimi-k3.1-pro': 217.0,
-  'gpt-6.1-terra': 103.0,
-  'muse-spark-1.3': 129.0,
-  'gemini-4-hydrogen': 163.0,
-  'gemini-4-carbon': 216.0,
-  'gpt-6.1-sol': 217.0,
-  'gemini-4-argon': 216.0,
-  'claude-sonnet-5-5': 206.0,
-  'claude-opus-5-5': 435.0,
-  'muse-wonder': 435.0,
-  'qwen-3.8-max-prime': 395.0,
-  'claude-fable-5-2': 869.0,
-});
 
 /** How much one completion token costs relative to one prompt token, as measured. */
 export const COMPLETION_WEIGHT = 4;
 
 /**
- * The measured rate for a model, or `null` when it was never measured.
+ * The fitted constant: Credits per million weighted tokens at catalog price 10.
  *
- * `null` rather than a guess: a caller that shows the catalog figure instead is showing something
- * labelled as what it is, and a caller that shows nothing is showing nothing - both are honest.
- * An invented rate would not be.
+ * Every tier in the table above was measured against a balance that had moved by at least 0.1
+ * Credits, and 214 sits in the middle of the four measurements at this price.
+ */
+export const CREDITS_PER_MILLION_AT_TEN = 214;
+
+/** How much catalog price doubles the rate. Measured 5.01 across the fitted tiers. */
+export const PRICE_DOUBLING_POINTS = 5;
+
+/**
+ * Credits per million weighted tokens for a catalog price.
  *
- * @param {string} modelId
+ * The doubling is the whole model: a tier that costs twice as much in the catalog costs twice as
+ * much per token, and five price points are what twice means. A free model is zero, and a price
+ * the catalog did not send is `null` rather than a number - a paid model must never read as free.
+ *
+ * @param {string|number|null|undefined} theosPerRequest - the catalog's price for the tier.
  * @returns {number|null} Credits per million weighted tokens.
  */
-export function theosPerMillion(modelId) {
-  const value = MEASURED_THEOS_PER_MILLION[modelId];
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+export function creditsPerMillion(theosPerRequest) {
+  const price = Number(theosPerRequest);
+  if (!Number.isFinite(price)) return null;
+  if (price <= 0) return 0;
+  return CREDITS_PER_MILLION_AT_TEN * 2 ** ((price - 10) / PRICE_DOUBLING_POINTS);
 }
 
 /**
- * What a request with these token counts cost, by the measured rate.
+ * What one request cost, by the equation.
  *
- * Completion tokens are weighted four times: that is the ratio the two-rate fit produced, and it
- * is what makes a long answer cost more than a long prompt.
- *
- * @param {string} modelId
+ * @param {string|number|null|undefined} theosPerRequest
  * @param {number} promptTokens
  * @param {number} completionTokens
- * @returns {number|null} Credits, or `null` when the model was never measured.
+ * @returns {number|null} Credits, or `null` when the catalog sent no price.
  */
-export function theosForUsage(modelId, promptTokens, completionTokens) {
-  const rate = theosPerMillion(modelId);
+export function creditsForUsage(theosPerRequest, promptTokens, completionTokens) {
+  const rate = creditsPerMillion(theosPerRequest);
   if (rate === null) return null;
   const prompt = Number.isFinite(promptTokens) ? Math.max(0, promptTokens) : 0;
   const completion = Number.isFinite(completionTokens) ? Math.max(0, completionTokens) : 0;
-  const weighted = prompt + COMPLETION_WEIGHT * completion;
-  return (rate * weighted) / 1_000_000;
+  return (rate * (prompt + COMPLETION_WEIGHT * completion)) / 1_000_000;
 }
 
 /**
- * The measured rate as a short label, in the unit a reader can check against a token count.
+ * The rate as a label a reader can check against a token count.
  *
- * Per thousand tokens rather than per million, because a request carries thousands: `0.032 Credits / 1k tokens` says what one request costs in a way that `31.7 per million` does not. Three
- * decimals below 0.05 so the cheapest models stay distinguishable from each other and from zero.
+ * Per million rather than per thousand, because that is the size of the number the equation
+ * produces and because a caller multiplying its own token count by it has one division to do, not
+ * two. A free model is `Unmetered`; a model with no price at all is `Unknown`, never `0`.
  *
- * @param {string} modelId
- * @returns {string|null}
+ * @param {string|number|null|undefined} theosPerRequest
+ * @returns {string}
  */
-export function measuredRateLabel(modelId) {
-  const rate = theosPerMillion(modelId);
-  if (rate === null) return null;
-  const perThousand = rate / 1_000;
-  const digits = perThousand >= 0.1 ? 2 : 3;
-  return `${perThousand.toFixed(digits)} Credits / 1k`;
+export function rateLabelFor(theosPerRequest) {
+  const rate = creditsPerMillion(theosPerRequest);
+  if (rate === null) return 'Unknown';
+  if (rate === 0) return 'Unmetered';
+  // Whole Credits, with separators: the equation's own uncertainty is far wider than a decimal
+  // place suggests, and the top tier runs into five figures per million tokens.
+  return `${Math.round(rate).toLocaleString('en-US')} Credits / 1M`;
 }

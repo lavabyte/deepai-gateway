@@ -23,7 +23,7 @@ import {
   rateLabel,
 } from '../deepai/catalog.js';
 import { streamChatCompletion, streamResponsesCompletion } from '../deepai/client.js';
-import { theosForUsage, theosPerMillion } from '../deepai/pricing.js';
+import { creditsPerMillion } from '../deepai/pricing.js';
 import { UpstreamError } from '../deepai/wire.js';
 import { acceptsImages, countImages, withoutImages } from '../deepai/images.js';
 import { isMultimodalRejection, noteMultimodalRejection, rejectsImages } from '../deepai/multimodal.js';
@@ -485,7 +485,7 @@ export function v1Router(db, options = {}) {
            * model this gateway has never measured - a missing number, not an invented one.
            */
           credits_per_request: model.theosPerRequest ?? null,
-          credits_per_million_tokens: theosPerMillion(model.id),
+          credits_per_million_tokens: creditsPerMillion(model.theosPerRequest),
           rate_label: rateLabel(model),
         })),
       });

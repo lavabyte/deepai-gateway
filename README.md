@@ -203,50 +203,49 @@ Measured, against the same account that used to get nothing back:
 | ten turns of 20,000 characters | answer unrelated to the turn asked about | `trim=drop11`, 44,425 tokens, answered with the newest turn |
 | a 60,000-character message | read whole | read whole, no trim |
 
-### What a paid request costs: Theos, per token, measured
+### What a paid request costs: an equation on the catalog's price
 
-The catalog carries `theosPerRequest` - `~2` for MiniMax M3, `~50` for GPT-6 Astra - and the
-desktop app prints it as `2 Theos/request` with the note that "actual charges depend on token
-usage". They do, and by two orders of magnitude: a real MiniMax M3 request measured **0.0082
-Theos**. Nothing in the payload carries the price (`usage` has tokens and no cost, the headers say
-nothing), so the only way to know it is the balance, `GET /deepai_code/theos`, read before and
-after a request. Every number below comes from that, on one account, through this gateway's own
-headers, with a prompt the model had never seen - a repeated prompt measures the cache, not the
-price: ten identical requests billed half of what one fresh prompt did.
+The catalog carries `theosPerRequest` - 2 for MiniMax M3, 10 for Claude Sonnet 5.5, 20 for Claude
+Fable 5.2 - and the desktop app prints it as "2 Theos/request" with the note that "actual charges
+depend on token usage". They do, and by two orders of magnitude: a real MiniMax M3 request
+measured **0.0082 Credits**. So that figure is a price tier, not an amount, and what a tier costs
+per token follows a rule simple enough to write down:
 
-Measured rates, in Theos per thousand prompt tokens (a completion token costs four):
+    Credits per million weighted tokens = 214 * 2 ^ ((price - 10) / 5)
 
-| model | catalog says | measured |
+A completion token weighs four prompt tokens, and every five points of catalog price doubles the
+rate. Both halves were measured rather than assumed: on MiniMax M3 a request of 201 prompt and 900
+completion tokens cost 0.12030 and one of 29,282 and 20 cost 0.92931, and the only pair of rates
+that fits both is 31.7 per million prompt and 126.7 per million completion.
+
+The fit, from the balance read before and after each request on content the model had never seen
+(a repeated prompt measures the cache, not the price):
+
+| price | measured Credits / 1M | equation |
 | --- | --- | --- |
-| GLM 5.3 | 3 /req | 0.009 Theos / 1k |
-| Kimi K3 | 3 /req | 0.028 Theos / 1k |
-| MiniMax M3 | 2 /req | 0.032 Theos / 1k |
-| GPT-6.1 Terra | 5 /req | 0.10 Theos / 1k |
-| Muse Spark 1.3 | 6 /req | 0.13 Theos / 1k |
-| Gemini 4 Hydrogen | 8 /req | 0.16 Theos / 1k |
-| Claude Sonnet 5.5 | 10 /req | 0.21 Theos / 1k |
-| Gemini 4 Carbon, Gemini 4 Argon, GPT-6.1 Sol | 10 /req | 0.22 Theos / 1k |
-| Kimi K3.1 Pro | 3 /req | 0.22 Theos / 1k |
-| Qwen 3.8 Max Prime | 15 /req | 0.40 Theos / 1k |
-| Claude Opus 5.5, Muse Wonder | 15 /req | 0.43 Theos / 1k |
-| Claude Fable 5.2 | 20 /req | 0.87 Theos / 1k |
-| GPT-6 Astra | 50 /req | not measured - the endpoint answers `404` for it |
+| 5 | 103 | 107 |
+| 6 | 129 | 123 |
+| 8 | 163 | 162 |
+| 10 | 216, 217, 216, 206 | 214 |
+| 15 | 435, 435, 395 | 428 |
+| 20 | 869 | 856 |
 
-The catalog figure is not proportional to the charge in either direction: Kimi K3 and GLM 5.3 are
-both listed at 3 and differ by three times, and Kimi K3.1 Pro is listed at 3 and costs more than a
-model listed at 10.
+Every point is within 8%, and the doubling is 5.01 measured against 5 in the equation. The two
+cheapest paid tiers measured below it - MiniMax M3 at 31.7 where the equation says 71, Kimi K3 at
+28 to 50 where it says 81 - and both came from balance deltas too small for the batched updates to
+resolve, so the fit is on the tiers from 5 up and those two are an extrapolation. A small request
+still costs thousandths either way, which is the point.
 
-The balance's unit is **Theos**, which is what DeepAI calls it (`X-DeepAI-Code-Theos`, `/theos`,
-"Theos left" in the app); this gateway used to say "Credits" and no longer does.
+The gateway therefore shows the equation's rate in the model list, in the unit a caller can
+multiply its own token count by - `214 Credits / 1M` - and never the catalog's per-request figure.
+The top tier is extrapolated far past anything measured: price 50 doubles four more times, to
+54,784 Credits per million, and nothing on this account could be bought at that price to check it
+against, because the endpoint answers 404 for GPT-6 Astra.
+`usage` in an API answer carries `credits_per_million_tokens` next to `credits_per_request`, so a
+caller can price a request itself. `src/deepai/pricing.js` holds the equation, the measurements it
+was fitted to and the tolerance a future edit has to keep.
 
-The gateway therefore shows the measured rate in the model list, in the unit a caller can count
-against its own token usage: `0.032 Theos / 1k`. A model it has never measured shows DeepAI's own
-figure, labelled as the list price it is - `~ 50 Theos/req (list)` - rather than a guess. The
-weighting, the method and the size of the uncertainty are documented at the top of
-`src/deepai/pricing.js`; `usage` in an API answer now carries `theos_per_million_tokens` next to
-DeepAI's `theos_per_request`, so a caller can price a request itself.
-
-### A balance is not the same as access
+### A balance is not the same as access### A balance is not the same as access
 
 DeepAI answers three different questions about one key, and they can disagree:
 
