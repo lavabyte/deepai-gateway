@@ -186,7 +186,7 @@
   "metric.modelsAvailable": "Dostępne modele",
   "metric.owner": "Właściciel",
   "metric.perWindow": "na {window}",
-  "metric.rate": "Kredyty / min generowania (zmierzone)",
+  "metric.rate": "~ Kredyty / żądanie",
   "metric.reasoning": "Rozumowanie",
   "metric.requests": "Żądania",
   "metric.requestsCount": {
@@ -213,7 +213,7 @@
   "models.lastUsed": "ostatnio użyty {when}",
   "models.pillFree": "Darmowy - bez limitu",
   "models.pillPremium": "Premium - rozliczane w kredytach",
-  "models.subtitle": "Modele dostępne w tej bramie. Darmowe nic nie kosztują; modele Premium pobierają kredyty i są wycenione za minutę generowania, zmierzone z tego, ile żądania naprawdę kosztują.",
+  "models.subtitle": "Katalog DeepAI Code. Darmowe modele są nielimitowane; modele Premium pobierają kredyty z salda zgłaszanego przez DeepAI. Stawki są szacunkowe.",
   "models.title": "Modele",
   "models.unavailable": "Lista modeli niedostępna.",
   "models.usedNote": "\"Użyte tokeny\" pokazuje ruch przez bramę w tym miesiącu.",

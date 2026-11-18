@@ -46,18 +46,20 @@ export function displayName(model) {
 }
 
 /**
- * What a paid model costs, from the catalog price by way of the equation in `pricing.js`.
+ * What a paid model costs, in DeepAI's own terms: `~ 10 Credits / request`.
  *
- * The catalog's `theosPerRequest` is a price tier and not an amount: a real MiniMax M3 request
- * measured 0.0082 Credits against a row that says 2. The rate follows from the tier by a doubling
- * every five points, so the label is what a minute of generation costs - `~0.60 Credits / min` - and
- * not a per-request figure that overstates the charge by two orders of magnitude.
+ * This is the catalog's `theosPerRequest` - the figure DeepAI itself publishes for a model - shown
+ * with a tilde because the provider says the real charge depends on token usage, and it does: a
+ * MiniMax M3 request measured 0.0082 Credits against a row that says 2. A rate this gateway derived
+ * (per thousand tokens, per minute of generation) stood here for a while and was taken back out:
+ * what a reader is comparing against is the number DeepAI prints, and the gateway's job is to show
+ * that number honestly rather than to invent a unit the provider does not use.
  *
  * `Unmetered` for a free model, `Unknown` when the catalog carried no price at all: a paid model
  * must never read as free.
  *
- * The `level` argument is kept for the call sites that name a thinking level: the price does not
- * vary by level, and a caller passing one still gets the right answer.
+ * The `level` argument is kept for the call sites that name a thinking level: the catalog does not
+ * price by level, and a caller passing one still gets the right answer.
  *
  * @param {{theosPerRequest?: string}} model
  * @param {string} [level] - ignored; DeepAI does not price by level.
@@ -65,7 +67,10 @@ export function displayName(model) {
  */
 export function rateLabel(model, level) {
   void level;
-  return rateLabelFor(model?.theosPerRequest);
+  const value = Number(model?.theosPerRequest);
+  if (!Number.isFinite(value)) return 'Unknown';
+  if (value === 0) return 'Unmetered';
+  return `~ ${value} Credits / request`;
 }
 
 /**

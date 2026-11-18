@@ -177,7 +177,7 @@
   "metric.modelsAvailable": "Models available",
   "metric.owner": "Owner",
   "metric.perWindow": "per {window}",
-  "metric.rate": "Credits / min of generation (measured)",
+  "metric.rate": "~ Credits / request",
   "metric.reasoning": "Reasoning",
   "metric.requests": "Requests",
   "metric.requestsCount": {
@@ -202,7 +202,7 @@
   "models.lastUsed": "last used {when}",
   "models.pillFree": "Free - unmetered",
   "models.pillPremium": "Premium - billed in Credits",
-  "models.subtitle": "The models available here. Free models cost nothing; Premium models draw on your Credits and are priced per minute of generation, measured from what requests actually cost.",
+  "models.subtitle": "The DeepAI Code catalog. Free models are unmetered; Premium models draw on your Credits balance as reported by DeepAI. Rates shown are approximate.",
   "models.title": "Models",
   "models.unavailable": "Model list unavailable.",
   "models.usedNote": "Tokens used shows this month's traffic through the gateway.",

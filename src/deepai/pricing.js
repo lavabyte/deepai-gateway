@@ -146,7 +146,9 @@ export function creditsPerMinute(theosPerRequest) {
 }
 
 /**
- * The rate as a label: what a minute of generation costs, unrounded.
+ * The rate as a label, for an answer that wants a string: what a minute of generation costs,
+ * unrounded. The model pages do not use it - they state DeepAI's own price per request - so this is
+ * the string form of the two API fields below, and nothing else depends on it.
  *
  * `~0.60 Credits / min` for the price-10 group, `~0.20` for the cheapest paid tier, `~153.40` for
  * the extrapolated top. Unrounded because rounding to whole Credits turned six of the sixteen paid
