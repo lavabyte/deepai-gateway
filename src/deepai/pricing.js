@@ -34,7 +34,7 @@
  * measurement, and it is wrong by less than the catalog was wrong by.
  *
  * The equation is written per million because that is the unit the measurements are in. What the
- * pages show is the same rate per minute of generation - `0.60 Credits / min` for the price-10
+ * pages show is the same rate per minute of generation - `~1 Credits / min` for the price-10
  * group - because DeepAI Code itself prices in minutes ("Theos are spent per minute of active
  * session time"), and because a minute is the quantity a person can picture. The per-thousand rate
  * stays in the answer for a caller pricing its own token count.
@@ -146,17 +146,18 @@ export function creditsPerMinute(theosPerRequest) {
 }
 
 /**
- * The rate as a label: what a minute of generation costs.
+ * The rate as a label: what a minute of generation costs, to the nearest whole Credit.
  *
- * Per minute because that is the unit the desktop app prices in and the one that survives being
- * read at a glance: `0.60 Credits / min` for the price-10 group, `0.20` for the cheapest paid tier.
- * Per thousand tokens is still in the API for a caller pricing its own request, and is the same
- * number divided by the tokens a minute buys.
+ * `~1 Credits / min` for the price-10 group, `~2` for 20, `~153` for the extrapolated top. Whole
+ * Credits and a tilde in front, because nothing here is exact: the equation fits the measurements
+ * to within a few tens of percent, and the minute is a measured speed rather than a property of the
+ * model. A decimal point would claim a precision the number does not have; the tilde says "about"
+ * in the one place a reader looks, and the unrounded rate is still in the API as
+ * `credits_per_minute` for anyone who wants to multiply it out.
  *
- * Two decimal places at 0.1 and above, three below, which is the rule this label has always had:
- * a fraction of a Credit needs the third digit or the cheap tiers round into each other, and a
- * tier that costs whole Credits does not. The equation is only good to a few tens of percent, so
- * nothing here claims more precision than the digits needed to keep neighbouring prices apart.
+ * The cheapest paid tiers round to `~0` - a fifth of a Credit a minute genuinely is nothing beside
+ * the model that answers at sixty times the price - which is why the tilde matters: `0` alone would
+ * read as free when the model is merely cheap.
  *
  * A free model is `Unmetered`; a model with no price at all is `Unknown`, never `0`.
  *
@@ -167,6 +168,5 @@ export function rateLabelFor(theosPerRequest) {
   const rate = creditsPerMinute(theosPerRequest);
   if (rate === null) return 'Unknown';
   if (rate === 0) return 'Unmetered';
-  const digits = rate >= 0.1 ? 2 : 3;
-  return `${rate.toFixed(digits)} Credits / min`;
+  return `~${Math.round(rate)} Credits / min`;
 }
