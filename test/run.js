@@ -716,17 +716,17 @@ await checkAsync('free models are labelled and Premier are not', async () => {
   }
 });
 
-await checkAsync('a catalog price becomes a rate per million tokens', async () => {
+await checkAsync('a catalog price becomes a rate per thousand tokens', async () => {
   /*
    * The catalog's `theosPerRequest` is a tier, not a charge: measured, a real MiniMax M3 request
-   * cost 0.0082 Credits against a figure of 2. The rate per million tokens follows from the tier
-   * by a doubling every five points, and the label says so in a unit a caller can multiply its
-   * own token count by.
+   * cost 0.0082 Credits against a figure of 2. The rate follows from the tier by a doubling every
+   * five points, and the label states it per thousand tokens - the unit a reader can multiply a
+   * token count by in their head, and the unit the pages name.
    */
   const models = await catalogFrom(CATALOG_PAYLOAD);
   assert.equal(rateLabel(findModel(models, 'glm-5.3-flash')), 'Unmetered');
-  assert.equal(rateLabel(findModel(models, 'glm-5.3')), '81 Credits / 1M');
-  assert.equal(rateLabel(findModel(models, 'gpt-6-astra')), '214 Credits / 1M');
+  assert.equal(rateLabel(findModel(models, 'glm-5.3')), '0.08 Credits / 1k');
+  assert.equal(rateLabel(findModel(models, 'gpt-6-astra')), '0.21 Credits / 1k');
   assert.equal(findModel(models, 'does-not-exist'), undefined, 'and an unknown id is nothing');
   // A price DeepAI did not send is unknown, never zero - a paid model must not read as free.
   assert.equal(rateLabel({ id: 'x', theosPerRequest: undefined }), 'Unknown');
@@ -735,7 +735,7 @@ await checkAsync('a catalog price becomes a rate per million tokens', async () =
 await checkAsync('the price equation doubles every five points and reproduces the measurements', async () => {
   const {
     COMPLETION_WEIGHT, CREDITS_PER_MILLION_AT_TEN, PRICE_DOUBLING_POINTS,
-    creditsForUsage, creditsPerMillion, rateLabelFor,
+    creditsForUsage, creditsPerMillion, creditsPerThousand, rateLabelFor,
   } = await import('../src/deepai/pricing.js');
 
   assert.equal(COMPLETION_WEIGHT, 4, 'a completion token weighs four prompt tokens');
@@ -785,9 +785,19 @@ await checkAsync('the price equation doubles every five points and reproduces th
   assert.ok(real < 2 / 50, 'and nothing like the catalog figure');
   assert.equal(creditsForUsage(undefined, 1_000_000, 0), null);
 
-  assert.equal(rateLabelFor(10), '214 Credits / 1M');
-  assert.equal(rateLabelFor(20), '856 Credits / 1M');
-  assert.equal(rateLabelFor(50), '54,784 Credits / 1M', 'the top tier reads with separators');
+  /*
+   * The same rate in the unit the pages show. Thousandths of a Credit for every tier under 20, so
+   * the label keeps two decimals and the cheap tiers still differ from each other - 0.11 at price
+   * 5 against 0.16 at price 8 - while the top tier keeps its thousands separator.
+   */
+  assert.equal(creditsPerThousand(10), 0.214);
+  assert.equal(creditsPerThousand(0), 0, 'a free model is still nothing per thousand tokens');
+  assert.equal(creditsPerThousand(undefined), null);
+  assert.equal(rateLabelFor(10), '0.21 Credits / 1k');
+  assert.equal(rateLabelFor(5), '0.11 Credits / 1k');
+  assert.equal(rateLabelFor(8), '0.16 Credits / 1k', 'adjacent cheap tiers stay apart');
+  assert.equal(rateLabelFor(20), '0.86 Credits / 1k');
+  assert.equal(rateLabelFor(50), '54.78 Credits / 1k', 'the top tier reads with separators');
   assert.equal(rateLabelFor(0), 'Unmetered');
   assert.equal(rateLabelFor(undefined), 'Unknown');
 });
@@ -1368,8 +1378,8 @@ await checkAsync('/v1/models carries modalities, reasoning levels and names', as
 
     const premier = payload.data.find((model) => model.id === 'glm-5.3');
     assert.equal(premier.tier, 'premier');
-    assert.equal(premier.rate_label, '81 Credits / 1M');
-    assert.equal(Math.round(premier.credits_per_million_tokens), 81, 'and the rate itself rides along');
+    assert.equal(premier.rate_label, '0.08 Credits / 1k');
+    assert.equal(Math.round(premier.credits_per_thousand_tokens * 1000), 81, 'and the rate itself rides along');
     assert.equal(premier.credits_per_request, '3', 'next to the list figure per request');
   } finally {
     globalThis.fetch = realFetch;
@@ -1389,7 +1399,7 @@ await checkAsync('publicModel reports the price DeepAI charges, and the levels i
   assert.equal(model.reasoningLevels.find((level) => level.id === 'high').name, 'High');
   assert.ok(!('creditsPerSecond' in model), 'no per-second rate is invented');
   assert.equal(model.theosPerRequest, '3');
-  assert.equal(model.rateLabel, '81 Credits / 1M', 'the rate, not the catalog per-request figure');
+  assert.equal(model.rateLabel, '0.08 Credits / 1k', 'the rate, not the catalog per-request figure');
 
   const free = publicModel(findModel(models, 'glm-5.3-flash'));
   assert.equal(free.rateLabel, 'Unmetered');

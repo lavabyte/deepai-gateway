@@ -237,15 +237,18 @@ resolve, so the fit is on the tiers from 5 up and those two are an extrapolation
 still costs thousandths either way, which is the point.
 
 The gateway therefore shows the equation's rate in the model list, in the unit a caller can
-multiply its own token count by - `214 Credits / 1M` - and never the catalog's per-request figure.
+multiply its own token count by - `0.21 Credits / 1k`, the same rate as the 214 per million above -
+and never the catalog's per-request figure. Per thousand because that is the size a person can use:
+every tier below 20 is a fraction of a Credit per thousand tokens, and a caller pricing its own
+request divides by a thousand, not by a million.
 The top tier is extrapolated far past anything measured: price 50 doubles four more times, to
-54,784 Credits per million, and nothing on this account could be bought at that price to check it
+54.78 Credits per thousand, and nothing on this account could be bought at that price to check it
 against, because the endpoint answers 404 for GPT-6 Astra.
-`usage` in an API answer carries `credits_per_million_tokens` next to `credits_per_request`, so a
+`usage` in an API answer carries `credits_per_thousand_tokens` next to `credits_per_request`, so a
 caller can price a request itself. `src/deepai/pricing.js` holds the equation, the measurements it
 was fitted to and the tolerance a future edit has to keep.
 
-### A balance is not the same as access### A balance is not the same as access
+### A balance is not the same as access
 
 DeepAI answers three different questions about one key, and they can disagree:
 

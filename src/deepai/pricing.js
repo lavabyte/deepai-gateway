@@ -33,6 +33,11 @@
  * cheap tiers anyway: it is an extrapolation, it is labelled as a price rather than a
  * measurement, and it is wrong by less than the catalog was wrong by.
  *
+ * The equation is written per million because that is the unit the measurements are in. What the
+ * pages show is the same rate per thousand tokens - `0.21 Credits / 1k` for the price-10 group -
+ * because a reader can multiply a token count by that in their head, and because every tier below
+ * 20 would otherwise be a fraction of a Credit per million.
+ *
  * The top tier is an extrapolation too, and a much larger one: price 50 doubles past the last
  * measured tier four more times, to 54,784 Credits per million. Nothing was sold at that price on
  * this account to check it against - the endpoint answers 404 for GPT-6 Astra - so it is shown as
@@ -89,20 +94,40 @@ export function creditsForUsage(theosPerRequest, promptTokens, completionTokens)
 }
 
 /**
+ * The same rate per thousand tokens, which is the unit the pages show.
+ *
+ * The equation is fitted and documented per million because that is the size at which a real
+ * request moves a balance enough to read. A page showing it has the opposite problem: every tier
+ * under 20 comes out as a fraction of a Credit per thousand tokens - 0.21 for the price-10 group -
+ * and a reader can multiply a token count by that in their head. Both units are the same number; a
+ * thousand is simply the one a person can hold.
+ *
+ * @param {string|number|null|undefined} theosPerRequest
+ * @returns {number|null} Credits per thousand weighted tokens.
+ */
+export function creditsPerThousand(theosPerRequest) {
+  const rate = creditsPerMillion(theosPerRequest);
+  return rate === null ? null : rate / 1000;
+}
+
+/**
  * The rate as a label a reader can check against a token count.
  *
- * Per million rather than per thousand, because that is the size of the number the equation
- * produces and because a caller multiplying its own token count by it has one division to do, not
- * two. A free model is `Unmetered`; a model with no price at all is `Unknown`, never `0`.
+ * Per thousand tokens, in the unit the pages already name: `0.21 Credits / 1k`. Two decimal places
+ * and no more, because the equation's own uncertainty is far wider than that - every fitted point
+ * is within 8% of it - and trailing zeros are dropped so the cheap tiers read as `0.11` and not
+ * `0.11 Credits`. A free model is `Unmetered`; a model with no price at all is `Unknown`, never
+ * `0`.
  *
  * @param {string|number|null|undefined} theosPerRequest
  * @returns {string}
  */
 export function rateLabelFor(theosPerRequest) {
-  const rate = creditsPerMillion(theosPerRequest);
+  const rate = creditsPerThousand(theosPerRequest);
   if (rate === null) return 'Unknown';
   if (rate === 0) return 'Unmetered';
-  // Whole Credits, with separators: the equation's own uncertainty is far wider than a decimal
-  // place suggests, and the top tier runs into five figures per million tokens.
-  return `${Math.round(rate).toLocaleString('en-US')} Credits / 1M`;
+  // Rounded to the place a reader can use, then formatted so a tier over ten Credits keeps its
+  // thousands separator instead of running together.
+  const shown = Number(rate.toFixed(2));
+  return `${shown.toLocaleString('en-US')} Credits / 1k`;
 }
