@@ -230,7 +230,7 @@ What the API says about all this is therefore two numbers, not one:
 
 A client that wants to behave like the desktop app reads `context_window`; a client that wants to
 compact before anything is lost reads the other three. The same facts ride on every answer in an
-`x-gateway-prompt` header - `sent=…; received=…; budget=170000; limit=196000; served-tokens=40000;
+`x-gateway-prompt` header - `sent=170000; received=200000; budget=170000; limit=196000; served-tokens=40000;
 dropped=11` - because a client cannot learn any of this from DeepAI, whose answer to an oversized
 prompt is a normal 200. The Models page shows them side by side too: `320.0k` with `served 40.0k`
 beneath it.
