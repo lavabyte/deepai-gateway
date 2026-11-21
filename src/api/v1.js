@@ -23,6 +23,7 @@ import {
   rateLabel,
 } from '../deepai/catalog.js';
 import { streamChatCompletion, streamResponsesCompletion } from '../deepai/client.js';
+import { PROMPT_BUDGET_BYTES, PROMPT_LIMIT_BYTES, SERVED_CONTEXT_TOKENS } from '../deepai/window.js';
 import { creditsPerMinute, creditsPerThousand } from '../deepai/pricing.js';
 import { UpstreamError } from '../deepai/wire.js';
 import { acceptsImages, countImages, withoutImages } from '../deepai/images.js';
@@ -103,59 +104,28 @@ function trimNote(trimmed) {
 }
 
 /**
- * How much prompt DeepAI Code will actually read, in characters of message content, and how much
- * of a single tool result is worth sending.
+ * How much prompt DeepAI Code will actually read, and how much of it this gateway forwards.
  *
- * Measured against the live endpoint with content that cannot be compressed by a tokenizer or
- * served from a prompt cache (random six-letter words), so size was the only variable:
- *
- *    150,189 chars  -> 73,195 prompt tokens, and markers placed at 5%, 50% and 95% of the body
- *                       were all read back
- *    190,062 chars  -> 93,463 prompt tokens, answered
- *    200,111 chars  -> the completion came back empty; DeepAI reported no usage at all
- *    200,062 chars  -> 291 prompt tokens, the model answered as though nothing had been sent
- *    300,142 chars  -> 246 prompt tokens, "I haven't been shown any file in this conversation"
- *    600,189 chars  -> 216 prompt tokens, "No long text was provided"
- *
- * Splitting an oversized prompt does not help: 200,000 characters cut into three messages still
- * came back empty, and a 300,000-character tool result split into four tool messages for the
- * same call was dropped as well. The wall is the size of the prompt, not of a message.
- *
- * The unit is **bytes, not characters and not tokens**. Measured twice with a marker at the start
- * of the prompt and a marker at the end, asking for both back:
- *
- *   English prose   195,809 bytes -> whole prompt read, 40,194 prompt tokens reported
- *   English prose   196,811 bytes -> prompt discarded, 191 tokens reported, empty answer
- *   2-byte letters  193,339 bytes -> whole prompt read, 67,385 prompt tokens reported
- *   2-byte letters  197,280 bytes -> prompt discarded, 191 tokens reported
- *
- * Same bytes, wildly different token counts, and the same cliff - so what is being measured is
- * the size of the request body, at about 196 KB. An earlier pass over this ground used random
- * words, which tokenize at roughly 1.5 characters per token, and so saw the same cliff at 162,000
- * characters and read it as a character limit; it is not.
- *
- * What that means for the catalog's `contextWindow: 320000`: 320,000 tokens of English prose is
- * about 1.3 MB of body, six times over the wall, so it can never arrive. The figure is served and
- * believed - the desktop app copies `contextWindow` straight out of this catalog into its model
- * config and compacts at `contextWindow - reserveTokens` - but it has never been measured by
- * anyone, and the endpoint gives no error that would correct it: an oversized prompt comes back
- * as a normal 200.
+ * The measurements live in `deepai/window.js`, because the catalog's `contextWindow` and the real
+ * wall are the same question asked twice, and the answer has to be the same in the API, in the
+ * pages and here. In one line: the wall is about 196 KB of request body, whatever alphabet and
+ * whatever token count gets you there, and past it the endpoint does not refuse - it answers from
+ * whatever was left, which is what "the model forgets" looks like from the inside.
  *
  * The answer is therefore to shorten the prompt here, the way the app does, rather than forward
- * one that will be thrown away: a tool result longer than the budget is cut in the middle with a
- * note saying how much was left out, and if the conversation is still too long, its oldest turns
- * are dropped until it fits - the system prompt and the newest turn always survive, because they
- * are the ones being worked on.
- */
-const PROMPT_BUDGET_BYTES = 170_000;
-
-/**
- * The same wall in characters, for the sentences that explain it to a person.
+ * one that will be thrown away: a tool result longer than its allowance is cut in the middle with
+ * a note saying how much was left out, and if the conversation is still too long, turns go from
+ * the middle - never the goal at the head and never the newest turn at the tail, because those are
+ * the ones being worked on.
  *
- * Only ever used in prose: "about 170,000 bytes" means nothing to a reader, and English is where
- * one byte is one character. Every comparison in `fitPrompt` is made in bytes.
+ * What was done is said three ways: to the model, in a sentence above the transcript; to the
+ * caller, in the `x-gateway-prompt` response header; and to the operator, as `trim=drop11` on the
+ * request log line. DeepAI itself gives none of the three.
  */
-const PROMPT_BUDGET_CHARS = 170_000;
+/** The budget in characters, for the sentences that explain it to a person: English is one byte
+ * per character, so the two numbers agree where the reader lives. Every comparison in `fitPrompt`
+ * is made in bytes - see `deepai/window.js` for why, and for how much actually arrives. */
+const PROMPT_BUDGET_CHARS = PROMPT_BUDGET_BYTES;
 
 /** One tool result keeps its start and its end, and says what it lost in between. */
 const TOOL_RESULT_CHARS = 50_000;
@@ -531,7 +501,26 @@ export function v1Router(db, options = {}) {
           reasoning_levels: model.reasoning ? REASONING_LEVELS.map((level) => level.id) : [],
           input_modalities: [...model.input],
           output_modalities: ['text'],
+          /*
+           * What the catalog claims, and what actually arrives.
+           *
+           * `context_window` is DeepAI's own number, unchanged: the desktop app takes it straight
+           * out of `/deepai_code/models` and compacts at `contextWindow - reserveTokens`, so a
+           * client that reads it is doing what the app does. It is a claim, never a measurement -
+           * 320,000 tokens of English prose is about 1.3 MB of request body, six times what the
+           * endpoint will read, so it cannot be delivered.
+           *
+           * `context_window_served` is that claim in the same unit, measured: prompt tokens of
+           * ordinary prose that arrive whole. Measured on the endpoint with a marker at each end
+           * of the prompt - 195,809 bytes read whole, 196,811 bytes discarded, whatever alphabet
+           * they were made of - the wall is on bytes, so the byte figures are here too. A client
+           * that wants to compact before anything is lost should use these; a client that wants
+           * to behave like the app should use `context_window`.
+           */
           context_window: model.contextWindow,
+          context_window_served: SERVED_CONTEXT_TOKENS,
+          prompt_limit_bytes: PROMPT_LIMIT_BYTES,
+          prompt_budget_bytes: PROMPT_BUDGET_BYTES,
           max_output_tokens: model.maxTokens,
           api: model.api,
           /*
@@ -694,6 +683,27 @@ async function handleChatCompletion(db, req, res, options = {}) {
    */
   const { messages: sentMessages, trimmed } = fitPrompt(messages);
   const forwarded = promptShape(sentMessages);
+
+  /*
+   * The same facts on the wire, for a caller that never reads a log.
+   *
+   * A client cannot find out from DeepAI that its prompt was too large - the answer is a normal
+   * 200 - so a client cannot learn to compact earlier. Here it can: the numbers the gateway
+   * measured and enforced ride on the response. `sent` is what left this process, `limit` is
+   * where the endpoint stops reading, and `trim` is empty when nothing was touched.
+   *
+   * Set before the upstream call so both answers carry it: a streamed answer and a buffered one
+   * are the same request and should say the same thing about it.
+   */
+  res.setHeader('x-gateway-prompt', [
+    `sent=${forwarded.bytes}`,
+    `received=${arrived.bytes}`,
+    `budget=${PROMPT_BUDGET_BYTES}`,
+    `limit=${PROMPT_LIMIT_BYTES}`,
+    `served-tokens=${SERVED_CONTEXT_TOKENS}`,
+    trimmed.dropped > 0 ? `dropped=${trimmed.dropped}` : null,
+    trimmed.cut > 0 ? `cut=${trimmed.cut}` : null,
+  ].filter((part) => part !== null).join('; '));
 
   const imageNote = imageCount === 0
     ? 'images=0'

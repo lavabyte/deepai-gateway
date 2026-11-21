@@ -219,6 +219,22 @@ keeps a single turn small, but not the transcript: measured on this machine's ow
 transcript of one long chat reached 241,019 prompt tokens over 1,378 model turns before its fifth
 compaction - three to six times the window above.
 
+What the API says about all this is therefore two numbers, not one:
+
+| field | value | what it is |
+| --- | --- | --- |
+| `context_window` | 320,000 | DeepAI's own claim, from `/deepai_code/models`, unchanged |
+| `context_window_served` | 40,000 | measured: prompt tokens of ordinary prose that arrive whole |
+| `prompt_limit_bytes` | 196,000 | the measured wall, in the unit it was measured in |
+| `prompt_budget_bytes` | 170,000 | what this gateway will forward, under the wall |
+
+A client that wants to behave like the desktop app reads `context_window`; a client that wants to
+compact before anything is lost reads the other three. The same facts ride on every answer in an
+`x-gateway-prompt` header - `sent=…; received=…; budget=170000; limit=196000; served-tokens=40000;
+dropped=11` - because a client cannot learn any of this from DeepAI, whose answer to an oversized
+prompt is a normal 200. The Models page shows them side by side too: `320.0k` with `served 40.0k`
+beneath it.
+
 The gateway therefore shortens the prompt here, the way the app does, instead of forwarding one
 that will be thrown away - three rules, in the order that loses the least:
 

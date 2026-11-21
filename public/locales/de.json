@@ -162,6 +162,8 @@
   "metric.cacheReadsFoot": "Diesen Monat aus dem Cache bediente Eingabe-Tokens",
   "metric.catalog": "Katalog",
   "metric.context": "Kontext",
+  "metric.contextServed": "bedient",
+  "metric.contextServedHint": "So viel Prompt liest DeepAI tatsächlich, unabhängig von der Zahl in der Spalte",
   "metric.equivalent": "Äquivalent",
   "metric.expires": "Läuft ab",
   "metric.failedCount": "{formatted} fehlgeschlagen",

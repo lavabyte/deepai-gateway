@@ -1381,10 +1381,18 @@ await checkAsync('/v1/models carries modalities, reasoning levels and names', as
     assert.deepEqual(free.output_modalities, ['text']);
     assert.deepEqual(free.reasoning_levels, ['none', 'low', 'medium', 'high']);
     assert.ok(free.context_window > 0);
-  // The declared window passes through: measured live, a request of 841,502 tokens was
-  // served whole through this gateway (see catalog.js).
-  assert.equal(free.context_window, 1_048_576,
-    'the advertised window is the one the wire serves');
+    // The declared window passes through unchanged - it is DeepAI's own number, and the desktop
+    // app compacts at `contextWindow - reserveTokens`, so a client reading it behaves like the app.
+    assert.equal(free.context_window, 1_048_576);
+    /*
+     * Beside it, the measured promise: 195,809 bytes of prompt arrived whole and 196,811 did not,
+     * which is about 43,500 tokens of ordinary prose and 100,000 tokens of incompressible filler.
+     * A client that wants to compact before anything is lost reads these, not the claim above.
+     */
+    assert.equal(free.context_window_served, 40_000,
+      'the served window is the measured wall in the unit every catalog speaks');
+    assert.equal(free.prompt_limit_bytes, 196_000, 'and the wall in the unit it was measured in');
+    assert.equal(free.prompt_budget_bytes, 170_000, 'the budget this gateway enforces stays under it');
     assert.ok(free.max_output_tokens > 0);
     assert.equal(free.credits_per_request, '0');
     assert.equal(free.rate_label, 'Unmetered');
@@ -4439,7 +4447,14 @@ await checkAsync('a prompt past the wall is shortened here, as the app shortens 
     assert.equal(englishPrompt[0].content.length, 100_000, 'English text under the byte budget is untouched');
     assert.ok(!promptLines().at(-1).includes('trim='), `nothing to trim: ${promptLines().at(-1)}`);
 
-    await send([{ role: 'user', content: 'ą'.repeat(100_000) }, { role: 'user', content: 'what now?' }]);
+    const polish = await send([{ role: 'user', content: 'ą'.repeat(100_000) }, { role: 'user', content: 'what now?' }]);
+    /*
+     * And the same facts on the wire. A client cannot learn from DeepAI that its prompt was too
+     * large - the answer is a normal 200 - so the gateway says what it did, on the response, in
+     * the units it measured: bytes sent, the budget enforced, the wall the budget sits under.
+     */
+    assert.match(String(polish.headers.get('x-gateway-prompt')), /^sent=\d+; received=200\d+; budget=170000; limit=196000; served-tokens=40000; cut=1$/,
+      `the response says what physically happened: ${polish.headers.get('x-gateway-prompt')}`);
     // The announcement is a message of its own, so the one that was cut is not the first.
     const polishBody = sent.at(-1).messages.find((message) => typeof message.content === 'string'
       && message.content.startsWith('ą'));
