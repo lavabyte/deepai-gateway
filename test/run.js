@@ -4426,6 +4426,31 @@ await checkAsync('a prompt past the wall is shortened here, as the app shortens 
     assert.ok(forwardedConversation.some((message) => message.content.startsWith('turn 11 ')),
       'and neither is the work nearest the current step');
 
+    /*
+     * The wall is on bytes, not characters. Measured on the endpoint itself: 195,809 bytes of
+     * English arrived whole and 196,811 bytes did not, and 193,339 bytes of two-byte letters
+     * arrived whole while 197,280 did not - the same cliff at the same byte count, whatever the
+     * alphabet and whatever the token count. So the same number of characters is not the same
+     * amount of prompt: 100,000 characters of Polish is 200,000 bytes and has to be shortened,
+     * while 100,000 characters of English is 100,000 bytes and must be left alone.
+     */
+    await send([{ role: 'user', content: 'w'.repeat(100_000) }, { role: 'user', content: 'what now?' }]);
+    const englishPrompt = sent.at(-1).messages;
+    assert.equal(englishPrompt[0].content.length, 100_000, 'English text under the byte budget is untouched');
+    assert.ok(!promptLines().at(-1).includes('trim='), `nothing to trim: ${promptLines().at(-1)}`);
+
+    await send([{ role: 'user', content: 'ą'.repeat(100_000) }, { role: 'user', content: 'what now?' }]);
+    // The announcement is a message of its own, so the one that was cut is not the first.
+    const polishBody = sent.at(-1).messages.find((message) => typeof message.content === 'string'
+      && message.content.startsWith('ą'));
+    assert.ok(polishBody !== undefined, 'the pasted text is still there, shortened rather than removed');
+    assert.ok(polishBody.content.length < 100_000,
+      'the same character count in two-byte letters is over the budget and must be cut');
+    assert.match(polishBody.content, /characters omitted here/,
+      'and the model is told what it is missing');
+    assert.match(promptLines().at(-1), /prompt 2msg\/\d+ch\/\d+B in/,
+      `the log counts bytes as well as characters: ${promptLines().at(-1)}`);
+
     // Nothing left unpaired: a tool result without its call, or a call without results, is a
     // transcript DeepAI throws away entirely.
     for (const payload of sent) {

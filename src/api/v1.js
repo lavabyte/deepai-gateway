@@ -56,22 +56,33 @@ import {
  */
 function promptShape(messages) {
   let chars = 0;
+  let bytes = 0;
+  /*
+   * Measured on the endpoint itself, the wall is on the size of the request body - 195,809 bytes
+   * arrived whole and 196,811 bytes did not, whatever alphabet they were made of and however many
+   * tokens that came to. So the size that decides whether to trim is the byte count, and an "a"
+   * and an "ą" are not the same size: one is a byte, the other is two.
+   */
+  const add = (text) => {
+    chars += text.length;
+    bytes += Buffer.byteLength(text, 'utf8');
+  };
   for (const message of Array.isArray(messages) ? messages : []) {
     if (message === null || typeof message !== 'object') continue;
     const content = message.content;
-    if (typeof content === 'string') chars += content.length;
+    if (typeof content === 'string') add(content);
     else if (Array.isArray(content)) {
       for (const part of content) {
         if (part === null || typeof part !== 'object') continue;
-        if (typeof part.text === 'string') chars += part.text.length;
-        else if (typeof part.image_url?.url === 'string') chars += part.image_url.url.length;
+        if (typeof part.text === 'string') add(part.text);
+        else if (typeof part.image_url?.url === 'string') add(part.image_url.url);
       }
     }
     for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
-      if (typeof call?.function?.arguments === 'string') chars += call.function.arguments.length;
+      if (typeof call?.function?.arguments === 'string') add(call.function.arguments);
     }
   }
-  return { count: Array.isArray(messages) ? messages.length : 0, chars };
+  return { count: Array.isArray(messages) ? messages.length : 0, chars, bytes };
 }
 
 /**
@@ -110,10 +121,25 @@ function trimNote(trimmed) {
  * came back empty, and a 300,000-character tool result split into four tool messages for the
  * same call was dropped as well. The wall is the size of the prompt, not of a message.
  *
- * So the largest prompt verified to arrive whole is about 150,000 characters - 73,000 tokens of
- * incompressible text, closer to 36,000 of ordinary prose - well under the 320,000 the catalog
- * advertises. Past it DeepAI does not refuse; it answers as though the conversation were empty,
- * which is the "Hi, how can I help you today?" a harness gets in the middle of a task.
+ * The unit is **bytes, not characters and not tokens**. Measured twice with a marker at the start
+ * of the prompt and a marker at the end, asking for both back:
+ *
+ *   English prose   195,809 bytes -> whole prompt read, 40,194 prompt tokens reported
+ *   English prose   196,811 bytes -> prompt discarded, 191 tokens reported, empty answer
+ *   2-byte letters  193,339 bytes -> whole prompt read, 67,385 prompt tokens reported
+ *   2-byte letters  197,280 bytes -> prompt discarded, 191 tokens reported
+ *
+ * Same bytes, wildly different token counts, and the same cliff - so what is being measured is
+ * the size of the request body, at about 196 KB. An earlier pass over this ground used random
+ * words, which tokenize at roughly 1.5 characters per token, and so saw the same cliff at 162,000
+ * characters and read it as a character limit; it is not.
+ *
+ * What that means for the catalog's `contextWindow: 320000`: 320,000 tokens of English prose is
+ * about 1.3 MB of body, six times over the wall, so it can never arrive. The figure is served and
+ * believed - the desktop app copies `contextWindow` straight out of this catalog into its model
+ * config and compacts at `contextWindow - reserveTokens` - but it has never been measured by
+ * anyone, and the endpoint gives no error that would correct it: an oversized prompt comes back
+ * as a normal 200.
  *
  * The answer is therefore to shorten the prompt here, the way the app does, rather than forward
  * one that will be thrown away: a tool result longer than the budget is cut in the middle with a
@@ -121,7 +147,15 @@ function trimNote(trimmed) {
  * are dropped until it fits - the system prompt and the newest turn always survive, because they
  * are the ones being worked on.
  */
-const PROMPT_BUDGET_CHARS = 150_000;
+const PROMPT_BUDGET_BYTES = 170_000;
+
+/**
+ * The same wall in characters, for the sentences that explain it to a person.
+ *
+ * Only ever used in prose: "about 170,000 bytes" means nothing to a reader, and English is where
+ * one byte is one character. Every comparison in `fitPrompt` is made in bytes.
+ */
+const PROMPT_BUDGET_CHARS = 170_000;
 
 /** One tool result keeps its start and its end, and says what it lost in between. */
 const TOOL_RESULT_CHARS = 50_000;
@@ -135,7 +169,7 @@ const MESSAGE_CHARS = 40_000;
  * Cut to exactly the budget and then annotated, the note itself would push the prompt back over
  * it - the note is part of the prompt like anything else.
  */
-const NOTE_RESERVE_CHARS = 400;
+const NOTE_RESERVE_BYTES = 800;
 
 /**
  * Cut the middle out of text that is too long, and say so where the cut is.
@@ -154,7 +188,7 @@ const NOTE_RESERVE_CHARS = 400;
 function middleCut(text, keep) {
   if (text.length <= keep) return text;
   const note = (omitted) => `\n\n[gateway: ${omitted.toLocaleString('en-US')} characters omitted here - `
-    + `DeepAI Code reads about ${PROMPT_BUDGET_CHARS.toLocaleString('en-US')} characters of prompt per request]\n\n`;
+    + `DeepAI Code reads about ${PROMPT_BUDGET_BYTES.toLocaleString('en-US')} bytes of prompt per request]\n\n`;
   // The note's own length depends on how many digits the omitted count has, so it is measured
   // twice: once to make room for itself, once for the count the final text will report.
   let room = Math.max(2, keep - note(text.length).length);
@@ -226,9 +260,9 @@ function fitPrompt(messages) {
   }
   let units = promptUnits(rest);
 
-  const room = PROMPT_BUDGET_CHARS - NOTE_RESERVE_CHARS;
+  const room = PROMPT_BUDGET_BYTES - NOTE_RESERVE_BYTES;
   const flat = () => units.flat();
-  const size = () => promptShape([...head, ...flat()]).chars;
+  const size = () => promptShape([...head, ...flat()]).bytes;
   const largest = () => {
     let found = null;
     for (const message of [...head, ...flat()]) {
@@ -278,7 +312,14 @@ function fitPrompt(messages) {
       }
     }
     if (biggest === null) break;
-    const keep = Math.max(2_000, biggest.content.length - (size() - room));
+    /*
+     * The overflow is counted in bytes and the cut in characters, so the two are converted
+     * through this message's own density: a Polish paragraph carries about two bytes per
+     * character and an English one about one, and cutting "the number of characters that
+     * matches the number of surplus bytes" would overshoot English by half.
+     */
+    const density = Math.max(1, Buffer.byteLength(biggest.content, 'utf8') / Math.max(1, biggest.content.length));
+    const keep = Math.max(2_000, biggest.content.length - Math.ceil((size() - room) / density));
     const shortened = { ...biggest, content: middleCut(biggest.content, keep) };
     if (shortened.content.length >= biggest.content.length) break;
     units = units.map((unit) => unit.map((message) => (message === biggest ? shortened : message)));
@@ -305,7 +346,7 @@ function fitPrompt(messages) {
     final = [...head, {
       role: 'user',
       content: `[gateway: ${parts.join(' and ')} to fit DeepAI Code's prompt limit of about `
-        + `${PROMPT_BUDGET_CHARS.toLocaleString('en-US')} characters per request]`,
+        + `${PROMPT_BUDGET_BYTES.toLocaleString('en-US')} bytes per request]`,
     }, ...final.slice(head.length)];
   }
   return { messages: final, trimmed };
@@ -1037,7 +1078,8 @@ async function handleChatCompletion(db, req, res, options = {}) {
   log?.(`v1 chat/completions ${upstreamModel} stream=${streamed ? 'yes' : 'no'} status=${status} `
     + `catalog=${catalogMs}ms first-event=${firstEventMs ?? '-'}ms first-token=${firstTokenMs ?? '-'}ms `
     + `total=${Date.now() - startedAt}ms${waitedMs > 0 ? ` waited=${waitedMs}ms` : ''} `
-    + `prompt ${arrived.count}msg/${arrived.chars}ch in, ${forwarded.count}msg/${forwarded.chars}ch out `
+    + `prompt ${arrived.count}msg/${arrived.chars}ch/${arrived.bytes}B in, `
+    + `${forwarded.count}msg/${forwarded.chars}ch/${forwarded.bytes}B out `
     + `session=${sessionId.slice(0, 8)} ${transcriptShape(body.messages)} `
     + `${trimNote(trimmed)}`
     + `${speedNote}`

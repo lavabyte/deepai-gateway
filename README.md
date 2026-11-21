@@ -167,12 +167,38 @@ marker at the start of the first message and one at the end of the last, asking 
 | 550,023 chars | 12 | lost | read | 97,347 |
 | 700,023 chars | 15 | lost | read | 81,841 |
 
-Two things fall out of it. The boundary is between 162,000 and 203,000 characters, and it is not a
-refusal: past it the endpoint serves the newest part of the prompt and silently drops the start -
-the last marker survives in every row, the first marker dies at the same size whether the prompt
-arrived as six messages or fifteen. And the token count that comes back stops tracking the prompt:
-79,000 to 120,000 tokens whatever was sent, because that is the window that was kept, cut at message
-boundaries - which is why it wobbles instead of sitting on one number.
+Two things fall out of it. There is a boundary between 162,000 and 203,000 characters, and it is
+not a refusal: past it the endpoint serves the newest part of the prompt and silently drops the
+start - the last marker survives in every row, the first marker dies at the same size whether the
+prompt arrived as six messages or fifteen. And the token count that comes back stops tracking the
+prompt: 79,000 to 120,000 tokens whatever was sent, because that is the part that was kept, cut at
+message boundaries - which is why it wobbles instead of sitting on one number.
+
+**The unit is bytes, not characters and not tokens.** Measured a second time, with the same two
+markers, on two alphabets - English prose at one byte per character and Cyrillic at two - and both
+writing the byte count of the request body next to the result:
+
+| body | alphabet | reported prompt tokens | result |
+| --- | --- | --- | --- |
+| 150,732 B | English | 32,491 | read whole |
+| 190,776 B | English | 40,378 | read whole |
+| **195,809 B** | English | 40,194 | read whole |
+| **196,811 B** | English | 191 | **discarded**, empty answer |
+| 187,427 B | Cyrillic | 67,385 | read whole |
+| 193,339 B | Cyrillic | 69,501 | read whole |
+| **197,280 B** | Cyrillic | 191 | **discarded** |
+
+Same cliff at the same number of bytes, with token counts differing by 70%, so what is measured is
+the size of the request, and the wall is at about **196 KB**. The earlier table read the cliff as
+162,000 characters only because random words tokenize at about 1.5 characters per token and its
+162,000 characters happened to weigh the same as 196 KB of prose.
+
+That also settles what `contextWindow: 320000` means. 320,000 tokens of English prose is about
+1.3 MB of body - six times the wall - so it cannot arrive under any circumstances. The figure comes
+from DeepAI's own catalog (`/deepai_code/models`, which really does say `contextWindow: 320000` and
+`maxTokens: 131072`), and nobody measures it: the desktop app copies it straight into its model
+config (`decodeDeepAIModels`, then `deepAIPiModels` spreads the entry unchanged) and compacts at
+`contextWindow - reserveTokens`, which is where its observed 290,000-token compactions come from.
 
 That is what "the model forgets" looks like from the inside. Nothing errors, nothing comes back
 empty, the status is 200 and the answer reads normally - it simply answers without the beginning of
@@ -181,12 +207,12 @@ same size from the other side: 200,111 characters returned a completion with no 
 characters of tool result returned "I haven't been shown any file in this conversation", and
 600,189 characters returned "No long text was provided".
 
-The largest prompt verified to arrive whole is therefore about 162,000 characters - roughly 100,000
-tokens of this filler, 40,000 of ordinary prose - well under the 320,000 the app believes and the
+The largest prompt verified to arrive whole is therefore 195,809 bytes - 40,000 tokens of ordinary
+prose, 100,000 of that incompressible filler - well under the 320,000 the app believes and the
 1,048,576 the catalog advertises. A long chat crosses it without a symptom: the gateway's own
-`PROMPT_BUDGET_CHARS` is 150,000, just under the boundary, and the desktop app - which compacts at
-around 290,000 *tokens* - lets a conversation run 200,000 tokens past the point where its beginning
-stops being read.
+`PROMPT_BUDGET_BYTES` is 170,000, under the boundary with room for the note it adds, and the desktop
+app - which compacts at around 290,000 *tokens*, on a promise nobody measured - lets a conversation
+run eight times past the point where its beginning stops being read.
 
 The app does truncate its own tool output (a file read is capped, bash output is capped), which
 keeps a single turn small, but not the transcript: measured on this machine's own session store, the
@@ -428,7 +454,7 @@ size; a later session reported 841,502 tokens served whole through this gateway 
 from the desktop app's provider. Neither is reproducible today with fresh content.
 
 What is reproducible is in **"The context window: 320,000 is what the catalog says, not what is
-served"** above: above roughly 190,000 characters of prompt the endpoint answers from an empty
+served"** above: above roughly 196,000 bytes of prompt the endpoint answers from an empty
 conversation. That is a property of this wire, so the gateway shortens an oversized prompt before
 sending it rather than clamping a declared number.
 
