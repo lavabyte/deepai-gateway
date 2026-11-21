@@ -200,9 +200,16 @@ that will be thrown away - three rules, in the order that loses the least:
    loses its middle, keeping its start and its end, with the amount left out written where the
    cut is. A file read is most useful at its start and a build log at its end, and a model has to
    know it is looking at a shortened text.
-2. Whole turns go from the oldest end only when every message is already a reasonable size: what
-   is over the line then is how many turns there are, not what any one of them says. The system
-   prompt and the newest turn always survive.
+2. Whole turns go - but never the first one and never the last two - only when every message is
+   already a reasonable size: what is over the line then is how many turns there are, not what any
+   one of them says. The system prompt, the goal and the newest turn always survive.
+
+   The goal matters because of who sends long prompts now. Dropping from the oldest end was written
+   for a chat, where the oldest turn is the least relevant. An agent harness sends its task once
+   and then two thousand tool calls, so the task *is* the oldest thing in the prompt: it went
+   first, and the model then spent the rest of the run rediscovering what it had been asked to do.
+   What is dropped is the middle - the oldest work that is neither the goal nor the current step -
+   and the announcement above the transcript says so.
 3. If a single turn alone still overflows the budget, it is cut to fit.
 
 Whatever is dropped or shortened is announced in one sentence at the top of the transcript - a

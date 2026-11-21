@@ -4416,6 +4416,15 @@ await checkAsync('a prompt past the wall is shortened here, as the app shortens 
     assert.ok(forwardedConversation.some((message) => message.content.startsWith('[gateway: ')),
       'and the model is told the conversation was shortened');
     assert.ok(promptLines().at(-1).includes('drop'), `log should report the drop: ${promptLines().at(-1)}`);
+    /*
+     * The task itself survives. An agent harness sends the goal once and then a thousand tool
+     * calls; dropping from the oldest end took the goal first, and the model spent the rest of
+     * the run rediscovering what it had been asked to do.
+     */
+    assert.ok(forwardedConversation.some((message) => message.content.startsWith('turn 0 ')),
+      'the goal - the first user turn - is never dropped, even when everything after it is');
+    assert.ok(forwardedConversation.some((message) => message.content.startsWith('turn 11 ')),
+      'and neither is the work nearest the current step');
 
     // Nothing left unpaired: a tool result without its call, or a call without results, is a
     // transcript DeepAI throws away entirely.

@@ -239,6 +239,16 @@ function fitPrompt(messages) {
   };
 
   /*
+   * The first unit is the goal and the last is the request being worked on, so neither is ever a
+   * candidate for dropping. Dropping from the oldest end alone was enough while a prompt was a
+   * chat; it is not enough for an agent harness, which sends a task once and then two thousand
+   * tool calls: the task is the oldest thing there is, so it went first, and the model spent the
+   * rest of the run rediscovering what it had been asked to do. What gets dropped is the middle -
+   * the oldest work that is neither the goal nor the current step.
+   */
+  const pinned = (list) => (list.length > 1 ? new Set([0, list.length - 1]) : new Set([list.length - 1]));
+
+  /*
    * Three ways to make room, tried in the order that loses the least.
    *
    * A message larger than one message is allowed to be is cut down to that size first - it holds
@@ -255,10 +265,17 @@ function fitPrompt(messages) {
       if (head.includes(biggest)) head[head.indexOf(biggest)] = shortened;
       continue;
     }
-    if (units.length > 1) {
-      // Oldest first, never the last unit: that is where the request being worked on lives.
-      trimmed.dropped += units.shift().length;
-      continue;
+    if (units.length > 2) {
+      // Oldest droppable unit first: the goal at the head and the newest turn at the tail stay.
+      const keep = pinned(units);
+      let victim = -1;
+      for (let index = 0; index < units.length; index += 1) {
+        if (!keep.has(index)) { victim = index; break; }
+      }
+      if (victim > 0) {
+        trimmed.dropped += units.splice(victim, 1)[0].length;
+        continue;
+      }
     }
     if (biggest === null) break;
     const keep = Math.max(2_000, biggest.content.length - (size() - room));
