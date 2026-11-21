@@ -152,31 +152,46 @@ explains it, and never paraphrased as "the key was rejected".
 
 ### The context window: 320,000 is what the catalog says, not what is served
 
-Measured against the live endpoint with content that cannot be compressed by a tokenizer and
-cannot be served from a prompt cache (random six-letter words), so size is the only variable:
+Measured against the live endpoint with a conversation-shaped transcript - alternating messages of
+random words, so no tokenizer can compress them and no prompt cache can serve them - and with a
+marker at the start of the first message and one at the end of the last, asking for both back:
 
-| prompt sent | reported | what came back |
-| --- | --- | --- |
-| 150,189 chars | 73,195 tokens | whole - markers placed at 5%, 50% and 95% of the body were all read back |
-| 190,062 chars | 93,463 tokens | answered |
-| 200,111 chars | none | a completion with **no content at all** |
-| 200,062 chars | 291 tokens | the model answered as though nothing had been sent |
-| 300,142 chars (tool result) | 246 tokens | "I haven't been shown any file in this conversation" |
-| 600,189 chars | 216 tokens | "No long text was provided" |
+| prompt sent | messages | first marker | last marker | reported prompt tokens |
+| --- | --- | --- | --- | --- |
+| 120,028 chars | 5 | **read** | read | 95,470 |
+| 162,026 chars | 7 | **read** | read | 107,732 |
+| 203,025 chars | 8 | **lost** | read | 101,554 |
+| 240,024 chars | 9 | **lost** | read | 119,681 |
+| 250,027 chars | 6 | lost | read | 104,992 |
+| 400,024 chars | 9 | lost | read | 79,403 |
+| 550,023 chars | 12 | lost | read | 97,347 |
+| 700,023 chars | 15 | lost | read | 81,841 |
 
-Splitting the oversized message does not help: 200,000 characters cut into three messages still
-came back empty, and a 300,000-character tool result split into four tool messages for the same
-call was dropped as well. The wall is the size of the prompt, not of a message.
+Two things fall out of it. The boundary is between 162,000 and 203,000 characters, and it is not a
+refusal: past it the endpoint serves the newest part of the prompt and silently drops the start -
+the last marker survives in every row, the first marker dies at the same size whether the prompt
+arrived as six messages or fifteen. And the token count that comes back stops tracking the prompt:
+79,000 to 120,000 tokens whatever was sent, because that is the window that was kept, cut at message
+boundaries - which is why it wobbles instead of sitting on one number.
 
-So the largest prompt verified to arrive whole is about 150,000 characters - 73,000 tokens of
-incompressible text, about 36,000 of ordinary prose - well under the 320,000 every model
-advertises. Past it the endpoint does not refuse: it answers as though the conversation were
-empty, which is exactly the "Hi, how can I help you today?" a harness gets in the middle of a
-task, depending on whether that turn happened to carry a large tool output.
+That is what "the model forgets" looks like from the inside. Nothing errors, nothing comes back
+empty, the status is 200 and the answer reads normally - it simply answers without the beginning of
+the conversation. An earlier pass over this ground, sending one oversized message at a time, saw the
+same size from the other side: 200,111 characters returned a completion with no content, 300,142
+characters of tool result returned "I haven't been shown any file in this conversation", and
+600,189 characters returned "No long text was provided".
 
-The DeepAI Code app never meets this wall because it truncates its own tool output (a file read
-is capped, bash output is capped) and compacts as it goes, so it never sends a prompt that big.
-That the app works is not evidence about the size of the window.
+The largest prompt verified to arrive whole is therefore about 162,000 characters - roughly 100,000
+tokens of this filler, 40,000 of ordinary prose - well under the 320,000 the app believes and the
+1,048,576 the catalog advertises. A long chat crosses it without a symptom: the gateway's own
+`PROMPT_BUDGET_CHARS` is 150,000, just under the boundary, and the desktop app - which compacts at
+around 290,000 *tokens* - lets a conversation run 200,000 tokens past the point where its beginning
+stops being read.
+
+The app does truncate its own tool output (a file read is capped, bash output is capped), which
+keeps a single turn small, but not the transcript: measured on this machine's own session store, the
+transcript of one long chat reached 241,019 prompt tokens over 1,378 model turns before its fifth
+compaction - three to six times the window above.
 
 The gateway therefore shortens the prompt here, the way the app does, instead of forwarding one
 that will be thrown away - three rules, in the order that loses the least:
