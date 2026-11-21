@@ -230,8 +230,8 @@ What the API says about all this is therefore two numbers, not one:
 
 A client that wants to behave like the desktop app reads `context_window`; a client that wants to
 compact before anything is lost reads the other three. The same facts ride on every answer in an
-`x-gateway-prompt` header - `sent=170000; received=200000; budget=170000; limit=196000; served-tokens=40000;
-dropped=11` - because a client cannot learn any of this from DeepAI, whose answer to an oversized
+`x-gateway-prompt` header - `sent=76000; received=480000; budget=170000; limit=196000; served-tokens=40000;
+compacted=20` - because a client cannot learn any of this from DeepAI, whose answer to an oversized
 prompt is a normal 200. The Models page shows them side by side too: `320.0k` with `served 40.0k`
 beneath it.
 
@@ -242,21 +242,41 @@ that will be thrown away - three rules, in the order that loses the least:
    loses its middle, keeping its start and its end, with the amount left out written where the
    cut is. A file read is most useful at its start and a build log at its end, and a model has to
    know it is looking at a shortened text.
-2. Whole turns go - but never the first one and never the last two - only when every message is
-   already a reasonable size: what is over the line then is how many turns there are, not what any
-   one of them says. The system prompt, the goal and the newest turn always survive.
+2. **The turns in the middle are compacted, not dropped.** The gateway asks a model for a
+   structured checkpoint of them - goal, constraints, progress, decisions, next steps, critical
+   context - and the checkpoint takes their place, in the same format the DeepAI Code app uses when
+   its own context fills. This is the app's own compaction, moved to the one place that can still
+   see the whole conversation: a caller sends its whole transcript on every turn, so the part that
+   no longer fits is summarized here rather than silently disappearing upstream.
 
-   The goal matters because of who sends long prompts now. Dropping from the oldest end was written
-   for a chat, where the oldest turn is the least relevant. An agent harness sends its task once
-   and then two thousand tool calls, so the task *is* the oldest thing in the prompt: it went
-   first, and the model then spent the rest of the run rediscovering what it had been asked to do.
-   What is dropped is the middle - the oldest work that is neither the goal nor the current step -
-   and the announcement above the transcript says so.
+   **The checkpoint is written with a free model from the catalog** - `glm-5.3-flash` when it is
+   listed, otherwise the first free text model - never with the paid model the caller asked for.
+   Keeping a conversation is the gateway's own work: a compaction must not turn a free request into
+   a billed one, or add a second paid call to a request that was already paid. If the catalog lists
+   no free model, nothing is summarized, the turns are dropped the old way, and the log says why.
+
+   The system prompt and the goal at the head and the newest work at the tail always survive. The
+   goal matters because of who sends long prompts now: an agent harness sends its task once and then
+   two thousand tool calls, so the task *is* the oldest thing in the prompt. Dropping from the
+   oldest end was written for a chat, and it took the task first; what is compacted instead is the
+   middle, and the checkpoint says how many messages and how many bytes it stands for.
+
+   Summaries are cached per conversation and extended incrementally. The compacted range always
+   starts at the same place and only grows at its end, so the next compaction sends just the new
+   turns plus the previous checkpoint to the app's *update* prompt - the part already recorded is
+   not summarized twice, and a conversation compacted five times does not lose what the first
+   compaction wrote. A compaction aims well under the budget (60,000 bytes of recent work plus
+   16,000 for the checkpoint), so the next twenty-odd turns fit before another one is needed.
+
+   If no checkpoint can be written - the upstream is unreachable, the model is busy, a single turn
+   overflows - the turns are dropped the old way and the model is told. A summarizer failure never
+   fails the caller's request.
 3. If a single turn alone still overflows the budget, it is cut to fit.
 
-Whatever is dropped or shortened is announced in one sentence at the top of the transcript - a
-model handed a shortened conversation has to know it is looking at one - and counted in the log
-as `trim=drop11` or `trim=cut1`. Nothing is touched while the prompt fits.
+Whatever is compacted, dropped or shortened is announced in the transcript - a model handed a
+shortened conversation has to know it is looking at one, and a model handed a checkpoint has to
+know it is reading history rather than the present - and counted in the log as `trim=compact20`,
+`trim=drop11` or `trim=cut1`. Nothing is touched while the prompt fits.
 
 Measured, against the same account that used to get nothing back:
 
@@ -264,8 +284,18 @@ Measured, against the same account that used to get nothing back:
 | --- | --- | --- |
 | one 250,000-character message | 330 tokens, answered "Unannounced." | `trim=cut1`, 12,623 tokens, read `MAGPIE-42` from its first line |
 | a 300,000-character tool result | 246 tokens, "I haven't been shown any file" | `trim=cut1`, 16,361 tokens, read `MAGPIE-42` from its first line |
-| ten turns of 20,000 characters | answer unrelated to the turn asked about | `trim=drop11`, 44,425 tokens, answered with the newest turn |
+| twelve turns of 40,000 characters | answer unrelated to the turn asked about | `trim=compact20`, the goal, the newest turn and a checkpoint of the work between them |
 | a 60,000-character message | read whole | read whole, no trim |
+
+And measured twice against the live endpoint, because the point of a checkpoint is that a fact
+survives it. In the unit test the model is asked for the turns that were compacted, the goal and
+the recent turns are never in that request, a second identical turn reuses the checkpoint instead
+of paying for it again, and a request made on a paid model is still compacted by the free one. End to end, through this gateway with the app's own key: a
+conversation of 19 messages and 319,020 bytes - a task, eight turns of work and a question - was
+compacted to 12 messages in a checkpoint and forwarded as 82,255 bytes, and the model answered
+`HERON-77`, a code that appeared only in the fourth turn. That turn would previously have been
+dropped without a trace. The first answer took 23.6 seconds (about 20 of them the summary); the
+same conversation asked again took 4.2 seconds, because the checkpoint was already cached.
 
 ### What a paid request costs: an equation on the catalog's price
 
@@ -471,8 +501,8 @@ from the desktop app's provider. Neither is reproducible today with fresh conten
 
 What is reproducible is in **"The context window: 320,000 is what the catalog says, not what is
 served"** above: above roughly 196,000 bytes of prompt the endpoint answers from an empty
-conversation. That is a property of this wire, so the gateway shortens an oversized prompt before
-sending it rather than clamping a declared number.
+conversation. That is a property of this wire, so the gateway compacts or shortens an oversized
+prompt before sending it rather than clamping a declared number.
 
 
 ### Log in / log out

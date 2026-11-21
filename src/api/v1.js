@@ -23,6 +23,7 @@ import {
   rateLabel,
 } from '../deepai/catalog.js';
 import { streamChatCompletion, streamResponsesCompletion } from '../deepai/client.js';
+import { compactMessages } from '../deepai/compaction.js';
 import { PROMPT_BUDGET_BYTES, PROMPT_LIMIT_BYTES, SERVED_CONTEXT_TOKENS } from '../deepai/window.js';
 import { creditsPerMinute, creditsPerThousand } from '../deepai/pricing.js';
 import { UpstreamError } from '../deepai/wire.js';
@@ -89,15 +90,18 @@ function promptShape(messages) {
 /**
  * The trimming, as a log field, and nothing at all when nothing was trimmed.
  *
- * `drop` counts messages removed from the start of the conversation, `cut` counts messages left
- * in it with their middle taken out - a tool result larger than the whole budget, or a single
- * message that alone overflows it.
+ * `compact` counts messages replaced by a checkpoint summary - the app's own way of keeping a long
+ * conversation, and the one that does not forget. `drop` counts messages removed with nothing in
+ * their place, which now only happens when the checkpoint cannot be written. `cut` counts messages
+ * left in the conversation with their middle taken out - a tool result larger than the whole
+ * budget, or a single message that alone overflows it.
  *
- * @param {{dropped: number, cut: number}} trimmed
+ * @param {{compacted: number, dropped: number, cut: number}} trimmed
  * @returns {string}
  */
 function trimNote(trimmed) {
   const parts = [];
+  if (trimmed.compacted > 0) parts.push(`compact${trimmed.compacted}`);
   if (trimmed.dropped > 0) parts.push(`drop${trimmed.dropped}`);
   if (trimmed.cut > 0) parts.push(`cut${trimmed.cut}`);
   return parts.length === 0 ? '' : `trim=${parts.join('+')} `;
@@ -114,18 +118,16 @@ function trimNote(trimmed) {
  *
  * The answer is therefore to shorten the prompt here, the way the app does, rather than forward
  * one that will be thrown away: a tool result longer than its allowance is cut in the middle with
- * a note saying how much was left out, and if the conversation is still too long, turns go from
- * the middle - never the goal at the head and never the newest turn at the tail, because those are
- * the ones being worked on.
+ * a note saying how much was left out, and if the conversation is still too long, the turns in the
+ * middle are *compacted* - summarized into a checkpoint by the model itself, exactly as the app
+ * does when its own context fills - never the goal at the head and never the work nearest the
+ * current step at the tail. Dropping those turns outright was the earlier behaviour, and it is
+ * precisely what "the agent forgets" looked like from the other side of this proxy.
  *
- * What was done is said three ways: to the model, in a sentence above the transcript; to the
- * caller, in the `x-gateway-prompt` response header; and to the operator, as `trim=drop11` on the
- * request log line. DeepAI itself gives none of the three.
+ * What was done is said three ways: to the model, in the checkpoint message or in a sentence above
+ * the transcript; to the caller, in the `x-gateway-prompt` response header; and to the operator, as
+ * `trim=compact11` on the request log line. DeepAI itself gives none of the three.
  */
-/** The budget in characters, for the sentences that explain it to a person: English is one byte
- * per character, so the two numbers agree where the reader lives. Every comparison in `fitPrompt`
- * is made in bytes - see `deepai/window.js` for why, and for how much actually arrives. */
-const PROMPT_BUDGET_CHARS = PROMPT_BUDGET_BYTES;
 
 /** One tool result keeps its start and its end, and says what it lost in between. */
 const TOOL_RESULT_CHARS = 50_000;
@@ -140,6 +142,20 @@ const MESSAGE_CHARS = 40_000;
  * it - the note is part of the prompt like anything else.
  */
 const NOTE_RESERVE_BYTES = 800;
+
+/**
+ * How much recent work a compaction keeps verbatim, and how much room it leaves for the checkpoint.
+ *
+ * The app keeps the newest 20,000 tokens and summarizes everything older; in bytes that is roughly
+ * 80,000, and 60,000 leaves the goal, the recent turns and the checkpoint comfortably inside the
+ * budget. The point of the reserve is the checkpoint itself: it is written before its size is known,
+ * and a prompt that fits only until the summary is appended does not fit.
+ */
+const KEEP_RECENT_BYTES = 60_000;
+const SUMMARY_RESERVE_BYTES = 16_000;
+
+/** What a compacted prompt aims for, so the next few turns fit before another compaction is needed. */
+const COMPACT_TARGET_BYTES = KEEP_RECENT_BYTES + SUMMARY_RESERVE_BYTES;
 
 /**
  * Cut the middle out of text that is too long, and say so where the cut is.
@@ -207,13 +223,15 @@ function promptUnits(messages) {
  * Shorten a conversation until DeepAI will read all of it.
  *
  * Reported in the log and marked in the transcript, because a model that is handed a shortened
- * conversation has to know it is looking at one.
+ * conversation has to know it is looking at one - and because turns that are compacted are still
+ * there in summary, which is the difference between losing history and condensing it.
  *
  * @param {unknown} messages
- * @returns {{messages: Array<object>, trimmed: {dropped: number, cut: number}}}
+ * @param {{apiKey?: string, model?: string, sessionId?: string, conversation?: string, signal?: AbortSignal}} [context]
+ * @returns {Promise<{messages: Array<object>, trimmed: {compacted: number, dropped: number, cut: number}}>}
  */
-function fitPrompt(messages) {
-  const trimmed = { dropped: 0, cut: 0 };
+async function fitPrompt(messages, context = {}) {
+  const trimmed = { compacted: 0, dropped: 0, cut: 0 };
   /** What one message may keep: a tool result has more room than a message because it is output. */
   const allowance = (message) => (message?.role === 'tool' ? TOOL_RESULT_CHARS : MESSAGE_CHARS);
   /*
@@ -229,74 +247,124 @@ function fitPrompt(messages) {
     rest = rest.slice(1);
   }
   let units = promptUnits(rest);
+  /** The unit that carries the checkpoint, if a compaction happened: never dropped again. */
+  let checkpointUnit = null;
 
   const room = PROMPT_BUDGET_BYTES - NOTE_RESERVE_BYTES;
-  const flat = () => units.flat();
-  const size = () => promptShape([...head, ...flat()]).bytes;
+  const size = () => promptShape([...head, ...units.flat()]).bytes;
   const largest = () => {
     let found = null;
-    for (const message of [...head, ...flat()]) {
+    for (const message of [...head, ...units.flat()]) {
       if (typeof message?.content !== 'string') continue;
       if (found === null || message.content.length > found.content.length) found = message;
     }
     return found;
   };
+  /* Replace one message wherever it lives: the system head or the turn units. */
+  const replace = (message, content) => {
+    const shortened = { ...message, content };
+    if (head.includes(message)) head[head.indexOf(message)] = shortened;
+    else units = units.map((unit) => unit.map((item) => (item === message ? shortened : item)));
+  };
 
   /*
-   * The first unit is the goal and the last is the request being worked on, so neither is ever a
-   * candidate for dropping. Dropping from the oldest end alone was enough while a prompt was a
-   * chat; it is not enough for an agent harness, which sends a task once and then two thousand
-   * tool calls: the task is the oldest thing there is, so it went first, and the model spent the
-   * rest of the run rediscovering what it had been asked to do. What gets dropped is the middle -
-   * the oldest work that is neither the goal nor the current step.
+   * The first unit is the goal and the tail is the work being done right now, so neither is a
+   * candidate for compaction. An agent harness sends its task once and then two thousand tool
+   * calls, so the task is the oldest thing in the prompt: taking the oldest end first (which was
+   * enough for a chat) took the goal, and the model spent the rest of the run rediscovering what
+   * it had been asked to do.
    */
-  const pinned = (list) => (list.length > 1 ? new Set([0, list.length - 1]) : new Set([list.length - 1]));
+  const recentStart = () => {
+    let total = 0;
+    let start = Math.max(0, units.length - 1);
+    for (let index = units.length - 1; index >= 1; index -= 1) {
+      total += promptShape(units[index]).bytes;
+      start = index;
+      if (total >= KEEP_RECENT_BYTES) break;
+    }
+    return start;
+  };
 
   /*
-   * Three ways to make room, tried in the order that loses the least.
-   *
-   * A message larger than one message is allowed to be is cut down to that size first - it holds
-   * something worth reading, and it is the reason the prompt is over the line. Whole turns are
-   * dropped only when every message is already a reasonable size, because then what is over the
-   * line is how many turns there are, not what any one of them says. Cutting a turn that a drop
-   * would have removed anyway is the last resort.
+   * First rule: a message larger than a message is allowed to be loses its middle. It holds
+   * something worth reading - a file, a build log - and it is usually the reason the prompt is
+   * over the line, so it is shortened before anything is taken out of the conversation.
    */
-  for (let attempt = 0; attempt < 256 && size() > room; attempt += 1) {
+  for (let attempt = 0; attempt < 64 && size() > room; attempt += 1) {
     const biggest = largest();
-    if (biggest !== null && biggest.content.length > allowance(biggest)) {
-      const shortened = { ...biggest, content: middleCut(biggest.content, allowance(biggest)) };
-      units = units.map((unit) => unit.map((message) => (message === biggest ? shortened : message)));
-      if (head.includes(biggest)) head[head.indexOf(biggest)] = shortened;
-      continue;
-    }
-    if (units.length > 2) {
-      // Oldest droppable unit first: the goal at the head and the newest turn at the tail stay.
-      const keep = pinned(units);
-      let victim = -1;
-      for (let index = 0; index < units.length; index += 1) {
-        if (!keep.has(index)) { victim = index; break; }
-      }
-      if (victim > 0) {
-        trimmed.dropped += units.splice(victim, 1)[0].length;
-        continue;
-      }
-    }
-    if (biggest === null) break;
-    /*
-     * The overflow is counted in bytes and the cut in characters, so the two are converted
-     * through this message's own density: a Polish paragraph carries about two bytes per
-     * character and an English one about one, and cutting "the number of characters that
-     * matches the number of surplus bytes" would overshoot English by half.
-     */
-    const density = Math.max(1, Buffer.byteLength(biggest.content, 'utf8') / Math.max(1, biggest.content.length));
-    const keep = Math.max(2_000, biggest.content.length - Math.ceil((size() - room) / density));
-    const shortened = { ...biggest, content: middleCut(biggest.content, keep) };
-    if (shortened.content.length >= biggest.content.length) break;
-    units = units.map((unit) => unit.map((message) => (message === biggest ? shortened : message)));
-    if (head.includes(biggest)) head[head.indexOf(biggest)] = shortened;
+    if (biggest === null || biggest.content.length <= allowance(biggest)) break;
+    replace(biggest, middleCut(biggest.content, allowance(biggest)));
   }
 
-  let final = [...head, ...flat()];
+  /*
+   * Second rule: the turns in the middle are compacted, not dropped.
+   *
+   * This is the app's own behaviour, and the reason it is here: the turns are summarized by the
+   * model into the checkpoint format the DeepAI Code app uses when its context fills, and the
+   * summary takes their place. The model still knows what was done, which files were touched and
+   * what was decided - it just reads it as a checkpoint instead of as a transcript.
+   *
+   * The oldest units go first, and only until the prompt is small enough that the next few turns
+   * fit before another compaction is needed. If the checkpoint cannot be written - the upstream is
+   * unreachable, the model is busy, the caller disconnected - the turns are dropped as before, so
+   * an oversized prompt is still served rather than refused.
+   */
+  if (size() > room && units.length > 2) {
+    const pinnedFrom = recentStart();
+    const victims = [];
+    let projected = size();
+    for (let index = 1; index < pinnedFrom && projected > COMPACT_TARGET_BYTES; index += 1) {
+      victims.push(index);
+      projected -= promptShape(units[index]).bytes;
+    }
+    if (victims.length > 0) {
+      const removed = victims.map((index) => units[index]);
+      const count = removed.reduce((sum, unit) => sum + unit.length, 0);
+      const checkpoint = await checkpointFor(context, removed);
+      const first = victims[0];
+      const last = victims[victims.length - 1];
+      if (checkpoint !== undefined) {
+        checkpointUnit = [checkpointMessage(count, removed, checkpoint)];
+        units = [
+          ...units.slice(0, first),
+          checkpointUnit,
+          ...units.slice(last + 1),
+        ];
+        trimmed.compacted = count;
+      } else {
+        units = units.filter((_, index) => !victims.includes(index));
+        trimmed.dropped += count;
+      }
+    }
+  }
+
+  /*
+   * Third rule, and the last resort: if a single message still overflows the budget, cut it to
+   * fit. The overflow is counted in bytes and the cut in characters, so the two are converted
+   * through this message's own density: a Polish paragraph carries about two bytes per character
+   * and an English one about one.
+   */
+  for (let attempt = 0; attempt < 64 && size() > room; attempt += 1) {
+    const biggest = largest();
+    if (biggest === null) break;
+    const density = Math.max(1, Buffer.byteLength(biggest.content, 'utf8') / Math.max(1, biggest.content.length));
+    const keep = Math.max(2_000, biggest.content.length - Math.ceil((size() - room) / density));
+    if (keep >= biggest.content.length) break;
+    replace(biggest, middleCut(biggest.content, keep));
+  }
+
+  /* And if whole turns are still what overflows it, the middle goes - the checkpoint threw no error
+   * but was too large, or there was no droppable turn left to summarize. The checkpoint itself is
+   * never one of them: it is what the removed turns were reduced to, and dropping it would lose
+   * them twice. */
+  while (size() > room && units.length > 2) {
+    const pinnedFrom = Math.max(1, recentStart());
+    const victim = units.findIndex((unit, index) => index >= 1 && index < pinnedFrom && unit !== checkpointUnit);
+    if (victim < 0) break;
+    trimmed.dropped += units.splice(victim, 1)[0].length;
+  }
+
+  let final = [...head, ...units.flat()];
   /*
    * Counted from the messages themselves, not from the number of passes: the loop above can meet
    * the same message twice, and a log that said "2 shortened" for one file would send a reader
@@ -320,6 +388,99 @@ function fitPrompt(messages) {
     }, ...final.slice(head.length)];
   }
   return { messages: final, trimmed };
+}
+
+/**
+ * The checkpoint that replaces the compacted turns, said so a model knows what it is reading.
+ *
+ * It carries the size of what it replaced as well as the number of messages, because "11 messages"
+ * says nothing about how much work is behind them - eleven file reads and eleven greetings are not
+ * the same loss.
+ *
+ * @param {number} count - messages replaced.
+ * @param {Array<Array<object>>} removed - the units that were summarized.
+ * @param {string} summary - what the model wrote.
+ * @returns {object} an OpenAI message.
+ */
+function checkpointMessage(count, removed, summary) {
+  const bytes = promptShape(removed.flat()).bytes;
+  return {
+    role: 'user',
+    content: `[gateway: ${count} earlier messages (${bytes.toLocaleString('en-US')} bytes) were `
+      + `compacted into the checkpoint below - they were not dropped. DeepAI Code reads about `
+      + `${PROMPT_BUDGET_BYTES.toLocaleString('en-US')} bytes of prompt per request, so the part of `
+      + `this conversation that no longer fits was summarized by the model itself, in the same format `
+      + `the DeepAI Code app uses for its own compactions. Treat the checkpoint as the history of the `
+      + `work already done.]\n\n${summary}`,
+  };
+}
+
+/**
+ * The free model a checkpoint summary is written with.
+ *
+ * A compaction is the gateway's own work, so it must never turn a request the caller made on a free
+ * model into a billed one - or add a paid call to a request that was already paid. The catalog is
+ * where "free" comes from: `premier: false` is the free tier, and the preferred model is the same
+ * flash model this gateway already falls back to. The Responses-API models are left out because
+ * summaries are written over the chat-completions transport.
+ *
+ * `undefined` when the catalog lists no free text model: the caller's turns are then dropped rather
+ * than summarized, which is the old behaviour and never a surprise invoice.
+ *
+ * @param {Array<object>} models - the catalog, as `ensureCatalog` returned it.
+ * @returns {string|undefined}
+ */
+function freeCompactionModel(models) {
+  const free = (Array.isArray(models) ? models : []).filter((model) => model?.premier !== true
+    && model?.api !== 'openai-responses'
+    && Array.isArray(model?.input)
+    && model.input.includes('text'));
+  if (free.length === 0) return undefined;
+  return (free.find((model) => model.id === FALLBACK_MODEL) ?? free[0]).id;
+}
+
+/**
+ * Ask the model for a checkpoint of the turns a compaction is about to remove.
+ *
+ * Returns `undefined` when there is nothing to write a summary with, or when the summary could not
+ * be produced: the caller then drops the turns rather than failing the request. A caller that
+ * disconnected is the exception - that is an aborted request, not a compaction failure.
+ *
+ * @param {{apiKey?: string, model?: string, sessionId?: string, conversation?: string, signal?: AbortSignal, log?: (message: string) => void}} context
+ * @param {Array<Array<object>>} units
+ * @returns {Promise<string|undefined>}
+ */
+async function checkpointFor(context, units) {
+  if (typeof context.apiKey !== 'string' || context.apiKey === ''
+    || typeof context.conversation !== 'string' || context.conversation === '') {
+    return undefined;
+  }
+  if (typeof context.model !== 'string' || context.model === '') {
+    context.log?.('compaction skipped: the catalog lists no free model to summarize with, so the turns are dropped');
+    return undefined;
+  }
+  try {
+    const { summary } = await compactMessages({
+      apiKey: context.apiKey,
+      model: context.model,
+      sessionId: context.sessionId,
+      conversation: context.conversation,
+      units,
+      signal: context.signal,
+    });
+    return summary === '' ? undefined : summary;
+  } catch (error) {
+    if (context.signal?.aborted) {
+      throw new UpstreamError('request aborted', 'ABORTED');
+    }
+    /*
+     * A summary that could not be written is not the caller's failure: the conversation is still
+     * served, shortened the old way. The reason is logged so a reader can tell a busy upstream
+     * from a broken summarizer, without a prompt or a key in the line.
+     */
+    context.log?.(`compaction failed, dropping instead: ${error?.message ?? error}`);
+    return undefined;
+  }
 }
 
 /**
@@ -676,12 +837,38 @@ async function handleChatCompletion(db, req, res, options = {}) {
    */
   const arrived = promptShape(body.messages);
   /*
+   * The abort controller is created before the prompt is fitted, not after, because shortening a
+   * long conversation may now ask the upstream for a checkpoint summary - a second round trip that
+   * must end when the caller does. `res.on('close')` is attached at the same time for that reason.
+   */
+  const controller = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) controller.abort();
+  });
+  /*
+   * The logger is settled here, before the prompt is fitted, because a compaction that fails has
+   * something to say: the conversation is then shortened the old way, and a reader of the log has
+   * to be able to tell a busy upstream from a broken summarizer.
+   */
+  const log = options.logRequests !== false
+    ? (options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`)))
+    : undefined;
+  /*
    * Shortened here rather than forwarded as it is. Above the budget DeepAI does not refuse the
    * request: it answers from an empty conversation, so the model sees nothing and says hello.
-   * A conversation cut down to fit is worse than the whole one and much better than nothing -
+   * A conversation compacted to fit is worse than the whole one and much better than nothing -
    * and the log records the difference, so a shortened turn is never a mystery.
    */
-  const { messages: sentMessages, trimmed } = fitPrompt(messages);
+  const prepStart = Date.now();
+  const { messages: sentMessages, trimmed } = await fitPrompt(messages, {
+    apiKey: account.apiKey,
+    model: freeCompactionModel(models),
+    sessionId,
+    conversation: conversationId(body.messages),
+    signal: controller.signal,
+    log,
+  });
+  const prepMs = Date.now() - prepStart;
   const forwarded = promptShape(sentMessages);
 
   /*
@@ -701,6 +888,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
     `budget=${PROMPT_BUDGET_BYTES}`,
     `limit=${PROMPT_LIMIT_BYTES}`,
     `served-tokens=${SERVED_CONTEXT_TOKENS}`,
+    trimmed.compacted > 0 ? `compacted=${trimmed.compacted}` : null,
     trimmed.dropped > 0 ? `dropped=${trimmed.dropped}` : null,
     trimmed.cut > 0 ? `cut=${trimmed.cut}` : null,
   ].filter((part) => part !== null).join('; '));
@@ -733,11 +921,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
   const created = Math.floor(Date.now() / 1000);
   const startedAt = Date.now();
 
-  const controller = new AbortController();
   params.signal = controller.signal;
-  res.on('close', () => {
-    if (!res.writableEnded) controller.abort();
-  });
 
   // One writer per request: it builds the SSE envelope once and reuses it.
   const write = streamed ? makeWriter(res, id, upstreamModel, created) : undefined;
@@ -842,10 +1026,6 @@ async function handleChatCompletion(db, req, res, options = {}) {
     }
   };
 
-  const log = options.logRequests !== false
-    ? (options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`)))
-    : undefined;
-
   /*
    * One attempt, and then as many more as a busy worker is worth.
    *
@@ -927,7 +1107,19 @@ async function handleChatCompletion(db, req, res, options = {}) {
     errorCode = undefined;
     failure = undefined;
     try {
-      await runAttempt({ ...params, messages: fitPrompt(withoutImages(body.messages)).messages });
+      /*
+       * The prompt is fitted again because the image note changes its size. The checkpoint cache
+       * makes this cheap: the same dropped range produces the same summary without another call.
+       */
+      const retry = await fitPrompt(withoutImages(body.messages), {
+        apiKey: account.apiKey,
+        model: freeCompactionModel(models),
+        sessionId,
+        conversation: conversationId(body.messages),
+        signal: controller.signal,
+        log,
+      });
+      await runAttempt({ ...params, messages: retry.messages });
     } catch (retryError) {
       status = retryError?.code === 'ABORTED' ? 499 : (retryError?.status ?? 502);
       errorCode = retryError?.code === 'ABORTED' ? 'client_closed' : (retryError?.code ?? 'gateway_error');
@@ -1086,7 +1278,8 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * from a slow model instead of guessing at both.
    */
   log?.(`v1 chat/completions ${upstreamModel} stream=${streamed ? 'yes' : 'no'} status=${status} `
-    + `catalog=${catalogMs}ms first-event=${firstEventMs ?? '-'}ms first-token=${firstTokenMs ?? '-'}ms `
+    + `catalog=${catalogMs}ms ${trimmed.compacted > 0 ? `prep=${prepMs}ms ` : ''}`
+    + `first-event=${firstEventMs ?? '-'}ms first-token=${firstTokenMs ?? '-'}ms `
     + `total=${Date.now() - startedAt}ms${waitedMs > 0 ? ` waited=${waitedMs}ms` : ''} `
     + `prompt ${arrived.count}msg/${arrived.chars}ch/${arrived.bytes}B in, `
     + `${forwarded.count}msg/${forwarded.chars}ch/${forwarded.bytes}B out `
