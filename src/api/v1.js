@@ -23,7 +23,6 @@ import {
   rateLabel,
 } from '../deepai/catalog.js';
 import { streamChatCompletion, streamResponsesCompletion } from '../deepai/client.js';
-import { compactMessages } from '../deepai/compaction.js';
 import { PROMPT_BUDGET_BYTES, PROMPT_LIMIT_BYTES, SERVED_CONTEXT_TOKENS } from '../deepai/window.js';
 import { creditsPerMinute, creditsPerThousand } from '../deepai/pricing.js';
 import { UpstreamError } from '../deepai/wire.js';
@@ -44,27 +43,25 @@ import {
 } from '../openai.js';
 
 /**
- * How big a prompt is, in the two units that answer different questions.
+ * How big a prompt is, in the units that answer different questions.
  *
- * `count` is how many messages the caller sent, `chars` how much text they carry. Both are
- * counted on what arrived and again on what is forwarded, because those two numbers are the
- * only way to answer "did this gateway cut my conversation?" from the log instead of from
- * memory - and the answer has been asked for by someone whose history was arriving short.
+ * `count` is how many messages the caller sent, `chars` how much text they carry, `bytes` that
+ * text in UTF-8 - the unit the wall was measured in, where an "a" is one byte and an "ą" is two.
+ * `imageBytes` is the payload of any image parts, counted apart: DeepAI takes an image on its own
+ * input path, the measured wall is about the text it reads as prompt, and a screenshot-sized data
+ * URL must not make a three-line conversation look like an oversized one.
  *
- * Nothing is decided from them: no limit, no refusal. They are written down.
+ * `bytes` is what decides the budget in `overPromptBudget`, and it is also written down for both
+ * what arrived and what is forwarded - which is the only way to answer "did this gateway cut my
+ * conversation?" from the log instead of from memory.
  *
  * @param {unknown} messages - OpenAI-shaped messages.
- * @returns {{count: number, chars: number}}
+ * @returns {{count: number, chars: number, bytes: number, imageBytes: number}}
  */
 function promptShape(messages) {
   let chars = 0;
   let bytes = 0;
-  /*
-   * Measured on the endpoint itself, the wall is on the size of the request body - 195,809 bytes
-   * arrived whole and 196,811 bytes did not, whatever alphabet they were made of and however many
-   * tokens that came to. So the size that decides whether to trim is the byte count, and an "a"
-   * and an "ą" are not the same size: one is a byte, the other is two.
-   */
+  let imageBytes = 0;
   const add = (text) => {
     chars += text.length;
     bytes += Buffer.byteLength(text, 'utf8');
@@ -77,410 +74,31 @@ function promptShape(messages) {
       for (const part of content) {
         if (part === null || typeof part !== 'object') continue;
         if (typeof part.text === 'string') add(part.text);
-        else if (typeof part.image_url?.url === 'string') add(part.image_url.url);
+        else if (typeof part.image_url?.url === 'string') {
+          imageBytes += Buffer.byteLength(part.image_url.url, 'utf8');
+        }
       }
     }
     for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
       if (typeof call?.function?.arguments === 'string') add(call.function.arguments);
     }
   }
-  return { count: Array.isArray(messages) ? messages.length : 0, chars, bytes };
+  return { count: Array.isArray(messages) ? messages.length : 0, chars, bytes, imageBytes };
 }
-
 /**
- * The trimming, as a log field, and nothing at all when nothing was trimmed.
+ * Whether this conversation is larger than the endpoint will read.
  *
- * `compact` counts messages replaced by a checkpoint summary - the app's own way of keeping a long
- * conversation, and the one that does not forget. `drop` counts messages removed with nothing in
- * their place, which now only happens when the checkpoint cannot be written. `cut` counts messages
- * left in the conversation with their middle taken out - a tool result larger than the whole
- * budget, or a single message that alone overflows it.
+ * The number is bytes, not tokens and not characters, because that is what was measured: on the
+ * live endpoint 195,809 bytes arrived whole and 196,811 did not, whatever alphabet they were made
+ * of. The budget sits at 90% of that wall, so a client that compacts at 90% of the advertised
+ * window stays under it - and so the JSON framing around the messages, which is not counted here,
+ * has room of its own. See `deepai/window.js` for the measurements.
  *
- * @param {{compacted: number, dropped: number, cut: number}} trimmed
- * @returns {string}
+ * @param {{bytes: number}} shape - `promptShape` of the messages that would be sent.
+ * @returns {boolean}
  */
-function trimNote(trimmed) {
-  const parts = [];
-  if (trimmed.compacted > 0) parts.push(`compact${trimmed.compacted}`);
-  if (trimmed.dropped > 0) parts.push(`drop${trimmed.dropped}`);
-  if (trimmed.cut > 0) parts.push(`cut${trimmed.cut}`);
-  return parts.length === 0 ? '' : `trim=${parts.join('+')} `;
-}
-
-/**
- * How much prompt DeepAI Code will actually read, and how much of it this gateway forwards.
- *
- * The measurements live in `deepai/window.js`, because the catalog's `contextWindow` and the real
- * wall are the same question asked twice, and the answer has to be the same in the API, in the
- * pages and here. In one line: the wall is about 196 KB of request body, whatever alphabet and
- * whatever token count gets you there, and past it the endpoint does not refuse - it answers from
- * whatever was left, which is what "the model forgets" looks like from the inside.
- *
- * The answer is therefore to shorten the prompt here, the way the app does, rather than forward
- * one that will be thrown away: a tool result longer than its allowance is cut in the middle with
- * a note saying how much was left out, and if the conversation is still too long, the turns in the
- * middle are *compacted* - summarized into a checkpoint by the model itself, exactly as the app
- * does when its own context fills - never the goal at the head and never the work nearest the
- * current step at the tail. Dropping those turns outright was the earlier behaviour, and it is
- * precisely what "the agent forgets" looked like from the other side of this proxy.
- *
- * What was done is said three ways: to the model, in the checkpoint message or in a sentence above
- * the transcript; to the caller, in the `x-gateway-prompt` response header; and to the operator, as
- * `trim=compact11` on the request log line. DeepAI itself gives none of the three.
- */
-
-/** One tool result keeps its start and its end, and says what it lost in between. */
-const TOOL_RESULT_CHARS = 50_000;
-
-/** And so does one message that is not a tool result: a pasted file, a whole test log. */
-const MESSAGE_CHARS = 40_000;
-
-/**
- * Room kept aside for the sentence that tells the model its conversation was shortened.
- *
- * Cut to exactly the budget and then annotated, the note itself would push the prompt back over
- * it - the note is part of the prompt like anything else.
- */
-const NOTE_RESERVE_BYTES = 800;
-
-/**
- * How much recent work a compaction keeps verbatim, and how much room it leaves for the checkpoint.
- *
- * The app keeps the newest 20,000 tokens and summarizes everything older; in bytes that is roughly
- * 80,000, and 60,000 leaves the goal, the recent turns and the checkpoint comfortably inside the
- * budget. The point of the reserve is the checkpoint itself: it is written before its size is known,
- * and a prompt that fits only until the summary is appended does not fit.
- */
-const KEEP_RECENT_BYTES = 60_000;
-const SUMMARY_RESERVE_BYTES = 16_000;
-
-/** What a compacted prompt aims for, so the next few turns fit before another compaction is needed. */
-const COMPACT_TARGET_BYTES = KEEP_RECENT_BYTES + SUMMARY_RESERVE_BYTES;
-
-/**
- * Cut the middle out of text that is too long, and say so where the cut is.
- *
- * The middle rather than the tail: a file read is most useful at its start, a build log at its
- * end, and a model reading either needs to know that something was removed rather than silently
- * believing it has the whole thing.
- *
- * The result is at most `keep` characters, note included - a budget that is only respected after
- * the note is appended is not a budget.
- *
- * @param {string} text
- * @param {number} keep
- * @returns {string}
- */
-function middleCut(text, keep) {
-  if (text.length <= keep) return text;
-  const note = (omitted) => `\n\n[gateway: ${omitted.toLocaleString('en-US')} characters omitted here - `
-    + `DeepAI Code reads about ${PROMPT_BUDGET_BYTES.toLocaleString('en-US')} bytes of prompt per request]\n\n`;
-  // The note's own length depends on how many digits the omitted count has, so it is measured
-  // twice: once to make room for itself, once for the count the final text will report.
-  let room = Math.max(2, keep - note(text.length).length);
-  let fitted = Math.max(2, keep - note(text.length - room).length);
-  if (fitted !== room) {
-    room = fitted;
-    fitted = Math.max(2, keep - note(text.length - room).length);
-  }
-  const head = Math.max(1, Math.floor(fitted / 2));
-  const tail = Math.max(1, fitted - head);
-  return `${text.slice(0, head)}${note(text.length - head - tail)}${text.slice(-tail)}`;
-}
-
-/**
- * Group messages so a tool call and its results are dropped together.
- *
- * Dropped separately they leave a tool result whose call is gone, or a call whose results are
- * gone - and measured, DeepAI drops a request whose transcript has an unpaired tool result
- * entirely, which would be a far worse failure than the one being fixed.
- *
- * @param {Array<object>} messages
- * @returns {Array<Array<object>>}
- */
-function promptUnits(messages) {
-  const units = [];
-  let index = 0;
-  while (index < messages.length) {
-    const message = messages[index];
-    const ids = new Set((Array.isArray(message?.tool_calls) ? message.tool_calls : [])
-      .map((call) => call?.id)
-      .filter((id) => typeof id === 'string'));
-    const unit = [message];
-    index += 1;
-    if (ids.size > 0) {
-      while (index < messages.length && messages[index]?.role === 'tool' && ids.has(messages[index]?.tool_call_id)) {
-        unit.push(messages[index]);
-        index += 1;
-      }
-    }
-    units.push(unit);
-  }
-  return units;
-}
-
-/**
- * Shorten a conversation until DeepAI will read all of it.
- *
- * Reported in the log and marked in the transcript, because a model that is handed a shortened
- * conversation has to know it is looking at one - and because turns that are compacted are still
- * there in summary, which is the difference between losing history and condensing it.
- *
- * @param {unknown} messages
- * @param {{apiKey?: string, model?: string, sessionId?: string, conversation?: string, signal?: AbortSignal}} [context]
- * @returns {Promise<{messages: Array<object>, trimmed: {compacted: number, dropped: number, cut: number}}>}
- */
-async function fitPrompt(messages, context = {}) {
-  const trimmed = { compacted: 0, dropped: 0, cut: 0 };
-  /** What one message may keep: a tool result has more room than a message because it is output. */
-  const allowance = (message) => (message?.role === 'tool' ? TOOL_RESULT_CHARS : MESSAGE_CHARS);
-  /*
-   * Nothing is touched while the prompt fits: a message is only worth shortening when the whole
-   * prompt is over the line, and a 120,000-character tool result that DeepAI reads without
-   * complaint should be read without complaint.
-   */
-  // The system prompt is the standing instruction, never a turn to be dropped.
-  const head = [];
-  let rest = Array.isArray(messages) ? messages : [];
-  while (rest.length > 0 && rest[0]?.role === 'system') {
-    head.push(rest[0]);
-    rest = rest.slice(1);
-  }
-  let units = promptUnits(rest);
-  /** The unit that carries the checkpoint, if a compaction happened: never dropped again. */
-  let checkpointUnit = null;
-
-  const room = PROMPT_BUDGET_BYTES - NOTE_RESERVE_BYTES;
-  const size = () => promptShape([...head, ...units.flat()]).bytes;
-  const largest = () => {
-    let found = null;
-    for (const message of [...head, ...units.flat()]) {
-      if (typeof message?.content !== 'string') continue;
-      if (found === null || message.content.length > found.content.length) found = message;
-    }
-    return found;
-  };
-  /* Replace one message wherever it lives: the system head or the turn units. */
-  const replace = (message, content) => {
-    const shortened = { ...message, content };
-    if (head.includes(message)) head[head.indexOf(message)] = shortened;
-    else units = units.map((unit) => unit.map((item) => (item === message ? shortened : item)));
-  };
-
-  /*
-   * The first unit is the goal and the tail is the work being done right now, so neither is a
-   * candidate for compaction. An agent harness sends its task once and then two thousand tool
-   * calls, so the task is the oldest thing in the prompt: taking the oldest end first (which was
-   * enough for a chat) took the goal, and the model spent the rest of the run rediscovering what
-   * it had been asked to do.
-   */
-  const recentStart = () => {
-    let total = 0;
-    let start = Math.max(0, units.length - 1);
-    for (let index = units.length - 1; index >= 1; index -= 1) {
-      total += promptShape(units[index]).bytes;
-      start = index;
-      if (total >= KEEP_RECENT_BYTES) break;
-    }
-    return start;
-  };
-
-  /*
-   * First rule: a message larger than a message is allowed to be loses its middle. It holds
-   * something worth reading - a file, a build log - and it is usually the reason the prompt is
-   * over the line, so it is shortened before anything is taken out of the conversation.
-   */
-  for (let attempt = 0; attempt < 64 && size() > room; attempt += 1) {
-    const biggest = largest();
-    if (biggest === null || biggest.content.length <= allowance(biggest)) break;
-    replace(biggest, middleCut(biggest.content, allowance(biggest)));
-  }
-
-  /*
-   * Second rule: the turns in the middle are compacted, not dropped.
-   *
-   * This is the app's own behaviour, and the reason it is here: the turns are summarized by the
-   * model into the checkpoint format the DeepAI Code app uses when its context fills, and the
-   * summary takes their place. The model still knows what was done, which files were touched and
-   * what was decided - it just reads it as a checkpoint instead of as a transcript.
-   *
-   * The oldest units go first, and only until the prompt is small enough that the next few turns
-   * fit before another compaction is needed. If the checkpoint cannot be written - the upstream is
-   * unreachable, the model is busy, the caller disconnected - the turns are dropped as before, so
-   * an oversized prompt is still served rather than refused.
-   */
-  if (size() > room && units.length > 2) {
-    const pinnedFrom = recentStart();
-    const victims = [];
-    let projected = size();
-    for (let index = 1; index < pinnedFrom && projected > COMPACT_TARGET_BYTES; index += 1) {
-      victims.push(index);
-      projected -= promptShape(units[index]).bytes;
-    }
-    if (victims.length > 0) {
-      const removed = victims.map((index) => units[index]);
-      const count = removed.reduce((sum, unit) => sum + unit.length, 0);
-      const checkpoint = await checkpointFor(context, removed);
-      const first = victims[0];
-      const last = victims[victims.length - 1];
-      if (checkpoint !== undefined) {
-        checkpointUnit = [checkpointMessage(count, removed, checkpoint)];
-        units = [
-          ...units.slice(0, first),
-          checkpointUnit,
-          ...units.slice(last + 1),
-        ];
-        trimmed.compacted = count;
-      } else {
-        units = units.filter((_, index) => !victims.includes(index));
-        trimmed.dropped += count;
-      }
-    }
-  }
-
-  /*
-   * Third rule, and the last resort: if a single message still overflows the budget, cut it to
-   * fit. The overflow is counted in bytes and the cut in characters, so the two are converted
-   * through this message's own density: a Polish paragraph carries about two bytes per character
-   * and an English one about one.
-   */
-  for (let attempt = 0; attempt < 64 && size() > room; attempt += 1) {
-    const biggest = largest();
-    if (biggest === null) break;
-    const density = Math.max(1, Buffer.byteLength(biggest.content, 'utf8') / Math.max(1, biggest.content.length));
-    const keep = Math.max(2_000, biggest.content.length - Math.ceil((size() - room) / density));
-    if (keep >= biggest.content.length) break;
-    replace(biggest, middleCut(biggest.content, keep));
-  }
-
-  /* And if whole turns are still what overflows it, the middle goes - the checkpoint threw no error
-   * but was too large, or there was no droppable turn left to summarize. The checkpoint itself is
-   * never one of them: it is what the removed turns were reduced to, and dropping it would lose
-   * them twice. */
-  while (size() > room && units.length > 2) {
-    const pinnedFrom = Math.max(1, recentStart());
-    const victim = units.findIndex((unit, index) => index >= 1 && index < pinnedFrom && unit !== checkpointUnit);
-    if (victim < 0) break;
-    trimmed.dropped += units.splice(victim, 1)[0].length;
-  }
-
-  let final = [...head, ...units.flat()];
-  /*
-   * Counted from the messages themselves, not from the number of passes: the loop above can meet
-   * the same message twice, and a log that said "2 shortened" for one file would send a reader
-   * looking for a second one.
-   */
-  trimmed.cut = final.filter((message) => typeof message?.content === 'string'
-    && message.content.includes('characters omitted here')).length;
-
-  if (trimmed.dropped > 0 || trimmed.cut > 0) {
-    /*
-     * Said once, up front, where a model reading the transcript will meet it before the turns it
-     * is missing: otherwise the conversation appears to start mid-thought with no explanation.
-     */
-    const parts = [];
-    if (trimmed.dropped > 0) parts.push(`${trimmed.dropped} earlier messages were dropped`);
-    if (trimmed.cut > 0) parts.push(`${trimmed.cut} oversized messages were shortened`);
-    final = [...head, {
-      role: 'user',
-      content: `[gateway: ${parts.join(' and ')} to fit DeepAI Code's prompt limit of about `
-        + `${PROMPT_BUDGET_BYTES.toLocaleString('en-US')} bytes per request]`,
-    }, ...final.slice(head.length)];
-  }
-  return { messages: final, trimmed };
-}
-
-/**
- * The checkpoint that replaces the compacted turns, said so a model knows what it is reading.
- *
- * It carries the size of what it replaced as well as the number of messages, because "11 messages"
- * says nothing about how much work is behind them - eleven file reads and eleven greetings are not
- * the same loss.
- *
- * @param {number} count - messages replaced.
- * @param {Array<Array<object>>} removed - the units that were summarized.
- * @param {string} summary - what the model wrote.
- * @returns {object} an OpenAI message.
- */
-function checkpointMessage(count, removed, summary) {
-  const bytes = promptShape(removed.flat()).bytes;
-  return {
-    role: 'user',
-    content: `[gateway: ${count} earlier messages (${bytes.toLocaleString('en-US')} bytes) were `
-      + `compacted into the checkpoint below - they were not dropped. DeepAI Code reads about `
-      + `${PROMPT_BUDGET_BYTES.toLocaleString('en-US')} bytes of prompt per request, so the part of `
-      + `this conversation that no longer fits was summarized by the model itself, in the same format `
-      + `the DeepAI Code app uses for its own compactions. Treat the checkpoint as the history of the `
-      + `work already done.]\n\n${summary}`,
-  };
-}
-
-/**
- * The free model a checkpoint summary is written with.
- *
- * A compaction is the gateway's own work, so it must never turn a request the caller made on a free
- * model into a billed one - or add a paid call to a request that was already paid. The catalog is
- * where "free" comes from: `premier: false` is the free tier, and the preferred model is the same
- * flash model this gateway already falls back to. The Responses-API models are left out because
- * summaries are written over the chat-completions transport.
- *
- * `undefined` when the catalog lists no free text model: the caller's turns are then dropped rather
- * than summarized, which is the old behaviour and never a surprise invoice.
- *
- * @param {Array<object>} models - the catalog, as `ensureCatalog` returned it.
- * @returns {string|undefined}
- */
-function freeCompactionModel(models) {
-  const free = (Array.isArray(models) ? models : []).filter((model) => model?.premier !== true
-    && model?.api !== 'openai-responses'
-    && Array.isArray(model?.input)
-    && model.input.includes('text'));
-  if (free.length === 0) return undefined;
-  return (free.find((model) => model.id === FALLBACK_MODEL) ?? free[0]).id;
-}
-
-/**
- * Ask the model for a checkpoint of the turns a compaction is about to remove.
- *
- * Returns `undefined` when there is nothing to write a summary with, or when the summary could not
- * be produced: the caller then drops the turns rather than failing the request. A caller that
- * disconnected is the exception - that is an aborted request, not a compaction failure.
- *
- * @param {{apiKey?: string, model?: string, sessionId?: string, conversation?: string, signal?: AbortSignal, log?: (message: string) => void}} context
- * @param {Array<Array<object>>} units
- * @returns {Promise<string|undefined>}
- */
-async function checkpointFor(context, units) {
-  if (typeof context.apiKey !== 'string' || context.apiKey === ''
-    || typeof context.conversation !== 'string' || context.conversation === '') {
-    return undefined;
-  }
-  if (typeof context.model !== 'string' || context.model === '') {
-    context.log?.('compaction skipped: the catalog lists no free model to summarize with, so the turns are dropped');
-    return undefined;
-  }
-  try {
-    const { summary } = await compactMessages({
-      apiKey: context.apiKey,
-      model: context.model,
-      sessionId: context.sessionId,
-      conversation: context.conversation,
-      units,
-      signal: context.signal,
-    });
-    return summary === '' ? undefined : summary;
-  } catch (error) {
-    if (context.signal?.aborted) {
-      throw new UpstreamError('request aborted', 'ABORTED');
-    }
-    /*
-     * A summary that could not be written is not the caller's failure: the conversation is still
-     * served, shortened the old way. The reason is logged so a reader can tell a busy upstream
-     * from a broken summarizer, without a prompt or a key in the line.
-     */
-    context.log?.(`compaction failed, dropping instead: ${error?.message ?? error}`);
-    return undefined;
-  }
+function overPromptBudget(shape) {
+  return shape.bytes > PROMPT_BUDGET_BYTES;
 }
 
 /**
@@ -663,23 +281,24 @@ export function v1Router(db, options = {}) {
           input_modalities: [...model.input],
           output_modalities: ['text'],
           /*
-           * What the catalog claims, and what actually arrives.
+           * The window a client should compact against, and the claim it replaces.
            *
-           * `context_window` is DeepAI's own number, unchanged: the desktop app takes it straight
-           * out of `/deepai_code/models` and compacts at `contextWindow - reserveTokens`, so a
-           * client that reads it is doing what the app does. It is a claim, never a measurement -
-           * 320,000 tokens of English prose is about 1.3 MB of request body, six times what the
-           * endpoint will read, so it cannot be delivered.
+           * `context_window` is the measured one: prompt tokens of ordinary prose that arrive
+           * whole - 195,809 bytes read whole, 196,811 discarded, whatever alphabet they were made
+           * of, so the wall is on bytes and the byte figures are here too. It is the number a
+           * harness must use for its own compaction, because it is the number that keeps the
+           * conversation inside what DeepAI will actually read. This gateway does not compact on
+           * the caller's behalf: a conversation over `prompt_budget_bytes` is refused with
+           * `context_length_exceeded`, and the client compacts and retries.
            *
-           * `context_window_served` is that claim in the same unit, measured: prompt tokens of
-           * ordinary prose that arrive whole. Measured on the endpoint with a marker at each end
-           * of the prompt - 195,809 bytes read whole, 196,811 bytes discarded, whatever alphabet
-           * they were made of - the wall is on bytes, so the byte figures are here too. A client
-           * that wants to compact before anything is lost should use these; a client that wants
-           * to behave like the app should use `context_window`.
+           * `context_window_claimed` is DeepAI's own figure, unchanged, because it is what the
+           * catalog says and what another reader may want to see - but 320,000 tokens of English
+           * prose is about 1.3 MB of request body, six times what the endpoint will read, so a
+           * client that compacts at 90% of *this* number compacts too late and loses the start of
+           * its conversation without being told.
            */
-          context_window: model.contextWindow,
-          context_window_served: SERVED_CONTEXT_TOKENS,
+          context_window: SERVED_CONTEXT_TOKENS,
+          context_window_claimed: model.contextWindow,
           prompt_limit_bytes: PROMPT_LIMIT_BYTES,
           prompt_budget_bytes: PROMPT_BUDGET_BYTES,
           max_output_tokens: model.maxTokens,
@@ -830,57 +449,33 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * of a refusal (it expires), and `sent` means the image left the gateway.
    */
   /*
-   * The same measurement on both sides of this proxy: what the caller sent, and what DeepAI is
-   * given. An image can take a message out of the second one, so the two are not always equal -
-   * and a log that only showed the first would hide exactly the change a reader would need to
-   * explain a strange answer.
+   * What the caller sent, and what this gateway would send on. An image can take a message out of
+   * the second one, so the two are not always equal - and a log that only showed the first would
+   * hide exactly the change a reader would need to explain a strange answer.
    */
   const arrived = promptShape(body.messages);
-  /*
-   * The abort controller is created before the prompt is fitted, not after, because shortening a
-   * long conversation may now ask the upstream for a checkpoint summary - a second round trip that
-   * must end when the caller does. `res.on('close')` is attached at the same time for that reason.
-   */
+  const forwarded = promptShape(messages);
+
   const controller = new AbortController();
   res.on('close', () => {
     if (!res.writableEnded) controller.abort();
   });
-  /*
-   * The logger is settled here, before the prompt is fitted, because a compaction that fails has
-   * something to say: the conversation is then shortened the old way, and a reader of the log has
-   * to be able to tell a busy upstream from a broken summarizer.
-   */
   const log = options.logRequests !== false
     ? (options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`)))
     : undefined;
-  /*
-   * Shortened here rather than forwarded as it is. Above the budget DeepAI does not refuse the
-   * request: it answers from an empty conversation, so the model sees nothing and says hello.
-   * A conversation compacted to fit is worse than the whole one and much better than nothing -
-   * and the log records the difference, so a shortened turn is never a mystery.
-   */
-  const prepStart = Date.now();
-  const { messages: sentMessages, trimmed } = await fitPrompt(messages, {
-    apiKey: account.apiKey,
-    model: freeCompactionModel(models),
-    sessionId,
-    conversation: conversationId(body.messages),
-    signal: controller.signal,
-    log,
-  });
-  const prepMs = Date.now() - prepStart;
-  const forwarded = promptShape(sentMessages);
+  const startedAt = Date.now();
 
   /*
    * The same facts on the wire, for a caller that never reads a log.
    *
    * A client cannot find out from DeepAI that its prompt was too large - the answer is a normal
-   * 200 - so a client cannot learn to compact earlier. Here it can: the numbers the gateway
-   * measured and enforced ride on the response. `sent` is what left this process, `limit` is
-   * where the endpoint stops reading, and `trim` is empty when nothing was touched.
+   * 200, answered from whatever the endpoint kept, often nothing at all. Here it can: the numbers
+   * this gateway measured and enforces ride on every answer, including the refusal. `sent` is what
+   * would leave this process, `limit` is the measured wall, `budget` is the 90% of it that is
+   * accepted.
    *
-   * Set before the upstream call so both answers carry it: a streamed answer and a buffered one
-   * are the same request and should say the same thing about it.
+   * Set before the budget check so the refusal carries it too: a client that is over the line
+   * needs those numbers more than a client that is not.
    */
   res.setHeader('x-gateway-prompt', [
     `sent=${forwarded.bytes}`,
@@ -888,10 +483,59 @@ async function handleChatCompletion(db, req, res, options = {}) {
     `budget=${PROMPT_BUDGET_BYTES}`,
     `limit=${PROMPT_LIMIT_BYTES}`,
     `served-tokens=${SERVED_CONTEXT_TOKENS}`,
-    trimmed.compacted > 0 ? `compacted=${trimmed.compacted}` : null,
-    trimmed.dropped > 0 ? `dropped=${trimmed.dropped}` : null,
-    trimmed.cut > 0 ? `cut=${trimmed.cut}` : null,
-  ].filter((part) => part !== null).join('; '));
+  ].join('; '));
+
+  /*
+   * Above the budget the conversation is refused, not rewritten.
+   *
+   * DeepAI does not refuse an oversized prompt: it answers it from whatever it kept - the newest
+   * messages, or the system prompt alone - with a normal 200, and nobody downstream can tell. The
+   * gateway used to make up for that by cutting turns out of the middle or summarizing them, which
+   * is work a caller's own harness already does, and which it does with the whole conversation in
+   * front of it rather than a proxy's copy. This endpoint is meant to be pointed at by other coding
+   * agents; their compaction is their business, and this is the number they have to respect.
+   *
+   * The refusal is OpenAI's own shape - 400 with `code: "context_length_exceeded"` - because that
+   * is the error every agent harness already recognises and reacts to by compacting. DeepAI Code
+   * compacts at 90% of its window before sending; here the same 90% is where the gateway stops
+   * accepting, and the message says what to do.
+   */
+  if (overPromptBudget(forwarded)) {
+    const limit = PROMPT_BUDGET_BYTES.toLocaleString('en-US');
+    const wall = PROMPT_LIMIT_BYTES.toLocaleString('en-US');
+    log?.(`v1 ${upstreamModel} refused: prompt ${forwarded.count}msg/${forwarded.chars}ch/${forwarded.bytes}B `
+      + `over budget ${PROMPT_BUDGET_BYTES}B (wall ${PROMPT_LIMIT_BYTES}B) `
+      + `session=${sessionId.slice(0, 8)} ${transcriptShape(body.messages)}`);
+    record(db, {
+      keyId: req.gatewayKey.id,
+      keyName: req.gatewayKey.name,
+      owner: req.gatewayKey.owner_username ?? '',
+      model: upstreamModel,
+      requestedModel,
+      endpoint: 'chat.completions',
+      status: 400,
+      ok: false,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      totalTokens: 0,
+      durationMs: Date.now() - startedAt,
+      firstTokenMs: null,
+      streamed,
+      errorCode: 'context_length_exceeded',
+    });
+    return apiError(
+      res,
+      400,
+      `This conversation is ${forwarded.bytes.toLocaleString('en-US')} bytes of prompt, and this endpoint reads at most `
+        + `${limit} bytes per request (the measured wall is ${wall}: past it DeepAI answers from whatever it kept, `
+        + `often from an empty conversation, with a normal 200). Compact or summarize the conversation and retry; `
+        + `the x-gateway-prompt header on this refusal carries the numbers.`,
+      'context_length_exceeded',
+    );
+  }
 
   const imageNote = imageCount === 0
     ? 'images=0'
@@ -904,7 +548,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
   const params = {
     apiKey: account.apiKey,
     model: upstreamModel,
-    messages: sentMessages,
+    messages,
     tools: body.tools,
     maxTokens: numberOrUndefined(body.max_completion_tokens ?? body.max_tokens),
     temperature: numberOrUndefined(body.temperature),
@@ -919,7 +563,6 @@ async function handleChatCompletion(db, req, res, options = {}) {
 
   const id = `chatcmpl-${randomUUID().replace(/-/g, '').slice(0, 24)}`;
   const created = Math.floor(Date.now() / 1000);
-  const startedAt = Date.now();
 
   params.signal = controller.signal;
 
@@ -1107,19 +750,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
     errorCode = undefined;
     failure = undefined;
     try {
-      /*
-       * The prompt is fitted again because the image note changes its size. The checkpoint cache
-       * makes this cheap: the same dropped range produces the same summary without another call.
-       */
-      const retry = await fitPrompt(withoutImages(body.messages), {
-        apiKey: account.apiKey,
-        model: freeCompactionModel(models),
-        sessionId,
-        conversation: conversationId(body.messages),
-        signal: controller.signal,
-        log,
-      });
-      await runAttempt({ ...params, messages: retry.messages });
+      await runAttempt({ ...params, messages: withoutImages(body.messages) });
     } catch (retryError) {
       status = retryError?.code === 'ABORTED' ? 499 : (retryError?.status ?? 502);
       errorCode = retryError?.code === 'ABORTED' ? 'client_closed' : (retryError?.code ?? 'gateway_error');
@@ -1278,13 +909,12 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * from a slow model instead of guessing at both.
    */
   log?.(`v1 chat/completions ${upstreamModel} stream=${streamed ? 'yes' : 'no'} status=${status} `
-    + `catalog=${catalogMs}ms ${trimmed.compacted > 0 ? `prep=${prepMs}ms ` : ''}`
+    + `catalog=${catalogMs}ms `
     + `first-event=${firstEventMs ?? '-'}ms first-token=${firstTokenMs ?? '-'}ms `
     + `total=${Date.now() - startedAt}ms${waitedMs > 0 ? ` waited=${waitedMs}ms` : ''} `
     + `prompt ${arrived.count}msg/${arrived.chars}ch/${arrived.bytes}B in, `
     + `${forwarded.count}msg/${forwarded.chars}ch/${forwarded.bytes}B out `
     + `session=${sessionId.slice(0, 8)} ${transcriptShape(body.messages)} `
-    + `${trimNote(trimmed)}`
     + `${speedNote}`
     + `${effortNote}`
     + imageNote);

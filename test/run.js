@@ -1381,18 +1381,19 @@ await checkAsync('/v1/models carries modalities, reasoning levels and names', as
     assert.deepEqual(free.output_modalities, ['text']);
     assert.deepEqual(free.reasoning_levels, ['none', 'low', 'medium', 'high']);
     assert.ok(free.context_window > 0);
-    // The declared window passes through unchanged - it is DeepAI's own number, and the desktop
-    // app compacts at `contextWindow - reserveTokens`, so a client reading it behaves like the app.
-    assert.equal(free.context_window, 1_048_576);
     /*
-     * Beside it, the measured promise: 195,809 bytes of prompt arrived whole and 196,811 did not,
-     * which is about 43,500 tokens of ordinary prose and 100,000 tokens of incompressible filler.
-     * A client that wants to compact before anything is lost reads these, not the claim above.
+     * The window a client must compact against is the *measured* one, not DeepAI's claim:
+     * 195,809 bytes of prompt arrived whole and 196,811 did not, which is about 43,500 tokens of
+     * ordinary prose and 100,000 tokens of incompressible filler. A harness that compacts at 90%
+     * of this number stays inside what the endpoint will actually read.
      */
-    assert.equal(free.context_window_served, 40_000,
-      'the served window is the measured wall in the unit every catalog speaks');
-    assert.equal(free.prompt_limit_bytes, 196_000, 'and the wall in the unit it was measured in');
-    assert.equal(free.prompt_budget_bytes, 170_000, 'the budget this gateway enforces stays under it');
+    assert.equal(free.context_window, 40_000,
+      'the advertised window is the measured one, in the unit every catalog speaks');
+    assert.equal(free.context_window_claimed, 1_048_576,
+      'and DeepAI\'s own claim is published beside it, labelled as a claim');
+    assert.equal(free.prompt_limit_bytes, 196_000, 'the wall in the unit it was measured in');
+    assert.equal(free.prompt_budget_bytes, 176_400,
+      'and the 90% of it this gateway accepts, the same rule the app compacts by');
     assert.ok(free.max_output_tokens > 0);
     assert.equal(free.credits_per_request, '0');
     assert.equal(free.rate_label, 'Unmetered');
@@ -4299,16 +4300,20 @@ await checkAsync('an image the backend refuses is retried as text, not reported 
   }
 });
 
-await checkAsync('a prompt past the wall is shortened here, as the app shortens it', async () => {
+await checkAsync('a prompt past the wall is refused here, so the client compacts', async () => {
   /*
    * Measured on the live endpoint with incompressible content: 150,189 characters of prompt are
    * read whole (markers at 5%, 50% and 95% came back), 200,000 characters come back as a
    * completion with no content, and 300,000 as 246 prompt tokens with the model saying it was
-   * never shown a file.
+   * never shown a file. Past about 196,000 bytes the endpoint does not refuse: it answers from
+   * whatever it kept, usually the newest messages, with a normal 200 - which is what "the agent
+   * forgets" looks like from the inside.
    *
-   * So a prompt this large is not a shorter answer upstream - it is no conversation at all, and
-   * the model answers a question nobody asked, which is the greeting reported from a harness
-   * mid-task. Forwarding it unchanged is the one thing that cannot be right.
+   * This gateway does not rewrite the conversation to fit. It is pointed at by other coding
+   * agents, and their compaction is done where the whole conversation lives - the DeepAI Code app
+   * compacts at 90% of its window before sending, and a harness does the same. What the endpoint
+   * owes them is the honest number and an error they already know how to act on: OpenAI's
+   * `context_length_exceeded`, at 90% of the measured wall.
    */
   const { openDatabase } = await import('../src/db.js');
   const { saveAccount } = await import('../src/store.js');
@@ -4316,45 +4321,20 @@ await checkAsync('a prompt past the wall is shortened here, as the app shortens 
   const { createApp: createAppForTrim } = await import('../server.js');
 
   const db2 = openDatabase(':memory:');
-  saveAccount(db2, { apiKey: 'upstream', username: 'trim-user', isPro: false });
+  saveAccount(db2, { apiKey: 'upstream', username: 'prompt-user', isPro: false });
   const key = generateKey();
   db2.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
-    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'trim-user')`).run(key.hash);
-  // Checkpoints are cached per conversation in this process; a stale one would hide a bug here.
-  const { forgetCompactionCache } = await import('../src/deepai/compaction.js');
-  forgetCompactionCache();
+    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'prompt-user')`).run(key.hash);
 
   const realFetch = globalThis.fetch;
   const sent = [];
-  const summaries = [];
   const lines = [];
-  let summarizerFails = false;
-  /** The checkpoint the summarizer writes, so the test can find it in the forwarded prompt. */
-  const CHECKPOINT = '## Goal\n- CHECKPOINT-TOKEN keep the work\n\n## Progress\n### Done\n- [x] the work so far';
   globalThis.fetch = async (url, init) => {
     if (!String(url).includes('api.deepai.org')) return realFetch(url, init);
     if (String(url).includes('deepai_code/models')) {
       return new Response(JSON.stringify(CATALOG_PAYLOAD), { status: 200, headers: { 'content-type': 'application/json' } });
     }
-    const payload = JSON.parse(init.body);
-    /*
-     * A compaction is a request of its own: the app's summarization system prompt is what tells it
-     * apart from the conversation being summarized. Summaries are recorded separately from `sent`,
-     * because they are the gateway's own work, not the caller's turn.
-     */
-    const summarizing = Array.isArray(payload.messages)
-      && String(payload.messages[0]?.content ?? '').includes('context summarization assistant');
-    if (summarizing) {
-      summaries.push(payload);
-      if (summarizerFails) {
-        return new Response('{"error":{"message":"the summarizer is down"}}',
-          { status: 500, headers: { 'content-type': 'application/json' } });
-      }
-      const chunk = { choices: [{ delta: { content: CHECKPOINT }, finish_reason: 'stop' }] };
-      return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`,
-        { status: 200, headers: { 'content-type': 'text/event-stream' } });
-    }
-    sent.push(payload);
+    sent.push(JSON.parse(init.body));
     return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
       { status: 200, headers: { 'content-type': 'text/event-stream' } });
   };
@@ -4363,241 +4343,118 @@ await checkAsync('a prompt past the wall is shortened here, as the app shortens 
   const server2 = app2.listen(0, '127.0.0.1');
   await new Promise((resolve) => server2.once('listening', resolve));
   const base2 = `http://127.0.0.1:${server2.address().port}`;
-  const send = (messages, model = 'glm-5.3-flash') => realFetch(`${base2}/v1/chat/completions`, {
+  const send = (messages, extra = {}) => realFetch(`${base2}/v1/chat/completions`, {
     method: 'POST',
     headers: { authorization: `Bearer ${key.plaintext}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ model, messages, stream: false }),
+    body: JSON.stringify({ model: 'glm-5.3-flash', messages, stream: false, ...extra }),
   });
-  // The line that records the sizes is not the last one written - the request line follows it.
   const promptLines = () => lines.filter((line) => line.includes('prompt '));
   const chars = (payload) => payload.messages.reduce((total, message) =>
     total + (typeof message.content === 'string' ? message.content.length : 0), 0);
+  const bytes = (text) => Buffer.byteLength(text, 'utf8');
 
   try {
-    // Under the wall: untouched, character for character.
+    // Under the budget: untouched, character for character - and no note is ever added.
     const small = await send([{ role: 'user', content: 'x'.repeat(140_000) }]);
     assert.equal(small.status, 200);
     assert.equal(chars(sent[0]), 140_000, 'a prompt inside the budget is not touched');
-    assert.ok(!promptLines().at(-1).includes('trim='), 'and the log says nothing was trimmed');
+    assert.ok(!String(small.headers.get('x-gateway-prompt')).includes('trim='),
+      'and the gateway says nothing was done to it');
+
     /*
-     * The effort setting is recorded as asked *and* as answered. DeepAI takes `reasoning_effort`
-     * and ignores it - a request sent with `none` still comes back with its hundred-odd reasoning
-     * tokens, and no spelling of "off" this API can express was ever answered with none - so a
-     * log line that only said what was sent would look like evidence that it worked.
+     * The budget is in bytes, not characters, because the wall is. A Polish paragraph carries two
+     * bytes per letter, so 80,000 characters is 160,000 bytes and fits, while 100,000 characters
+     * is 200,000 bytes and does not - and the same 80,000 characters must arrive untouched.
      */
-    assert.ok(!promptLines().at(-1).includes('effort='),
-      `nothing is noted when no level was asked for and none was thought: ${promptLines().at(-1)}`);
+    const polish = await send([{ role: 'user', content: 'ą'.repeat(80_000) }]);
+    assert.equal(polish.status, 200, 'two-byte letters under the byte budget are served');
+    assert.equal(sent.at(-1).messages[0].content.length, 80_000, 'and arrive whole');
 
-    // Over it: the middle goes, both ends stay, and the model is told what it lost.
-    const head = 'HEAD-MARK ';
-    const tail = ' TAIL-MARK';
-    const large = await send([{ role: 'user', content: head + 'y'.repeat(200_000) + tail }]);
-    assert.equal(large.status, 200, 'an oversized prompt is served, not refused');
-    const second = sent.at(-1);
-    assert.ok(chars(second) <= 150_000, `forwarded ${chars(second)} characters, which must fit the budget`);
-    const cut = second.messages.find((message) => message.content.startsWith('HEAD-MARK'));
-    assert.ok(cut, 'the start is kept');
-    assert.ok(cut.content.endsWith('TAIL-MARK'), 'and the end is kept');
-    assert.match(cut.content, /\[gateway: [\d,]+ characters omitted here/);
-    assert.ok(promptLines().at(-1).includes('trim=cut1'), `log should report the cut: ${promptLines().at(-1)}`);
+    const tooMuchPolish = await send([{ role: 'user', content: 'ą'.repeat(100_000) }]);
+    assert.equal(tooMuchPolish.status, 400, 'the same character count in two-byte letters is refused');
 
-    const askedOff = await realFetch(`${base2}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${key.plaintext}`, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: 'glm-5.3-flash',
-        messages: [{ role: 'user', content: 'think hard' }],
-        reasoning_effort: 'none',
-        stream: false,
-      }),
-    });
-    assert.equal(askedOff.status, 200);
-    assert.match(promptLines().at(-1), / effort=none reasoning=0 /,
-      `a level that was asked for is on the line with what came back: ${promptLines().at(-1)}`);
+    /*
+     * The line itself, to the byte. 90% of the measured 196,000 is 176,400 bytes: that arrives,
+     * one byte more does not, and the refusal is the error every harness already handles.
+     */
+    const atBudget = await send([{ role: 'user', content: 'x'.repeat(176_400) }]);
+    assert.equal(atBudget.status, 200, 'a prompt exactly at the budget is accepted');
+    assert.equal(chars(sent.at(-1)), 176_400, 'and is not shortened by even a byte');
 
-    // A tool result larger than a whole prompt's budget: cut, and still a tool result.
+    const overBudget = await send([{ role: 'user', content: 'x'.repeat(176_401) }]);
+    assert.equal(overBudget.status, 400, 'one byte over the budget is refused');
+    const refusal = await overBudget.json();
+    assert.equal(refusal.error?.code, 'context_length_exceeded',
+      'under the code an OpenAI-compatible harness already recognises');
+    assert.equal(refusal.error?.type, 'invalid_request_error');
+    assert.match(refusal.error?.message ?? '', /176,400 bytes per request/,
+      'the message names the number it will accept');
+    assert.match(refusal.error?.message ?? '', /Compact or summarize the conversation and retry/,
+      'and says what to do about it');
+    assert.equal(promptLines().at(-1).includes('refused'), true, `the log says it was refused: ${promptLines().at(-1)}`);
+
+    /*
+     * A whole conversation over the line, as an agent harness sends it: no request reaches the
+     * upstream, nothing is rewritten, and the numbers ride on the refusal itself.
+     */
+    const before = sent.length;
+    const long = [{ role: 'system', content: 'You are a coding agent.' }];
+    for (let turn = 0; turn < 8; turn += 1) {
+      long.push({ role: 'user', content: `turn ${turn} `.padEnd(20_000, 'w') });
+      long.push({ role: 'assistant', content: `answer ${turn} `.padEnd(20_000, 'v') });
+    }
+    const refused = await send(long);
+    assert.equal(refused.status, 400);
+    assert.equal(sent.length, before, 'an oversized conversation is not sent upstream at all');
+    const longBytes = long.reduce((total, message) => total + Buffer.byteLength(message.content, 'utf8'), 0);
+    assert.equal(String(refused.headers.get('x-gateway-prompt')),
+      `sent=${longBytes}; received=${longBytes}; budget=176400; limit=196000; served-tokens=40000`,
+      `the refusal carries the numbers it was measured with: ${refused.headers.get('x-gateway-prompt')}`);
+    const rows = db2.prepare('SELECT status, ok, error_code FROM usage ORDER BY rowid DESC LIMIT 1').get();
+    assert.equal(rows.status, 400, 'the refusal is recorded like any other request');
+    assert.equal(rows.ok, 0);
+    assert.equal(rows.error_code, 'context_length_exceeded');
+
+    // A streaming caller gets the same refusal, as JSON: the status is decided before the stream,
+    // and an SDK reading `stream: true` still finds an error object it can parse.
+    const streaming = await send([{ role: 'user', content: 'x'.repeat(200_000) }], { stream: true });
+    assert.equal(streaming.status, 400);
+    assert.equal((await streaming.json()).error?.code, 'context_length_exceeded');
+
+    /*
+     * An oversized tool result is refused, not cut. The harness that produced it knows what it
+     * read and can truncate or summarize it; a proxy guessing which half to keep cannot.
+     */
     const toolMessages = [
       { role: 'user', content: 'read big.txt' },
       { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_file', arguments: '{"path":"big.txt"}' } }] },
       { role: 'tool', tool_call_id: 'c1', content: `START-OF-FILE ${'z'.repeat(200_000)} END-OF-FILE` },
       { role: 'user', content: 'what is at the top?' },
     ];
-    const toolCall = await send(toolMessages);
-    assert.equal(toolCall.status, 200);
-    const forwardedTool = sent.at(-1).messages.find((message) => message.role === 'tool');
-    assert.equal(forwardedTool.tool_call_id, 'c1', 'the result still belongs to its call');
-    assert.ok(forwardedTool.content.length <= 50_000,
-      `a tool result must be cut to the budget, got ${forwardedTool.content.length}`);
-    assert.ok(forwardedTool.content.startsWith('START-OF-FILE'), 'its start survives');
-    assert.ok(forwardedTool.content.endsWith('END-OF-FILE'), 'and so does its end');
-    assert.ok(promptLines().at(-1).includes('trim=cut1'), `log should report the tool trim: ${promptLines().at(-1)}`);
-
-    // A conversation too long for the budget: its middle is compacted into a checkpoint written by
-    // the model - the app's own way of keeping a long conversation - and never dropped outright.
-    const longConversation = [{ role: 'system', content: 'You are a coding agent.' }];
-    for (let turn = 0; turn < 12; turn += 1) {
-      longConversation.push({ role: 'user', content: `turn ${turn} `.padEnd(20_000, 'w') });
-      longConversation.push({ role: 'assistant', content: `answer ${turn} `.padEnd(20_000, 'v') });
-    }
-    longConversation.push({ role: 'user', content: 'NEWEST-TURN what next?' });
-    const conversation = await send(longConversation);
-    assert.equal(conversation.status, 200);
-    const forwardedConversation = sent.at(-1).messages;
-    assert.equal(forwardedConversation[0].role, 'system', 'the standing instruction is never dropped');
-    assert.equal(forwardedConversation[0].content, 'You are a coding agent.');
-    assert.ok(forwardedConversation.at(-1).content.startsWith('NEWEST-TURN'), 'the newest turn is never dropped');
-    const checkpoint = forwardedConversation.find((message) => typeof message.content === 'string'
-      && message.content.startsWith('[gateway: '));
-    assert.ok(checkpoint !== undefined, 'the compacted part is replaced by a checkpoint, not silently removed');
-    assert.match(checkpoint.content, /compacted into the checkpoint below - they were not dropped/);
-    assert.ok(checkpoint.content.includes('CHECKPOINT-TOKEN'),
-      'the summary the model wrote is what takes the place of the dropped turns');
-    assert.ok(!promptLines().at(-1).includes('drop'),
-      `nothing is dropped when a checkpoint can be written: ${promptLines().at(-1)}`);
-    assert.ok(promptLines().at(-1).includes('trim=compact'),
-      `log should report the compaction: ${promptLines().at(-1)}`);
-    assert.match(String(conversation.headers.get('x-gateway-prompt')), /compacted=\d+/,
-      'and the caller is told what physically happened');
-    /*
-     * The summarizer is asked about the turns that were compacted - not the goal pinned at the
-     * head, and not the work nearest the current step - and it is asked with the app's own
-     * checkpoint format.
-     */
-    assert.equal(summaries.length, 1, 'one checkpoint request is made for one compaction');
-    assert.equal(summaries[0].model, 'glm-5.3-flash', 'and it is written with a free model');
-    const summaryPrompt = summaries[0].messages[1].content;
-    assert.match(summaryPrompt, /^<conversation>/);
-    assert.match(summaries[0].messages[0].content, /Do NOT continue the conversation/);
-    assert.ok(summaryPrompt.includes('[User]: turn 1 '), 'the dropped turns are what gets summarized');
-    assert.ok(!summaryPrompt.includes('turn 0 '), 'the goal is pinned, not summarized');
-    assert.ok(!summaryPrompt.includes('turn 11 '), 'and neither is the recent work');
-    /*
-     * The task itself survives. An agent harness sends the goal once and then a thousand tool
-     * calls; taking the oldest end first took the goal, and the model spent the rest of the run
-     * rediscovering what it had been asked to do.
-     */
-    assert.ok(forwardedConversation.some((message) => message.content.startsWith('turn 0 ')),
-      'the goal - the first user turn - is never compacted');
-    assert.ok(forwardedConversation.some((message) => message.content.startsWith('turn 11 ')),
-      'and neither is the work nearest the current step');
+    const oversizedTool = await send(toolMessages);
+    assert.equal(oversizedTool.status, 400, 'an oversized tool result is refused');
+    assert.equal(sent.some((payload) => payload.messages.some((message) => message.role === 'tool'
+      && String(message.content).includes('characters omitted here'))), false,
+    'and never replaced by a shortened version');
 
     /*
-     * A second turn of the same conversation reuses the checkpoint: the dropped range is unchanged,
-     * so no second summary is written to the account's bill.
+     * An image is not prompt text. It travels on DeepAI's own input path, and the wall was
+     * measured on the text a model reads, so a screenshot-sized data URL must not be refused as
+     * an oversized conversation.
      */
-    const repeated = await send(longConversation);
-    assert.equal(repeated.status, 200);
-    assert.equal(summaries.length, 1, 'a cached checkpoint is reused, not rewritten');
-    assert.ok(sent.at(-1).messages.some((message) => message.content.includes('CHECKPOINT-TOKEN')),
-      'and the cached checkpoint still reaches the model');
+    const screenshot = `data:image/png;base64,${'A'.repeat(300_000)}`;
+    const withImage = await send([{ role: 'user', content: [
+      { type: 'text', text: 'what is on this screenshot?' },
+      { type: 'image_url', image_url: { url: screenshot } },
+    ] }]);
+    assert.equal(withImage.status, 200, 'a large image does not count against the prompt budget');
+    assert.equal(sent.at(-1).messages[0].content[1].image_url.url.length, screenshot.length,
+      'and the image is forwarded whole');
 
-    /*
-     * When the conversation grows further, the checkpoint is extended instead of being rebuilt:
-     * the update prompt carries the previous summary, and only the newly compacted turns are sent.
-     */
-    const grown = [...longConversation,
-      { role: 'assistant', content: 'done '.padEnd(20_000, 'z') },
-      { role: 'user', content: 'NEXT-TURN continue '.padEnd(20_000, 'q') }];
-    const grownReply = await send(grown);
-    assert.equal(grownReply.status, 200);
-    assert.equal(summaries.length, 2, 'a wider compaction asks once more');
-    const updatePrompt = summaries[1].messages[1].content;
-    assert.match(updatePrompt, /<previous-summary>[\s\S]*CHECKPOINT-TOKEN[\s\S]*<\/previous-summary>/,
-      'the previous checkpoint is carried forward, so nothing recorded earlier is lost');
-    assert.ok(!updatePrompt.includes('[User]: turn 1 '),
-      'and the turns the previous checkpoint already covers are not summarized again');
-    assert.ok(sent.at(-1).messages.at(-1).content.startsWith('NEXT-TURN'), 'the newest turn still survives');
-
-    /*
-     * If no checkpoint can be written the conversation is still served: the turns are dropped the
-     * old way and the model is told. A different conversation, so the cache cannot answer for the
-     * summarizer that is down.
-     */
-    summarizerFails = true;
-    const failing = [{ role: 'system', content: 'You are a coding agent.' }];
-    for (let turn = 0; turn < 12; turn += 1) {
-      failing.push({ role: 'user', content: `other ${turn} `.padEnd(20_000, 'x') });
-      failing.push({ role: 'assistant', content: `reply ${turn} `.padEnd(20_000, 'y') });
-    }
-    failing.push({ role: 'user', content: 'FALLBACK-TURN what next?' });
-    const fallback = await send(failing);
-    assert.equal(fallback.status, 200, 'a failed summarizer does not fail the request');
-    const fallbackMessages = sent.at(-1).messages;
-    assert.ok(fallbackMessages.some((message) => typeof message.content === 'string'
-      && message.content.startsWith('[gateway: ') && message.content.includes('were dropped')),
-      'the model is told that the turns are missing');
-    assert.ok(promptLines().at(-1).includes('trim=drop'),
-      `and the log says the fallback happened: ${promptLines().at(-1)}`);
-    assert.ok(lines.some((line) => line.includes('compaction failed')),
-      'the reason is logged rather than hidden');
-    summarizerFails = false;
-
-    /*
-     * A checkpoint is never written with the paid model the caller asked for. Keeping a
-     * conversation is the gateway's own work, so it runs on a free model from the catalog -
-     * otherwise a compaction would quietly add a paid call to a request that was free, or a
-     * second paid call to one that was not.
-     */
-    const paidConversation = [{ role: 'system', content: 'You are a coding agent.' }];
-    for (let turn = 0; turn < 12; turn += 1) {
-      paidConversation.push({ role: 'user', content: `paid turn ${turn} `.padEnd(20_000, 'p') });
-      paidConversation.push({ role: 'assistant', content: `paid answer ${turn} `.padEnd(20_000, 'q') });
-    }
-    paidConversation.push({ role: 'user', content: 'PAID-TURN what next?' });
-    const summariesBefore = summaries.length;
-    const paid = await send(paidConversation, 'glm-5.3');
-    assert.equal(paid.status, 200);
-    assert.equal(sent.at(-1).model, 'glm-5.3', 'the answer comes from the model that was asked for');
-    assert.equal(summaries.length, summariesBefore + 1, 'the conversation was compacted');
-    assert.equal(summaries.at(-1).model, 'glm-5.3-flash',
-      'a paid model is never asked to write the checkpoint');
-
-    /*
-     * The wall is on bytes, not characters. Measured on the endpoint itself: 195,809 bytes of
-     * English arrived whole and 196,811 bytes did not, and 193,339 bytes of two-byte letters
-     * arrived whole while 197,280 did not - the same cliff at the same byte count, whatever the
-     * alphabet and whatever the token count. So the same number of characters is not the same
-     * amount of prompt: 100,000 characters of Polish is 200,000 bytes and has to be shortened,
-     * while 100,000 characters of English is 100,000 bytes and must be left alone.
-     */
-    await send([{ role: 'user', content: 'w'.repeat(100_000) }, { role: 'user', content: 'what now?' }]);
-    const englishPrompt = sent.at(-1).messages;
-    assert.equal(englishPrompt[0].content.length, 100_000, 'English text under the byte budget is untouched');
-    assert.ok(!promptLines().at(-1).includes('trim='), `nothing to trim: ${promptLines().at(-1)}`);
-
-    const polish = await send([{ role: 'user', content: 'ą'.repeat(100_000) }, { role: 'user', content: 'what now?' }]);
-    /*
-     * And the same facts on the wire. A client cannot learn from DeepAI that its prompt was too
-     * large - the answer is a normal 200 - so the gateway says what it did, on the response, in
-     * the units it measured: bytes sent, the budget enforced, the wall the budget sits under.
-     */
-    assert.match(String(polish.headers.get('x-gateway-prompt')), /^sent=\d+; received=200\d+; budget=170000; limit=196000; served-tokens=40000; cut=1$/,
-      `the response says what physically happened: ${polish.headers.get('x-gateway-prompt')}`);
-    // The announcement is a message of its own, so the one that was cut is not the first.
-    const polishBody = sent.at(-1).messages.find((message) => typeof message.content === 'string'
-      && message.content.startsWith('ą'));
-    assert.ok(polishBody !== undefined, 'the pasted text is still there, shortened rather than removed');
-    assert.ok(polishBody.content.length < 100_000,
-      'the same character count in two-byte letters is over the budget and must be cut');
-    assert.match(polishBody.content, /characters omitted here/,
-      'and the model is told what it is missing');
-    assert.match(promptLines().at(-1), /prompt 2msg\/\d+ch\/\d+B in/,
-      `the log counts bytes as well as characters: ${promptLines().at(-1)}`);
-
-    // Nothing left unpaired: a tool result without its call, or a call without results, is a
-    // transcript DeepAI throws away entirely.
+    // Nothing that was accepted was rewritten: every forwarded message is exactly what arrived.
     for (const payload of sent) {
-      const calls = new Set();
-      for (const message of payload.messages) {
-        for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) calls.add(call.id);
-      }
-      const answered = new Set();
-      for (const message of payload.messages) {
-        if (message.role !== 'tool') continue;
-        assert.ok(calls.has(message.tool_call_id), `tool result ${message.tool_call_id} lost its call`);
-        answered.add(message.tool_call_id);
-      }
-      for (const id of calls) assert.ok(answered.has(id), `call ${id} lost its results`);
+      assert.ok(!payload.messages.some((message) => typeof message.content === 'string'
+        && message.content.startsWith('[gateway: ')), 'no note is ever injected into a prompt');
     }
   } finally {
     globalThis.fetch = realFetch;

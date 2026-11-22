@@ -209,10 +209,11 @@ characters of tool result returned "I haven't been shown any file in this conver
 
 The largest prompt verified to arrive whole is therefore 195,809 bytes - 40,000 tokens of ordinary
 prose, 100,000 of that incompressible filler - well under the 320,000 the app believes and the
-1,048,576 the catalog advertises. A long chat crosses it without a symptom: the gateway's own
-`PROMPT_BUDGET_BYTES` is 170,000, under the boundary with room for the note it adds, and the desktop
-app - which compacts at around 290,000 *tokens*, on a promise nobody measured - lets a conversation
-run eight times past the point where its beginning stops being read.
+1,048,576 the catalog advertises. A long chat crosses it without a symptom: `PROMPT_BUDGET_BYTES` is
+176,400 - 90% of the wall, the same rule the app compacts by - and a conversation over it is refused
+with `context_length_exceeded` instead of being sent to be quietly cut. The desktop app, which
+compacts at around 290,000 *tokens* on a promise nobody measured, still lets a conversation run
+eight times past the point where its beginning stops being read.
 
 The app does truncate its own tool output (a file read is capped, bash output is capped), which
 keeps a single turn small, but not the transcript: measured on this machine's own session store, the
@@ -223,79 +224,76 @@ What the API says about all this is therefore two numbers, not one:
 
 | field | value | what it is |
 | --- | --- | --- |
-| `context_window` | 320,000 | DeepAI's own claim, from `/deepai_code/models`, unchanged |
-| `context_window_served` | 40,000 | measured: prompt tokens of ordinary prose that arrive whole |
+| `context_window` | 40,000 | measured: prompt tokens of ordinary prose that arrive whole - the window a client compacts against |
+| `context_window_claimed` | 320,000 | DeepAI's own figure from `/deepai_code/models`, published beside it and labelled as a claim |
 | `prompt_limit_bytes` | 196,000 | the measured wall, in the unit it was measured in |
-| `prompt_budget_bytes` | 170,000 | what this gateway will forward, under the wall |
+| `prompt_budget_bytes` | 176,400 | what this gateway accepts: 90% of the wall, the same rule DeepAI Code compacts by |
 
-A client that wants to behave like the desktop app reads `context_window`; a client that wants to
-compact before anything is lost reads the other three. The same facts ride on every answer in an
-`x-gateway-prompt` header - `sent=76000; received=480000; budget=170000; limit=196000; served-tokens=40000;
-compacted=20` - because a client cannot learn any of this from DeepAI, whose answer to an oversized
-prompt is a normal 200. The Models page shows them side by side too: `320.0k` with `served 40.0k`
-beneath it.
+`context_window` is the measured number, not the claim, because the API is meant to be pointed at by
+other coding agents and they do their own compaction. A harness that compacts at 90% of 320,000
+compacts at 288,000 tokens - about 1.2 MB of body, six times over the wall - and loses the start of
+its conversation without being told. A harness that compacts at 90% of 40,000 compacts in time: 90%
+of 40,000 is 36,000 tokens, and prose measured at 4.9 bytes per token here (195,809 B came back as
+40,194 prompt tokens), so 36,000 tokens is 176,400 bytes - exactly the budget. The published window
+and the enforced budget are the same line, seen from the two sides the client and the gateway each
+count in.
 
-The gateway therefore shortens the prompt here, the way the app does, instead of forwarding one
-that will be thrown away - three rules, in the order that loses the least:
+The same facts ride on every answer in an `x-gateway-prompt` header -
+`sent=176400; received=176400; budget=176400; limit=196000; served-tokens=40000` - because a client
+cannot learn any of this from DeepAI, whose answer to an oversized prompt is a normal 200. The
+Models page shows the claim and the measurement side by side: `320.0k` with `served 40.0k` beneath
+it.
 
-1. A message larger than one message may be - 40,000 characters, or 50,000 for a tool result -
-   loses its middle, keeping its start and its end, with the amount left out written where the
-   cut is. A file read is most useful at its start and a build log at its end, and a model has to
-   know it is looking at a shortened text.
-2. **The turns in the middle are compacted, not dropped.** The gateway asks a model for a
-   structured checkpoint of them - goal, constraints, progress, decisions, next steps, critical
-   context - and the checkpoint takes their place, in the same format the DeepAI Code app uses when
-   its own context fills. This is the app's own compaction, moved to the one place that can still
-   see the whole conversation: a caller sends its whole transcript on every turn, so the part that
-   no longer fits is summarized here rather than silently disappearing upstream.
+**The gateway does not rewrite the conversation.** It used to - cutting the middle out of large
+messages, then summarizing the turns between the goal and the newest one - and that was work done
+in the wrong place: a caller sends its whole transcript on every turn, its harness already owns the
+compaction that keeps its context under the window, and doing it again per request meant a summary
+call on every turn of a long conversation. What the endpoint owes such a harness is the honest
+number and an error it already knows how to act on.
 
-   **The checkpoint is written with a free model from the catalog** - `glm-5.3-flash` when it is
-   listed, otherwise the first free text model - never with the paid model the caller asked for.
-   Keeping a conversation is the gateway's own work: a compaction must not turn a free request into
-   a billed one, or add a second paid call to a request that was already paid. If the catalog lists
-   no free model, nothing is summarized, the turns are dropped the old way, and the log says why.
+So a prompt over the budget is refused, before anything is sent upstream:
 
-   The system prompt and the goal at the head and the newest work at the tail always survive. The
-   goal matters because of who sends long prompts now: an agent harness sends its task once and then
-   two thousand tool calls, so the task *is* the oldest thing in the prompt. Dropping from the
-   oldest end was written for a chat, and it took the task first; what is compacted instead is the
-   middle, and the checkpoint says how many messages and how many bytes it stands for.
+```json
+{
+  "error": {
+    "message": "This conversation is 320,025 bytes of prompt, and this endpoint reads at most
+                176,400 bytes per request (the measured wall is 196,000: past it DeepAI answers
+                from whatever it kept, often from an empty conversation, with a normal 200).
+                Compact or summarize the conversation and retry; the x-gateway-prompt header on
+                this refusal carries the numbers.",
+    "type": "invalid_request_error",
+    "code": "context_length_exceeded",
+    "param": null
+  }
+}
+```
 
-   Summaries are cached per conversation and extended incrementally. The compacted range always
-   starts at the same place and only grows at its end, so the next compaction sends just the new
-   turns plus the previous checkpoint to the app's *update* prompt - the part already recorded is
-   not summarized twice, and a conversation compacted five times does not lose what the first
-   compaction wrote. A compaction aims well under the budget (60,000 bytes of recent work plus
-   16,000 for the checkpoint), so the next twenty-odd turns fit before another one is needed.
+`400` with `code: "context_length_exceeded"` is OpenAI's own contract for this, and every agent
+harness - Pi, Codex, Claude Code, anything built on an OpenAI SDK - already recognises it and
+compacts. DeepAI Code does the same thing from the other side: it measures the context after every
+turn and compacts at `contextWindow - reserveTokens`, before the next request goes out. Here the
+same 90% is where the gateway stops accepting, and the numbers are on the refusal so a client can
+compact to a target rather than guess.
 
-   If no checkpoint can be written - the upstream is unreachable, the model is busy, a single turn
-   overflows - the turns are dropped the old way and the model is told. A summarizer failure never
-   fails the caller's request.
-3. If a single turn alone still overflows the budget, it is cut to fit.
-
-Whatever is compacted, dropped or shortened is announced in the transcript - a model handed a
-shortened conversation has to know it is looking at one, and a model handed a checkpoint has to
-know it is reading history rather than the present - and counted in the log as `trim=compact20`,
-`trim=drop11` or `trim=cut1`. Nothing is touched while the prompt fits.
+What is *not* touched: anything under the budget arrives upstream byte for byte, including a
+200,000-byte tool result that would have been cut in half before. A harness that read a large file
+knows what it read and can summarize or truncate it itself; a proxy guessing which half to keep
+cannot.
 
 Measured, against the same account that used to get nothing back:
 
-| sent | before | after |
+| sent | once forwarded | now |
 | --- | --- | --- |
-| one 250,000-character message | 330 tokens, answered "Unannounced." | `trim=cut1`, 12,623 tokens, read `MAGPIE-42` from its first line |
-| a 300,000-character tool result | 246 tokens, "I haven't been shown any file" | `trim=cut1`, 16,361 tokens, read `MAGPIE-42` from its first line |
-| twelve turns of 40,000 characters | answer unrelated to the turn asked about | `trim=compact20`, the goal, the newest turn and a checkpoint of the work between them |
-| a 60,000-character message | read whole | read whole, no trim |
+| one 250,000-character message | 330 tokens, answered "Unannounced." | `400 context_length_exceeded`, nothing sent |
+| a 300,000-character tool result | 246 tokens, "I haven't been shown any file" | `400 context_length_exceeded`, the tool result untouched |
+| twelve turns of 40,000 characters | answer unrelated to the turn asked about | `400 context_length_exceeded`, the client compacts and retries |
+| 176,400 bytes (the budget) | read whole | read whole, byte for byte the same |
+| 176,401 bytes | read whole or cut | `400 context_length_exceeded` |
 
-And measured twice against the live endpoint, because the point of a checkpoint is that a fact
-survives it. In the unit test the model is asked for the turns that were compacted, the goal and
-the recent turns are never in that request, a second identical turn reuses the checkpoint instead
-of paying for it again, and a request made on a paid model is still compacted by the free one. End to end, through this gateway with the app's own key: a
-conversation of 19 messages and 319,020 bytes - a task, eight turns of work and a question - was
-compacted to 12 messages in a checkpoint and forwarded as 82,255 bytes, and the model answered
-`HERON-77`, a code that appeared only in the fourth turn. That turn would previously have been
-dropped without a trace. The first answer took 23.6 seconds (about 20 of them the summary); the
-same conversation asked again took 4.2 seconds, because the checkpoint was already cached.
+The unit tests cover the byte boundary exactly (176,400 accepted, 176,401 refused), the Polish case
+that makes the difference between characters and bytes visible, the usage row a refusal writes, the
+streaming caller that still gets a JSON error, and the oversized tool result that is refused rather
+than shortened.
 
 ### What a paid request costs: an equation on the catalog's price
 
@@ -491,18 +489,20 @@ picker, and the form then says the catalog is unavailable.
 
 The price shown is `theosPerRequest`, which is what DeepAI charges per call.
 
-### The declared context window is passed through, and what is actually served
+### The advertised window is the measured one, not the catalog's claim
 
-The advertised window is passed through unchanged - 1,048,576 for a model that declares it -
-because the numbers on both sides of that argument have not survived re-measuring. A revision
-here once clamped it to 63,000 after a single giant message of repeated filler collapsed at that
-size; a later session reported 841,502 tokens served whole through this gateway and 1,033,848
-from the desktop app's provider. Neither is reproducible today with fresh content.
+`/v1/models` publishes `context_window` as the measured figure - 40,000 tokens of ordinary prose,
+the same window in the unit every catalog speaks - and DeepAI's own `contextWindow` beside it as
+`context_window_claimed`. It used to publish the claim in the field clients read, because the app
+does; but a client that trusts it compacts at 90% of 320,000 tokens, roughly 1.2 MB of body, six
+times what the endpoint will read. The claim is still there for anyone who wants to see what
+DeepAI says, and the measurement is the one a harness should act on.
 
-What is reproducible is in **"The context window: 320,000 is what the catalog says, not what is
-served"** above: above roughly 196,000 bytes of prompt the endpoint answers from an empty
-conversation. That is a property of this wire, so the gateway compacts or shortens an oversized
-prompt before sending it rather than clamping a declared number.
+What the endpoint does with an oversized prompt is in **"The context window: 320,000 is what the
+catalog says, not what is served"** above: above roughly 196,000 bytes it answers from whatever it
+kept, often from an empty conversation, with a normal 200. The gateway does not rewrite the
+conversation to fit; it refuses anything over 176,400 bytes with `context_length_exceeded`, and the
+caller compacts and retries.
 
 
 ### Log in / log out
@@ -786,7 +786,10 @@ hardcode them:
   "reasoning_levels": ["none", "low", "medium", "high"],
   "input_modalities": ["text", "image"],
   "output_modalities": ["text"],
-  "context_window": 1048576,
+  "context_window": 40000,
+  "context_window_claimed": 1048576,
+  "prompt_limit_bytes": 196000,
+  "prompt_budget_bytes": 176400,
   "max_output_tokens": 131072,
   "api": "openai-completions",
   "credits_per_second": { "none": "0", "low": "0", "medium": "0", "high": "0" },

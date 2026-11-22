@@ -15,13 +15,14 @@
  * previous list, logs itself, and is retried on the next tick - it never replaces a working
  * catalog with an empty one, and never invents one. See `CatalogUnavailable`.
  *
- * The window the catalog declares is passed through unchanged, because nothing here can prove a
- * smaller one is the wire's: sizes reported by earlier live sessions (841,502 tokens here,
- * 1,033,848 from the desktop app's provider) are not reproducible with fresh content today, and
- * neither is the "63,000 limit" a synthetic probe once produced. What *is* reproducible is
- * recorded in the README: above roughly 190,000 characters of prompt the endpoint answers from
- * an empty conversation, which is a fact about this wire and not about the declared window - so a
- * prompt is shortened before it is sent (`fitPrompt` in `api/v1.js`), and no number is clamped.
+ * The catalog's `contextWindow` is kept exactly as DeepAI sends it, and it is not the number a
+ * client is told to compact against: `/v1/models` publishes the measured window as
+ * `context_window` and this claim beside it as `context_window_claimed`. Sizes reported by earlier
+ * live sessions (841,502 tokens here, 1,033,848 from the desktop app's provider) are not
+ * reproducible with fresh content today, and neither is the "63,000 limit" a synthetic probe once
+ * produced. What *is* reproducible is recorded in the README: above roughly 196,000 bytes of prompt
+ * the endpoint answers from whatever it kept, often from an empty conversation - a fact about this
+ * wire, not about the declared window.
  *
  * @module deepai-gateway/deepai/catalog
  */
