@@ -23,7 +23,7 @@ import {
   rateLabel,
 } from '../deepai/catalog.js';
 import { streamChatCompletion, streamResponsesCompletion } from '../deepai/client.js';
-import { PROMPT_BUDGET_BYTES, PROMPT_LIMIT_BYTES, SERVED_CONTEXT_TOKENS } from '../deepai/window.js';
+import { CHARS_PER_TOKEN, CONTEXT_WINDOW_TOKENS, PROMPT_BUDGET_CHARS } from '../deepai/window.js';
 import { creditsPerMinute, creditsPerThousand } from '../deepai/pricing.js';
 import { UpstreamError } from '../deepai/wire.js';
 import { acceptsImages, countImages, withoutImages } from '../deepai/images.js';
@@ -46,14 +46,16 @@ import {
  * How big a prompt is, in the units that answer different questions.
  *
  * `count` is how many messages the caller sent, `chars` how much text they carry, `bytes` that
- * text in UTF-8 - the unit the wall was measured in, where an "a" is one byte and an "ą" is two.
+ * text in UTF-8. `chars` is what the window is measured in, because it is the unit the token meter
+ * in `estimateUsage` reads: `chars / CHARS_PER_TOKEN` is the same `prompt_tokens` this gateway
+ * reports when DeepAI sends no usage.
+ *
  * `imageBytes` is the payload of any image parts, counted apart: DeepAI takes an image on its own
- * input path, the measured wall is about the text it reads as prompt, and a screenshot-sized data
+ * input path, the window is about the text a model reads as prompt, and a screenshot-sized data
  * URL must not make a three-line conversation look like an oversized one.
  *
- * `bytes` is what decides the budget in `overPromptBudget`, and it is also written down for both
- * what arrived and what is forwarded - which is the only way to answer "did this gateway cut my
- * conversation?" from the log instead of from memory.
+ * Both `bytes` and `chars` are written down for what arrived and what is forwarded, which is the
+ * only way to answer "did this gateway cut my conversation?" from the log instead of from memory.
  *
  * @param {unknown} messages - OpenAI-shaped messages.
  * @returns {{count: number, chars: number, bytes: number, imageBytes: number}}
@@ -86,19 +88,22 @@ function promptShape(messages) {
   return { count: Array.isArray(messages) ? messages.length : 0, chars, bytes, imageBytes };
 }
 /**
- * Whether this conversation is larger than the endpoint will read.
+ * Whether this conversation is past the window the endpoint declares.
  *
- * The number is bytes, not tokens and not characters, because that is what was measured: on the
- * live endpoint 195,809 bytes arrived whole and 196,811 did not, whatever alphabet they were made
- * of. The budget sits at 90% of that wall, so a client that compacts at 90% of the advertised
- * window stays under it - and so the JSON framing around the messages, which is not counted here,
- * has room of its own. See `deepai/window.js` for the measurements.
+ * The window is DeepAI's own 320,000 tokens, counted with the same four characters per token this
+ * gateway uses when it has to estimate `prompt_tokens` - so a client cannot be told one number by
+ * `/v1/models` and refused at another. Images are not counted: they are not prompt text.
  *
- * @param {{bytes: number}} shape - `promptShape` of the messages that would be sent.
+ * Nothing is shortened on the way: a prompt inside the window is forwarded as it arrived, and one
+ * outside it is refused with `context_length_exceeded` so the caller compacts and retries. The
+ * gateway does not compact on the caller's behalf, and it does not invent a smaller window than
+ * the endpoint publishes - see `deepai/window.js` for why the body-size figures are not a policy.
+ *
+ * @param {{chars: number}} shape - `promptShape` of the messages that would be sent.
  * @returns {boolean}
  */
 function overPromptBudget(shape) {
-  return shape.bytes > PROMPT_BUDGET_BYTES;
+  return shape.chars > PROMPT_BUDGET_CHARS;
 }
 
 /**
@@ -167,8 +172,6 @@ function transcriptShape(messages) {
 /** Model used when a request omits one. */
 const FALLBACK_MODEL = 'glm-5.3-flash';
 
-/** Characters per token for the fixed-density heuristic (matches DSH token-meter). */
-const CHARS_PER_TOKEN = 4;
 /** Per-message structural overhead for role framing and JSON framing. */
 const MESSAGE_OVERHEAD = 10;
 
@@ -281,26 +284,19 @@ export function v1Router(db, options = {}) {
           input_modalities: [...model.input],
           output_modalities: ['text'],
           /*
-           * The window a client should compact against, and the claim it replaces.
+           * The window a client should compact against: DeepAI's own.
            *
-           * `context_window` is the measured one: prompt tokens of ordinary prose that arrive
-           * whole - 195,809 bytes read whole, 196,811 discarded, whatever alphabet they were made
-           * of, so the wall is on bytes and the byte figures are here too. It is the number a
-           * harness must use for its own compaction, because it is the number that keeps the
-           * conversation inside what DeepAI will actually read. This gateway does not compact on
-           * the caller's behalf: a conversation over `prompt_budget_bytes` is refused with
-           * `context_length_exceeded`, and the client compacts and retries.
+           * It is the entry the desktop app reads out of the same catalog and uses unchanged, so a
+           * harness that applies the app's rule - compact at `contextWindow - reserveTokens` - is
+           * in the same position here as it would be in the app. An earlier revision published a
+           * measured 40,000 instead, which was a measurement of request bodies rather than of this
+           * window; it is documented in the README and not published here.
            *
-           * `context_window_claimed` is DeepAI's own figure, unchanged, because it is what the
-           * catalog says and what another reader may want to see - but 320,000 tokens of English
-           * prose is about 1.3 MB of request body, six times what the endpoint will read, so a
-           * client that compacts at 90% of *this* number compacts too late and loses the start of
-           * its conversation without being told.
+           * The gateway does not compact on the caller's behalf, and it refuses only past this
+           * number itself: over it the answer is `context_length_exceeded` and the client decides
+           * what to do.
            */
-          context_window: SERVED_CONTEXT_TOKENS,
-          context_window_claimed: model.contextWindow,
-          prompt_limit_bytes: PROMPT_LIMIT_BYTES,
-          prompt_budget_bytes: PROMPT_BUDGET_BYTES,
+          context_window: CONTEXT_WINDOW_TOKENS,
           max_output_tokens: model.maxTokens,
           api: model.api,
           /*
@@ -468,43 +464,38 @@ async function handleChatCompletion(db, req, res, options = {}) {
   /*
    * The same facts on the wire, for a caller that never reads a log.
    *
-   * A client cannot find out from DeepAI that its prompt was too large - the answer is a normal
-   * 200, answered from whatever the endpoint kept, often nothing at all. Here it can: the numbers
-   * this gateway measured and enforces ride on every answer, including the refusal. `sent` is what
-   * would leave this process, `limit` is the measured wall, `budget` is the 90% of it that is
-   * accepted.
+   * `sent` is what leaves this process, `received` what arrived, `window` is the token window the
+   * model declares and `budget` is that window in characters - the unit a caller can compare its
+   * own gauge against. A client cannot learn any of this from DeepAI, whose answer to a prompt past
+   * its window is a normal 200.
    *
-   * Set before the budget check so the refusal carries it too: a client that is over the line
-   * needs those numbers more than a client that is not.
+   * Set before the check, so a refusal carries the numbers too: a client over the line needs them
+   * more than one that is not.
    */
   res.setHeader('x-gateway-prompt', [
     `sent=${forwarded.bytes}`,
     `received=${arrived.bytes}`,
-    `budget=${PROMPT_BUDGET_BYTES}`,
-    `limit=${PROMPT_LIMIT_BYTES}`,
-    `served-tokens=${SERVED_CONTEXT_TOKENS}`,
+    `window=${CONTEXT_WINDOW_TOKENS}`,
+    `budget=${PROMPT_BUDGET_CHARS}`,
   ].join('; '));
 
   /*
-   * Above the budget the conversation is refused, not rewritten.
+   * Past the window the conversation is refused, not rewritten.
    *
-   * DeepAI does not refuse an oversized prompt: it answers it from whatever it kept - the newest
-   * messages, or the system prompt alone - with a normal 200, and nobody downstream can tell. The
-   * gateway used to make up for that by cutting turns out of the middle or summarizing them, which
-   * is work a caller's own harness already does, and which it does with the whole conversation in
-   * front of it rather than a proxy's copy. This endpoint is meant to be pointed at by other coding
-   * agents; their compaction is their business, and this is the number they have to respect.
+   * The gateway used to make up for DeepAI's long-prompt behaviour by cutting turns out of the
+   * middle or summarizing them. That is work a caller's own harness already does, and it does it
+   * with the whole conversation in front of it rather than a proxy's copy. This endpoint is meant
+   * to be pointed at by other coding agents: their compaction is their business, and this is the
+   * window they have to respect.
    *
    * The refusal is OpenAI's own shape - 400 with `code: "context_length_exceeded"` - because that
-   * is the error every agent harness already recognises and reacts to by compacting. DeepAI Code
-   * compacts at 90% of its window before sending; here the same 90% is where the gateway stops
-   * accepting, and the message says what to do.
+   * is the error every agent harness already recognises and reacts to by compacting.
    */
   if (overPromptBudget(forwarded)) {
-    const limit = PROMPT_BUDGET_BYTES.toLocaleString('en-US');
-    const wall = PROMPT_LIMIT_BYTES.toLocaleString('en-US');
+    const budget = PROMPT_BUDGET_CHARS.toLocaleString('en-US');
+    const window = CONTEXT_WINDOW_TOKENS.toLocaleString('en-US');
     log?.(`v1 ${upstreamModel} refused: prompt ${forwarded.count}msg/${forwarded.chars}ch/${forwarded.bytes}B `
-      + `over budget ${PROMPT_BUDGET_BYTES}B (wall ${PROMPT_LIMIT_BYTES}B) `
+      + `over the ${window}-token window (${budget}ch) `
       + `session=${sessionId.slice(0, 8)} ${transcriptShape(body.messages)}`);
     record(db, {
       keyId: req.gatewayKey.id,
@@ -529,9 +520,9 @@ async function handleChatCompletion(db, req, res, options = {}) {
     return apiError(
       res,
       400,
-      `This conversation is ${forwarded.bytes.toLocaleString('en-US')} bytes of prompt, and this endpoint reads at most `
-        + `${limit} bytes per request (the measured wall is ${wall}: past it DeepAI answers from whatever it kept, `
-        + `often from an empty conversation, with a normal 200). Compact or summarize the conversation and retry; `
+      `This conversation is ${forwarded.chars.toLocaleString('en-US')} characters of prompt, about `
+        + `${Math.round(forwarded.chars / CHARS_PER_TOKEN).toLocaleString('en-US')} tokens, and this model's window is `
+        + `${window} tokens (${budget} characters). Compact or summarize the conversation and retry; `
         + `the x-gateway-prompt header on this refusal carries the numbers.`,
       'context_length_exceeded',
     );

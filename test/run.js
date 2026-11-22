@@ -1380,20 +1380,16 @@ await checkAsync('/v1/models carries modalities, reasoning levels and names', as
     assert.deepEqual(free.input_modalities, ['text', 'image']);
     assert.deepEqual(free.output_modalities, ['text']);
     assert.deepEqual(free.reasoning_levels, ['none', 'low', 'medium', 'high']);
-    assert.ok(free.context_window > 0);
     /*
-     * The window a client must compact against is the *measured* one, not DeepAI's claim:
-     * 195,809 bytes of prompt arrived whole and 196,811 did not, which is about 43,500 tokens of
-     * ordinary prose and 100,000 tokens of incompressible filler. A harness that compacts at 90%
-     * of this number stays inside what the endpoint will actually read.
+     * The window published is DeepAI's own 320,000, unchanged: it is what the desktop app reads out
+     * of the same catalog and compacts against (`contextWindow - reserveTokens`), so a harness that
+     * applies the app's rule is in the same position here as it would be in the app. The number is
+     * passed through rather than replaced, and the metadata carries no second, smaller window for a
+     * client to trip over.
      */
-    assert.equal(free.context_window, 40_000,
-      'the advertised window is the measured one, in the unit every catalog speaks');
-    assert.equal(free.context_window_claimed, 1_048_576,
-      'and DeepAI\'s own claim is published beside it, labelled as a claim');
-    assert.equal(free.prompt_limit_bytes, 196_000, 'the wall in the unit it was measured in');
-    assert.equal(free.prompt_budget_bytes, 176_400,
-      'and the 90% of it this gateway accepts, the same rule the app compacts by');
+    assert.equal(free.context_window, 320_000, 'the window is the catalog\'s own, not a smaller one');
+    assert.equal(free.context_window_claimed, undefined, 'and there is no second number beside it');
+    assert.equal(free.prompt_limit_bytes, undefined, 'no separately enforced byte wall is advertised');
     assert.ok(free.max_output_tokens > 0);
     assert.equal(free.credits_per_request, '0');
     assert.equal(free.rate_label, 'Unmetered');
@@ -4300,25 +4296,24 @@ await checkAsync('an image the backend refuses is retried as text, not reported 
   }
 });
 
-await checkAsync('a prompt past the wall is refused here, so the client compacts', async () => {
+await checkAsync('a prompt past the 320,000-token window is refused, and nothing smaller is', async () => {
   /*
-   * Measured on the live endpoint with incompressible content: 150,189 characters of prompt are
-   * read whole (markers at 5%, 50% and 95% came back), 200,000 characters come back as a
-   * completion with no content, and 300,000 as 246 prompt tokens with the model saying it was
-   * never shown a file. Past about 196,000 bytes the endpoint does not refuse: it answers from
-   * whatever it kept, usually the newest messages, with a normal 200 - which is what "the agent
-   * forgets" looks like from the inside.
+   * The window is DeepAI's own: `/deepai_code/models` declares `contextWindow: 320000`, the desktop
+   * app spreads it into its model config unchanged and compacts at `contextWindow - reserveTokens`.
+   * This gateway publishes the same number and enforces exactly it - counted at four characters per
+   * token, the meter that fills `prompt_tokens` when DeepAI sends no usage, so the number a client
+   * reads from `/v1/models` and the number it is refused at cannot disagree.
    *
-   * This gateway does not rewrite the conversation to fit. It is pointed at by other coding
-   * agents, and their compaction is done where the whole conversation lives - the DeepAI Code app
-   * compacts at 90% of its window before sending, and a harness does the same. What the endpoint
-   * owes them is the honest number and an error they already know how to act on: OpenAI's
-   * `context_length_exceeded`, at 90% of the measured wall.
+   * It does not compact or shorten on the way. A caller sends its whole transcript every turn and
+   * its own harness owns the compaction; a proxy that rewrote the conversation would be doing that
+   * work twice, on a copy, at every turn. So a prompt inside the window is forwarded as it arrived,
+   * and one outside it is refused with OpenAI's `context_length_exceeded`, which every agent
+   * harness already reacts to by compacting.
    */
   const { openDatabase } = await import('../src/db.js');
   const { saveAccount } = await import('../src/store.js');
   const { generateKey } = await import('../src/keys.js');
-  const { createApp: createAppForTrim } = await import('../server.js');
+  const { createApp: createAppForPrompt } = await import('../server.js');
 
   const db2 = openDatabase(':memory:');
   saveAccount(db2, { apiKey: 'upstream', username: 'prompt-user', isPro: false });
@@ -4339,7 +4334,7 @@ await checkAsync('a prompt past the wall is refused here, so the client compacts
       { status: 200, headers: { 'content-type': 'text/event-stream' } });
   };
 
-  const app2 = createAppForTrim(db2, { log: (line) => lines.push(line), logRequests: true });
+  const app2 = createAppForPrompt(db2, { log: (line) => lines.push(line), logRequests: true });
   const server2 = app2.listen(0, '127.0.0.1');
   await new Promise((resolve) => server2.once('listening', resolve));
   const base2 = `http://127.0.0.1:${server2.address().port}`;
@@ -4354,41 +4349,50 @@ await checkAsync('a prompt past the wall is refused here, so the client compacts
   const bytes = (text) => Buffer.byteLength(text, 'utf8');
 
   try {
-    // Under the budget: untouched, character for character - and no note is ever added.
-    const small = await send([{ role: 'user', content: 'x'.repeat(140_000) }]);
+    // The window, exactly: 320,000 tokens at four characters per token.
+    const BUDGET = 1_280_000;
+
+    // Inside it: untouched, character for character - and no note is ever added.
+    const small = await send([{ role: 'user', content: 'x'.repeat(300_000) }]);
     assert.equal(small.status, 200);
-    assert.equal(chars(sent[0]), 140_000, 'a prompt inside the budget is not touched');
+    assert.equal(chars(sent[0]), 300_000, 'a prompt inside the window is not touched');
     assert.ok(!String(small.headers.get('x-gateway-prompt')).includes('trim='),
       'and the gateway says nothing was done to it');
 
     /*
-     * The budget is in bytes, not characters, because the wall is. A Polish paragraph carries two
-     * bytes per letter, so 80,000 characters is 160,000 bytes and fits, while 100,000 characters
-     * is 200,000 bytes and does not - and the same 80,000 characters must arrive untouched.
+     * A conversation of the size the old byte budget refused - about 320,000 bytes - now goes
+     * through, because the window is 320,000 tokens and this is nowhere near it. That is the
+     * regression this test exists for: a number measured on request bodies must not refuse a
+     * conversation the model's own window admits.
      */
-    const polish = await send([{ role: 'user', content: 'ą'.repeat(80_000) }]);
-    assert.equal(polish.status, 200, 'two-byte letters under the byte budget are served');
-    assert.equal(sent.at(-1).messages[0].content.length, 80_000, 'and arrive whole');
-
-    const tooMuchPolish = await send([{ role: 'user', content: 'ą'.repeat(100_000) }]);
-    assert.equal(tooMuchPolish.status, 400, 'the same character count in two-byte letters is refused');
+    const threeHundredKb = await send([{ role: 'user', content: 'y'.repeat(320_000) }]);
+    assert.equal(threeHundredKb.status, 200, '320,000 characters is far inside a 1,280,000-character window');
+    assert.equal(chars(sent.at(-1)), 320_000, 'and arrives whole');
 
     /*
-     * The line itself, to the byte. 90% of the measured 196,000 is 176,400 bytes: that arrives,
-     * one byte more does not, and the refusal is the error every harness already handles.
+     * The budget is in characters, not bytes, because that is the unit the token meter counts in.
+     * A Polish paragraph carries two bytes per letter, so 600,000 characters is 1.2 MB of body and
+     * still inside the window; the same text was refused by the byte budget this replaces.
      */
-    const atBudget = await send([{ role: 'user', content: 'x'.repeat(176_400) }]);
-    assert.equal(atBudget.status, 200, 'a prompt exactly at the budget is accepted');
-    assert.equal(chars(sent.at(-1)), 176_400, 'and is not shortened by even a byte');
+    const polish = await send([{ role: 'user', content: 'ą'.repeat(600_000) }]);
+    assert.equal(polish.status, 200, 'two-byte letters are counted as characters, as tokens are');
+    assert.equal(sent.at(-1).messages[0].content.length, 600_000, 'and arrive whole');
 
-    const overBudget = await send([{ role: 'user', content: 'x'.repeat(176_401) }]);
-    assert.equal(overBudget.status, 400, 'one byte over the budget is refused');
+    // The line itself, to the character: 1,280,000 arrives, one more does not.
+    const atBudget = await send([{ role: 'user', content: 'x'.repeat(BUDGET) }]);
+    assert.equal(atBudget.status, 200, 'a prompt exactly at the window is accepted');
+    assert.equal(chars(sent.at(-1)), BUDGET, 'and is not shortened by even a character');
+
+    const overBudget = await send([{ role: 'user', content: 'x'.repeat(BUDGET + 1) }]);
+    assert.equal(overBudget.status, 400, 'one character over the window is refused');
     const refusal = await overBudget.json();
     assert.equal(refusal.error?.code, 'context_length_exceeded',
       'under the code an OpenAI-compatible harness already recognises');
     assert.equal(refusal.error?.type, 'invalid_request_error');
-    assert.match(refusal.error?.message ?? '', /176,400 bytes per request/,
-      'the message names the number it will accept');
+    assert.match(refusal.error?.message ?? '', /1,280,001 characters of prompt/,
+      'the message names what it was sent');
+    assert.match(refusal.error?.message ?? '', /window is 320,000 tokens \(1,280,000 characters\)/,
+      'and the window it is measured against');
     assert.match(refusal.error?.message ?? '', /Compact or summarize the conversation and retry/,
       'and says what to do about it');
     assert.equal(promptLines().at(-1).includes('refused'), true, `the log says it was refused: ${promptLines().at(-1)}`);
@@ -4400,16 +4404,18 @@ await checkAsync('a prompt past the wall is refused here, so the client compacts
     const before = sent.length;
     const long = [{ role: 'system', content: 'You are a coding agent.' }];
     for (let turn = 0; turn < 8; turn += 1) {
-      long.push({ role: 'user', content: `turn ${turn} `.padEnd(20_000, 'w') });
-      long.push({ role: 'assistant', content: `answer ${turn} `.padEnd(20_000, 'v') });
+      long.push({ role: 'user', content: `turn ${turn} `.padEnd(80_000, 'w') });
+      long.push({ role: 'assistant', content: `answer ${turn} `.padEnd(80_000, 'v') });
     }
     const refused = await send(long);
     assert.equal(refused.status, 400);
     assert.equal(sent.length, before, 'an oversized conversation is not sent upstream at all');
-    const longBytes = long.reduce((total, message) => total + Buffer.byteLength(message.content, 'utf8'), 0);
+    const longChars = long.reduce((total, message) => total + message.content.length, 0);
+    const longBytes = long.reduce((total, message) => total + bytes(message.content), 0);
     assert.equal(String(refused.headers.get('x-gateway-prompt')),
-      `sent=${longBytes}; received=${longBytes}; budget=176400; limit=196000; served-tokens=40000`,
+      `sent=${longBytes}; received=${longBytes}; window=320000; budget=1280000`,
       `the refusal carries the numbers it was measured with: ${refused.headers.get('x-gateway-prompt')}`);
+    assert.equal(longChars, 1_280_023, 'the conversation is the window and a few characters over');
     const rows = db2.prepare('SELECT status, ok, error_code FROM usage ORDER BY rowid DESC LIMIT 1').get();
     assert.equal(rows.status, 400, 'the refusal is recorded like any other request');
     assert.equal(rows.ok, 0);
@@ -4417,37 +4423,44 @@ await checkAsync('a prompt past the wall is refused here, so the client compacts
 
     // A streaming caller gets the same refusal, as JSON: the status is decided before the stream,
     // and an SDK reading `stream: true` still finds an error object it can parse.
-    const streaming = await send([{ role: 'user', content: 'x'.repeat(200_000) }], { stream: true });
+    const streaming = await send([{ role: 'user', content: 'x'.repeat(BUDGET + 10) }], { stream: true });
     assert.equal(streaming.status, 400);
     assert.equal((await streaming.json()).error?.code, 'context_length_exceeded');
 
-    /*
-     * An oversized tool result is refused, not cut. The harness that produced it knows what it
-     * read and can truncate or summarize it; a proxy guessing which half to keep cannot.
-     */
+    // A large tool result inside the window is forwarded, not cut: the harness that produced it
+    // knows what it read, and this gateway is not the place to decide which half to keep.
     const toolMessages = [
       { role: 'user', content: 'read big.txt' },
       { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_file', arguments: '{"path":"big.txt"}' } }] },
-      { role: 'tool', tool_call_id: 'c1', content: `START-OF-FILE ${'z'.repeat(200_000)} END-OF-FILE` },
+      { role: 'tool', tool_call_id: 'c1', content: `START-OF-FILE ${'z'.repeat(600_000)} END-OF-FILE` },
       { role: 'user', content: 'what is at the top?' },
     ];
-    const oversizedTool = await send(toolMessages);
-    assert.equal(oversizedTool.status, 400, 'an oversized tool result is refused');
+    const bigTool = await send(toolMessages);
+    assert.equal(bigTool.status, 200, 'a 600 KB tool result is inside the window and is forwarded');
+    assert.equal(String(sent.at(-1).messages[2].content).length, 600_026, 'whole, with both markers');
+
+    // The same result past the window is refused rather than shortened.
+    const oversizedTool = await send([
+      toolMessages[0],
+      toolMessages[1],
+      { role: 'tool', tool_call_id: 'c1', content: 'z'.repeat(BUDGET + 1) },
+      toolMessages[3],
+    ]);
+    assert.equal(oversizedTool.status, 400, 'past the window a tool result is refused, not cut');
     assert.equal(sent.some((payload) => payload.messages.some((message) => message.role === 'tool'
       && String(message.content).includes('characters omitted here'))), false,
     'and never replaced by a shortened version');
 
     /*
-     * An image is not prompt text. It travels on DeepAI's own input path, and the wall was
-     * measured on the text a model reads, so a screenshot-sized data URL must not be refused as
-     * an oversized conversation.
+     * An image is not prompt text. It travels on DeepAI's own input path, so a screenshot-sized
+     * data URL must not count against the window and refuse a three-line conversation.
      */
-    const screenshot = `data:image/png;base64,${'A'.repeat(300_000)}`;
+    const screenshot = `data:image/png;base64,${'A'.repeat(1_500_000)}`;
     const withImage = await send([{ role: 'user', content: [
       { type: 'text', text: 'what is on this screenshot?' },
       { type: 'image_url', image_url: { url: screenshot } },
     ] }]);
-    assert.equal(withImage.status, 200, 'a large image does not count against the prompt budget');
+    assert.equal(withImage.status, 200, 'a large image does not count against the window');
     assert.equal(sent.at(-1).messages[0].content[1].image_url.url.length, screenshot.length,
       'and the image is forwarded whole');
 

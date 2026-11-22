@@ -162,8 +162,6 @@
   "metric.cacheReadsFoot": "Input tokens served from cache this month",
   "metric.catalog": "Catalog",
   "metric.context": "Context",
-  "metric.contextServed": "served",
-  "metric.contextServedHint": "DeepAI reads about this much of a prompt, whatever the column says",
   "metric.equivalent": "Equivalent",
   "metric.expires": "Expires",
   "metric.failedCount": "{formatted} failed",

@@ -18,7 +18,6 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { displayName } from '../deepai/catalog.js';
-import { SERVED_CONTEXT_TOKENS } from '../deepai/window.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LOCALES = join(HERE, '..', '..', 'public', 'locales');
@@ -147,9 +146,7 @@ export function modelsView({ models, usage = null, t }) {
         </div>
       </td>
       <td><span class="badge ${model.premier ? 'badge--violet' : 'badge--green'}">${t(model.premier ? 'common.premium' : 'common.free')}</span></td>
-      <td class="num tiny muted">${escapeHtml(tokens(model.contextWindow))}
-        <div class="tiny muted" title="${t('metric.contextServedHint')}">${t('metric.contextServed')} ${escapeHtml(tokens(SERVED_CONTEXT_TOKENS))}</div>
-      </td>
+      <td class="num tiny muted">${escapeHtml(tokens(model.contextWindow))}</td>
       <td class="num tiny muted">${escapeHtml(tokens(model.maxTokens))}</td>
       <td class="tiny muted">${model.reasoning ? 'none, low, medium, high' : '-'}</td>
       <td class="tiny muted">${model.input.includes('image') ? 'text, image' : 'text'}</td>

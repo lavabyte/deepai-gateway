@@ -162,8 +162,6 @@
   "metric.cacheReadsFoot": "Tokens de entrada servidos desde la caché este mes",
   "metric.catalog": "Catálogo",
   "metric.context": "Contexto",
-  "metric.contextServed": "servido",
-  "metric.contextServedHint": "Esto es lo que DeepAI lee realmente de un prompt, diga lo que diga la columna",
   "metric.equivalent": "Equivalente",
   "metric.expires": "Caduca",
   "metric.failedCount": {

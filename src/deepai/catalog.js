@@ -15,14 +15,13 @@
  * previous list, logs itself, and is retried on the next tick - it never replaces a working
  * catalog with an empty one, and never invents one. See `CatalogUnavailable`.
  *
- * The catalog's `contextWindow` is kept exactly as DeepAI sends it, and it is not the number a
- * client is told to compact against: `/v1/models` publishes the measured window as
- * `context_window` and this claim beside it as `context_window_claimed`. Sizes reported by earlier
- * live sessions (841,502 tokens here, 1,033,848 from the desktop app's provider) are not
- * reproducible with fresh content today, and neither is the "63,000 limit" a synthetic probe once
- * produced. What *is* reproducible is recorded in the README: above roughly 196,000 bytes of prompt
- * the endpoint answers from whatever it kept, often from an empty conversation - a fact about this
- * wire, not about the declared window.
+ * The catalog's `contextWindow` is passed through exactly as DeepAI sends it, and `/v1/models`
+ * publishes it unchanged as `context_window`: it is the number the desktop app reads out of this
+ * same catalog and compacts against. Sizes reported by earlier live sessions (841,502 tokens here,
+ * 1,033,848 from the desktop app's provider) are not reproducible with fresh content today, and
+ * neither is the "63,000 limit" a synthetic probe once produced. What is reproducible - an oversized
+ * body sometimes coming back answered from a fraction of itself - is recorded in the README as an
+ * observation about this wire; it depends on the content and is not used to override the window.
  *
  * @module deepai-gateway/deepai/catalog
  */

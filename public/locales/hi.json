@@ -156,8 +156,6 @@
   "metric.cacheReadsFoot": "इस माह कैश से दिए गए इनपुट टोकन",
   "metric.catalog": "सूची",
   "metric.context": "संदर्भ",
-  "metric.contextServed": "सेवित",
-  "metric.contextServedHint": "कॉलम में जो भी लिखा हो, DeepAI वास्तव में इतना ही प्रॉम्प्ट पढ़ता है",
   "metric.equivalent": "समतुल्य",
   "metric.expires": "समाप्ति",
   "metric.failedCount": "{formatted} विफल",

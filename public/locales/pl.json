@@ -166,8 +166,6 @@
   "metric.cacheReadsFoot": "Tokeny wejściowe obsłużone z cache w tym miesiącu",
   "metric.catalog": "Katalog",
   "metric.context": "Kontekst",
-  "metric.contextServed": "obsługiwane",
-  "metric.contextServedHint": "Tyle promptu DeepAI naprawdę czyta, niezależnie od liczby w kolumnie",
   "metric.equivalent": "Odpowiednik",
   "metric.expires": "Wygasa",
   "metric.failedCount": {
