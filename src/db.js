@@ -16,7 +16,7 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 /** Current schema version. Bump when a migration below is added. */
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 /**
  * Open (creating if needed) the database at `file` and bring it to the current
@@ -79,6 +79,7 @@ export function openDatabase(file) {
   if (current < 5) migrateToV5(db);
   if (current < 6) migrateToV6(db);
   if (current < 7) migrateToV7(db);
+  if (current < 8) migrateToV8(db);
 
   // Only ever move forwards.
   if (current < SCHEMA_VERSION) {
@@ -350,6 +351,34 @@ function migrateToV6(db) {
  */
 function migrateToV7(db) {
   addColumn(db, 'accounts', 'metering', 'TEXT');
+}
+
+/**
+ * v8 - remember which conversation a session id belongs to.
+ *
+ * DeepAI serves a conversation from its prompt cache once the prefix is cached, and addresses
+ * that cache by the session id. The id used to be derived from how the conversation begins, so a
+ * harness compaction - or any rewrite of the system prompt - produced a new id, a cold cache, and
+ * a multi-megabyte prompt that the endpoint truncated from the front.
+ *
+ * `conversation_sessions` lets the gateway recognise the same conversation from its recent
+ * messages and reuse its id. `tail` holds one SHA-256 digest per message, an opening fingerprint
+ * and whether the last request was shortened - a cache key, never the message text - and `owner`
+ * keeps one account's conversations from matching another's. See `src/deepai/sessions.js` for
+ * what is stored and why.
+ */
+function migrateToV8(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS conversation_sessions (
+      session_id TEXT PRIMARY KEY,   -- sent as session_id / x-session-affinity
+      owner      TEXT NOT NULL,      -- account username: another account never matches
+      key_id     TEXT,               -- the gateway key, for the log
+      tail       TEXT NOT NULL,      -- JSON {prefix, tail, compacted}: digest cache key, newest last
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS conversation_sessions_owner
+      ON conversation_sessions (owner, updated_at);
+  `);
 }
 
 /** Short stable digest used to derive a username when DeepAI gives none. */

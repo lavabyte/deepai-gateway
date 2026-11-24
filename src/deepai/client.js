@@ -38,10 +38,14 @@ function reasoningOf(delta) {
 }
 
 /**
- * One streamed chat completion.
+ * The body one chat completion posts to `/deepai_code/chat/completions`, exactly as sent.
+ *
+ * Exported so the request handler can measure the bytes this request will put on the wire
+ * before it sends anything: the response to an oversized body is a normal 200 from whatever
+ * part of it DeepAI kept, which cannot be detected afterwards. Building the body once, here,
+ * is what keeps the measurement and the transmission from being two different objects.
  *
  * @param {object} params
- * @param {string} params.apiKey
  * @param {string} params.model
  * @param {Array<object>} params.messages - OpenAI messages.
  * @param {Array<object>} [params.tools]
@@ -50,11 +54,9 @@ function reasoningOf(delta) {
  * @param {number} [params.topP]
  * @param {string[]} [params.stop]
  * @param {string} [params.reasoningEffort]
- * @param {string} [params.sessionId]
- * @param {AbortSignal} [params.signal]
- * @yields {{type: string}}
+ * @returns {object} the JSON value to serialize; the body is complete with no further editing.
  */
-export async function* streamChatCompletion(params) {
+export function completionBody(params) {
   const body = {
     model: params.model,
     messages: params.messages,
@@ -96,6 +98,17 @@ export async function* streamChatCompletion(params) {
     body.reasoning_effort = params.reasoningEffort;
     body.thinking = { type: params.reasoningEffort === 'none' ? 'disabled' : 'enabled' };
   }
+  return body;
+}
+
+/**
+ * One streamed chat completion.
+ *
+ * @param {object} params - see {@link completionBody}, plus `apiKey`, `sessionId` and `signal`.
+ * @yields {{type: string}}
+ */
+export async function* streamChatCompletion(params) {
+  const body = completionBody(params);
 
   /*
    * The outgoing body, when a deployment asks to see it.
@@ -202,13 +215,18 @@ export async function* streamChatCompletion(params) {
 }
 
 /**
- * One streamed Responses call. This route has no stop-sequence field.
+ * The body one Responses call posts to `/deepai_code/responses`, exactly as sent.
  *
- * @param {object} params - same shape as {@link streamChatCompletion}, where
- *   `messages` are harness-style blocks rather than OpenAI messages.
- * @yields {{type: string}}
+ * A separate builder from {@link completionBody} because the two transports reshape the same
+ * messages differently - `openAIToResponsesInput` drops what the Responses dialect cannot
+ * carry, and flattens tool wrappers - so the two bodies are not the same size and the handler
+ * has to measure the one it is about to send. This route has no stop-sequence field.
+ *
+ * @param {object} params - same shape as {@link completionBody}, where `messages` are
+ *   harness-style blocks rather than OpenAI messages.
+ * @returns {object} the JSON value to serialize; the body is complete with no further editing.
  */
-export async function* streamResponsesCompletion(params) {
+export function responsesBody(params) {
   const body = {
     model: params.model,
     input: openAIToResponsesInput(params.messages),
@@ -235,6 +253,17 @@ export async function* streamResponsesCompletion(params) {
     body.reasoning = { effort: params.reasoningEffort, summary: 'auto' };
     body.include = ['reasoning.encrypted_content'];
   }
+  return body;
+}
+
+/**
+ * One streamed Responses call. This route has no stop-sequence field.
+ *
+ * @param {object} params - see {@link responsesBody}, plus `apiKey`, `sessionId` and `signal`.
+ * @yields {{type: string}}
+ */
+export async function* streamResponsesCompletion(params) {
+  const body = responsesBody(params);
 
   if (process.env.LOG_UPSTREAM_REASONING === '1') {
     console.log('[deepai-gateway] upstream reasoning: '

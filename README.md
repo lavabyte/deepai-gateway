@@ -68,6 +68,7 @@ each one; `npm start` reads `.env`, so nothing has to be exported in your shell.
 | `DATABASE` | `./data/deepai.db` | SQLite file |
 | `TRUST_PROXY` | unset | Set `1` behind a TLS proxy: trust `X-Forwarded-*` and set `Secure` cookies |
 | `FORGET_ACCOUNT_AFTER_DAYS` | `0` | Forget accounts nobody has used for this many days - see [Retention](#retention). `0` (the default) forgets nothing |
+| `PROMPT_BUDGET_BYTES` | `176400` | Largest amount of prompt sent upstream that DeepAI has to read fresh: 90% of the measured 196 KB wall - see [the fresh part](#what-it-enforces-is-the-fresh-part) |
 | `LOG_REQUESTS` | `1` | Set `0` to silence per-request logging |
 | `PRICING_CACHE` | `./data/pricing.json` | Where the fetched price table is cached |
 
@@ -150,11 +151,12 @@ Two consequences are built in here. **The catalog is not proof of access** - it 
 And a refusal DeepAI named is said in its own terms, kept on the account so a reload still
 explains it, and never paraphrased as "the key was rejected".
 
-### The context window: 320,000, and the body size that made it look smaller
+### The context window: 320,000, and the 196 KB a prompt costs when it is read fresh
 
 Measured against the live endpoint with a conversation-shaped transcript - alternating messages of
-random words, so no tokenizer can compress them and no prompt cache can serve them - and with a
-marker at the start of the first message and one at the end of the last, asking for both back:
+random words, so no tokenizer can compress them and no prompt cache can serve them, i.e. every byte
+of the prompt had to be read - and with a marker at the start of the first message and one at the
+end of the last, asking for both back:
 
 | prompt sent | messages | first marker | last marker | reported prompt tokens |
 | --- | --- | --- | --- | --- |
@@ -193,45 +195,140 @@ the size of the request, and the wall is at about **196 KB**. The earlier table 
 162,000 characters only because random words tokenize at about 1.5 characters per token and its
 162,000 characters happened to weigh the same as 196 KB of prose.
 
-That measurement is what prompted the work here, and it is written down because it is real - but it
-is a property of a request body, not of the model's window, and this gateway does not turn it into a
-policy. Measured again on the same endpoint, the same body size answered from the whole prompt in one
-run and from a fraction of it in the next, depending on what the text was: 200 KB of contiguous
-licence text came back with 4,218 prompt tokens and a hallucinated answer, 200 KB of prose with
-25,634 and the start of the prompt only, 170 KB of prose with 45,921 and both markers. Whatever the
-endpoint does to a long prompt, it does by content, and no number this gateway could compute from a
-body size would predict it.
+That measurement is what prompted the work here, and it is written down because it is real.
+Measured again on the same endpoint, the same body size answered from the whole prompt in one run
+and from a fraction of it in the next, depending on what the text was: 200 KB of contiguous licence
+text came back with 4,218 prompt tokens and a hallucinated answer, 200 KB of prose with 25,634 and
+the start of the prompt only, 170 KB of prose with 45,921 and both markers. Whatever the endpoint
+does to a long prompt, it does by content - which is exactly why nothing can be *predicted* from the
+size of a body, and why the gateway does not try to guess what survived.
 
-So the window published is the one the endpoint declares, unchanged.
+#### The wall is on what is read fresh, not on the conversation
+
+Every probe above was a single cold request: nothing of it had been seen before, so the whole
+prompt was read and the wall showed up at about 196 KB of it. A conversation is not that. DeepAI
+serves a prompt from its prompt cache once the conversation's prefix is in it, and then only the new
+tail is read; the prefix can be megabytes.
+
+Two independent records on this machine say so. The gateway's own traffic, in `data/deepai.db`
+(`usage.input_tokens` is fresh input, `usage.cache_read_tokens` is cached):
+
+| when | model | fresh prompt tokens | cached prompt tokens |
+| --- | --- | --- | --- |
+| 2026-10-26 16:40Z | deepseek-v4.1-flash | **194** | **720,896** |
+| 2026-10-26 16:40Z | deepseek-v4.1-flash | **155** | **719,744** |
+
+`720,896` cached tokens is a request far larger than 320,000, let alone than 196 KB, and it was
+answered. Across the 96 answered requests that reported a cache hit, the average fresh part was
+8,321 tokens.
+
+The desktop app's own session store, `~/.deepai-code/userdata/deepai/pi/deepai/sessions/` -
+append-only JSONL, replayed by walking `parentId` back to the newest `compaction` record - shows the
+same thing from the client side. In one session of 1,593 model turns, 86% of turns sent a request
+body over 196 KB, the largest 1.75 MB; the endpoint answered the largest with `cacheRead` 291,328
+and `input` 424. Measured over that session, `cacheRead` climbs with the transcript to about 290,000
+tokens, then drops at a compaction - the app compacts at `contextWindow - reserveTokens`, about
+290,000 of 320,000 - and climbs again. The fresh part stays in the tens or hundreds of tokens even
+on the turns whose body is 1.7 MB.
+
+So there is one published window, and one enforced wall:
 
 | field | value | what it is |
 | --- | --- | --- |
-| `context_window` | 320,000 | DeepAI's own `contextWindow` from `/deepai_code/models` - what the desktop app compacts against |
+| `context_window` | 320,000 | DeepAI's own `contextWindow` from `/deepai_code/models`, the number the desktop app compacts against |
 
 `320000` is the number the desktop app reads out of the same catalog and spreads into its model
 config (`decodeDeepAIModels`, then `deepAIPiModels` passes the entry through unchanged), and it
 compacts at `contextWindow - reserveTokens` - which is where its observed 290,000-token compactions
-come from. Publishing anything else would make a harness that compacts by the app's own rule behave
-differently against this gateway than against the app, which is the opposite of the point of an
-OpenAI-compatible endpoint.
+come from. Since a warm conversation of that size is served, that is the honest number to publish:
+a harness applying the app's own rule compacts where the app does.
 
-**The gateway does not rewrite the conversation and does not invent a smaller window.** It used to:
-cutting the middle out of large messages, then summarizing the turns between the goal and the newest
-one, then refusing anything over a 176,400-byte budget derived from the body measurements above.
-Each was work done in the wrong place. A caller sends its whole transcript every turn, and the
-harness it runs under already owns the compaction that keeps its context inside the window; doing it
-again per request meant a summary call on every turn of a long conversation, and the byte budget
-refused conversations the model's own window admits.
+**The gateway only shortens a prompt that would lose its start.** A caller sends its whole
+transcript every turn. While the fresh part fits, nothing is touched: the endpoint's prompt cache
+does the work, and the harness does its own compaction when it decides to. When a cold prompt -
+or a new tail - is past the budget, the gateway shortens it before sending, because the
+alternative is not a refusal from DeepAI but a `200` with the front silently gone. The rewrite
+lives in `deepai/fit.js`, happens only on that request, and does only as much as the budget
+needs:
 
-A prompt past the window is refused before anything is sent upstream:
+1. one message larger than its allowance (40,000 characters, 50,000 for a tool result) keeps its
+   head and tail and gets a `[gateway: N characters omitted here ...]` note where the middle was;
+2. if that is not enough, the middle turns are summarized into a checkpoint by a free catalog
+   model, in the shape the DeepAI Code app uses for its own compactions; the goal at the head and
+   the newest ~60 KB of work stay verbatim;
+3. if the summary call fails, those turns are dropped, again with a note, so the request is served
+   rather than refused.
+
+The `trim=` header says which happened (`cut1`, `compact2`, `drop3`, or `none`), and `sent` is the
+body that actually left the gateway.
+
+#### One session per conversation, across compaction and restarts
+
+The cache is addressed by the session id this gateway sends - `session_id`,
+`x-client-request-id` and `x-session-affinity`, the same three headers the app sends. That is why
+the id has to survive everything a harness does between turns. It used to be derived from the
+conversation's opening (the system prompt and the first user message), which is stable until the
+harness compacts - the opening becomes a summary - or rewrites its system prompt, which harnesses do
+at least once a turn: the date, the working directory, the model name. At that moment the id
+changed, the endpoint had no cache for the new one, the whole multi-megabyte transcript had to be
+read fresh, and everything past about 196 KB of it was discarded from the front. That is the bug
+report: a working conversation greeted with "Hi, how can I help you today?".
+
+So the gateway remembers, per conversation and per account, where the conversation got to, and
+recognises the next turn as a continuation even when the opening is gone. A request whose tail
+shares at least three messages with a remembered conversation - with the newest shared message among
+the last eight of both sides - is that conversation, and reuses its session id. Resolution order:
+
+1. the caller's own `x-session-id`, which always wins and is forwarded verbatim;
+2. a remembered conversation this request continues;
+3. otherwise the id derived from the transcript opening, which is stable for a first turn.
+
+The row also holds a fingerprint of the request's opening - the system prompt, the tool catalog,
+and the messages before the first assistant reply. If any of those changed - a harness compaction,
+a rewritten system prompt, a new tool list - the id is still reused, but nothing is counted as
+cached: the whole prompt is fresh, and is shortened if it does not fit. That is the safe side of
+the same bug. A warm tail is only evidence of a warm prompt prefix when the prefix itself is
+unchanged.
+
+The row also records whether the last request was shortened by the gateway. If it was, the next
+turn is cold even though its tail matches: the endpoint cached the checkpoint, not the caller's
+original transcript, which is what arrives next because the gateway's shortening is invisible to
+the caller. The session id is kept, the whole prompt is measured, and it is shortened again if it
+needs to be - the caller keeps its conversation, and nothing is silently truncated.
+
+**What is stored is one SHA-256 digest per message, one opening fingerprint and one boolean, and
+nothing else** - in the `conversation_sessions` table, the last 40 messages that are not
+`system`/`developer`, because those are the ones a harness rewrites. It is a cache key, not a
+transcript: no prompt text is kept, and nothing from that table is ever sent to DeepAI or injected
+into a prompt. It only decides which `session_id` header goes on the request and which part of the
+prompt counts as fresh. Isolation is by account: a row belonging to another account never matches,
+whatever the transcript says. Rows are capped at 32 per account and dropped after seven days
+without use.
+
+#### What it enforces is the fresh part
+
+The budget is 176,400 bytes - 90% of the 196 KB wall, the same rule DeepAI Code applies to its own
+context, compacting before the limit rather than after it - and it is measured on what the endpoint
+has to read for this request: the messages after the last one the conversation's remembered tail
+covers, serialized as they are sent. On a cold conversation that is the whole serialized body, tools
+and JSON framing included, which is what the budget always measured. On a warm one it is the new
+tail, measured through the same body serializer so the tool catalog and framing are counted too;
+a conversation of any total size is forwarded untouched while that fits. `PROMPT_BUDGET_BYTES`
+moves the budget without a code change; a value that is not a positive whole number falls back to
+the default, because a typo must not turn the guard off.
+
+A request whose fresh part is past the budget is shortened before it goes upstream, as above. Only
+if even the shortened prompt cannot fit - the current turn alone is larger than the budget, or the
+summarizer is unavailable and there is nothing safe left to drop - is it refused, with OpenAI's own
+contract:
 
 ```json
 {
   "error": {
-    "message": "This conversation is 1,280,001 characters of prompt, about 320,000 tokens, and
-                this model's window is 320,000 tokens (1,280,000 characters). Compact or summarize
-                the conversation and retry; the x-gateway-prompt header on this refusal carries
-                the numbers.",
+    "message": "This request asks DeepAI to read 200,041 bytes of prompt fresh, even after the
+                gateway compacted it, and its current turn alone is larger than the 176,400-byte
+                budget. Past about 196,000 bytes the endpoint silently discards the start of a
+                fresh prompt; the x-gateway-prompt header on this refusal carries the numbers.",
     "type": "invalid_request_error",
     "code": "context_length_exceeded",
     "param": null
@@ -239,32 +336,61 @@ A prompt past the window is refused before anything is sent upstream:
 }
 ```
 
-The window is counted at four characters per token - the same meter that fills `prompt_tokens` when
-DeepAI sends no usage - so a client reading `/v1/models` and a client being refused agree about how
-full a prompt is. `400` with `code: "context_length_exceeded"` is OpenAI's own contract for this,
-and every agent harness - Pi, Codex, Claude Code, anything built on an OpenAI SDK - already
-recognises it and compacts. DeepAI Code does the same thing from the other side: it measures the
-context after every turn and compacts at `contextWindow - reserveTokens`, before the next request
-goes out.
+`400` with `code: "context_length_exceeded"` is what every agent harness - Pi, Codex, Claude Code,
+anything built on an OpenAI SDK - already recognises and reacts to by compacting. In practice it
+should never see it, because the gateway has already done the compaction; the refusal is the
+last resort for a single turn that cannot be made to fit.
 
-What is *not* touched: anything inside the window arrives upstream byte for byte, including a
-600 KB tool result that the earlier byte budget would have refused. A harness that read a large file
-knows what it read and can summarize or truncate it itself; a proxy guessing which half to keep
-cannot.
+What is *not* touched: anything under the budget arrives upstream byte for byte - a 100 KB tool
+result goes as read, markers and all. A harness that read a large file knows what it read and can
+summarize or truncate it itself; a proxy guessing which half to keep cannot.
 
-The same facts ride on every answer in an `x-gateway-prompt` header -
-`sent=1281000; received=1281000; window=320000; budget=1280000` - set before the check, so the
-refusal carries them too. The Models page shows the window each model declares, `320.0k`.
+The same facts ride on every answer in an `x-gateway-prompt` header, semicolon-separated
+`key=value` as it always was, set before the check so a refusal carries them too:
+
+| key | value |
+| --- | --- |
+| `sent` | bytes of prompt text leaving the gateway, after any shortening |
+| `received` | bytes of prompt text that arrived |
+| `body` | bytes of the serialized upstream body, tools included |
+| `fresh` | bytes the endpoint has to read rather than serve from cache: the whole body when cold, the new tail when warm. What the budget is measured on |
+| `window` | the token window DeepAI declares, `320000` |
+| `budget` | that window in characters, `1280000` |
+| `wall` | the measured byte wall, `196000` |
+| `budget-bytes` | the byte budget on the fresh part, `176400` unless `PROMPT_BUDGET_BYTES` says otherwise |
+| `trim` | how the request was shortened: `none`, or a combination of `cut<n>`, `compact<n>`, `drop<n>` |
+| `reused` | `yes` when the request continued a session the endpoint should already have cached |
+
+The Models page still shows the window each model declares, `320.0k`, because that page is the
+catalog; `/v1/models` publishes the same number, because it is the one a harness should compact
+against.
+
+One failure is left that the gateway cannot prevent after the fact, and the signal for it is the
+endpoint's own accounting rather than the gateway's expectation: a request whose body is past the
+wall and whose answer reports **no cache hit at all** was read fresh in full, so its front may have
+been dropped. That happens when an operator raises `PROMPT_BUDGET_BYTES` above the wall, or when a
+server-side cache expires under a conversation this gateway still believes is warm. Nothing in the
+answer says so and nothing is retried, but an operator can see it:
+
+```
+truncation-suspect session=4f2a91c0 reused=yes body=300150B fresh=742B
+```
+
+`reused=yes` there is the whole point: the gateway thought the prefix was cached, the endpoint
+disagreed. At the default budget a genuinely cold request of that size is shortened before it is
+sent, so the endpoint is not handed a prompt it will truncate.
 
 The app does truncate its own tool output (a file read is capped, bash output is capped), which
 keeps a single turn small, but not the transcript: measured on this machine's own session store, the
 transcript of one long chat reached 241,019 prompt tokens over 1,378 model turns before its fifth
 compaction.
 
-The unit tests cover the boundary to the character (1,280,000 accepted, 1,280,001 refused), the
-Polish text that makes characters and bytes differ, the usage row a refusal writes, the streaming
-caller that still gets a JSON error, the 600 KB tool result that is forwarded whole, and the
-oversized one that is refused rather than shortened.
+The unit tests cover the cold case (a prompt past the budget shortened with a visible `trim=`,
+never silently truncated), the long-conversation checkpoint (the goal and the newest result kept,
+the middle summarized), the warm case (a body past the wall forwarded whole, under the same session
+id as the turn before), the harness-compaction case (the id kept, the whole prompt measured fresh),
+account isolation, parallel conversations of one key, a caller-supplied `x-session-id`, the
+configurable budget with its fallback, and the pruning that keeps the session table bounded.
 
 ### What a paid request costs: an equation on the catalog's price
 
@@ -460,18 +586,21 @@ picker, and the form then says the catalog is unavailable.
 
 The price shown is `theosPerRequest`, which is what DeepAI charges per call.
 
-### The window is the catalog's, and it is the one enforced
+### The window published is the one a harness should compact against
 
-`/v1/models` publishes `context_window` exactly as DeepAI's catalog declares it - `320000` - because
-that is the number the desktop app reads out of the same catalog and compacts against, so a harness
-applying the app's own rule (`contextWindow - reserveTokens`) behaves here as it does in the app.
-The gateway does not publish a smaller number of its own: the measurements of request bodies in
-**"The context window: 320,000, and the body size that made it look smaller"** above are recorded
-there as observations, and nothing is refused or rewritten on their account inside the window.
+`/v1/models` publishes `context_window` as `320000`: DeepAI's own catalog figure, and what this
+gateway actually serves - a conversation whose prefix is in the endpoint's prompt cache is
+forwarded however large it is, so a warm 290,000-token chat works here as it works in the app.
+`/v1/models/details` carries the same field, because it is a JSON endpoint any key holder can call,
+not a dashboard-only view.
 
-Past the window - 1,280,000 characters, at the four characters per token this gateway counts tokens
-with - the request is refused with `context_length_exceeded` before anything is sent upstream, and
-the caller compacts and retries. That is the same contract the app implements from the other side.
+What is shortened, on the request path, is something else: a *cold* prompt - or a new tail - larger
+than 176,400 bytes, because past about 196 KB of prompt the endpoint has to read it silently drops
+the front. The gateway compacts it before sending, rather than handing DeepAI a prompt it will
+truncate. A warm conversation is never shortened for its size. Keeping the conversation on one
+session is what makes that distinction hold, and a harness compaction is the case it exists for.
+The measurements and the mechanism are in **"The context window: 320,000, and the 196 KB a prompt
+costs when it is read fresh"** above.
 
 
 ### Log in / log out
@@ -694,6 +823,11 @@ The dashboard's **Export CSV** button uses the same endpoint.
 - **`api_keys`** - as below, plus `owner_username` (which account pays) and
   `owner_key_hash` (the DeepAI key it was created with, kept as a record).
 - **`auth_events`** - append-only login/logout/refresh/denied trail, per account.
+- **`conversation_sessions`** - one row per conversation the gateway has seen, per account:
+  the session id sent to DeepAI and the last 40 **message digests**, newest last. Digests only -
+  no prompt text, and nothing in it is ever sent upstream; it is the cache key that keeps a
+  conversation on one session across a compaction. Capped at 32 rows per account and dropped
+  after seven days without use.
 
 ## How keys are stored
 
@@ -1005,16 +1139,26 @@ v1 glm-5.3-flash capacity: the model is busy, waiting 2000ms (attempt 2 of 4)
 
 ### Session affinity, and parallel conversations
 
-DeepAI routes a turn by the session it belongs to (`X-Session-Affinity`), which is how the
-same conversation keeps its prompt cache. This gateway sends `x-session-id` from the request
-when the caller passes one, and otherwise uses a stable id per API key - so a client that
-runs several conversations or subagents in parallel through one key has all of them on the
-same session. Sending a distinct `x-session-id` per conversation spreads them and is what the
-desktop app does with its per-thread session id:
+DeepAI routes a turn by the session it belongs to (`X-Session-Affinity`), which is how the same
+conversation keeps its prompt cache - and the cache is what lets a conversation be far larger than
+anything the endpoint would read fresh. This gateway sends `x-session-id` from the request when the
+caller passes one, and otherwise resolves one per conversation: a request whose recent messages
+continue a conversation this gateway has seen reuses that conversation's id, even across a harness
+compaction or a rewritten system prompt, and a first turn gets an id derived from its opening.
+What is remembered is a digest per message, an opening fingerprint and whether the last request
+was shortened - never the text - see **"One session per conversation, across compaction and
+restarts"** above.
+
+So a client that runs several conversations or subagents in parallel through one key gets a
+distinct session for each, as the desktop app does with its per-thread session id. A caller that
+knows its own conversation ids can say so, and its value wins over anything derived here:
 
 ```bash
 curl ... -H "x-session-id: conversation-42" ...
 ```
+
+Reusing one id for unrelated conversations does not fail loudly: the endpoint treats a session as
+one conversation, and its `409 session_busy` only makes sense that way.
 
 ## The machine header, and `machine_required`
 
@@ -1284,7 +1428,14 @@ turn - see [Performance](#performance)).
 
 ## Limits
 
-- Text only. Image inputs are not forwarded.
+- Images are forwarded to models whose catalog entry declares `image` input, and replaced by a
+  note in the text for models that do not - or that refused one in the last 15 minutes. See
+  [Images](#images).
+- A *cold* prompt, or a new tail, larger than 176,400 bytes is shortened before it is sent: past
+  about 196 KB of prompt it has to read fresh, the endpoint silently drops the front. A warm
+  conversation is never shortened for its size. A single turn that still cannot fit is refused with
+  `context_length_exceeded`. See
+  [the fresh part](#what-it-enforces-is-the-fresh-part).
 - At most 5 gateway keys per account.
 - The dashboard has no password of its own: authentication *is* the DeepAI account,
   proven by a key only DeepAI could have issued. Anyone who can reach the port and

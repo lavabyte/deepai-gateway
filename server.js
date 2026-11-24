@@ -23,6 +23,7 @@ import { startCatalogRefresh, catalogSnapshot, ensureCatalog, CATALOG_KEY_REFUSE
 import { installUpstreamPool } from './src/deepai/transport.js';
 import { initPricing, pricingStatus, startPricingRefresh } from './src/pricing.js';
 import { v1Router } from './src/api/v1.js';
+import { PROMPT_BUDGET_BYTES } from './src/deepai/window.js';
 import { attachSession } from './src/middleware/session.js';
 import { listAccounts, clearSessionCookie, destroySession, forgetInactiveAccounts, newestAccountApiKey, recordAuthEvent } from './src/store.js';
 import { DEFAULT_MAX_KEYS, parseMaxKeys, totalKeyCount } from './src/keys.js';
@@ -62,12 +63,40 @@ export function config(env = process.env) {
      */
     maxKeys: parseMaxKeys(env.MAX_KEYS),
     /*
+     * The largest amount of prompt, in bytes, this gateway asks DeepAI to read FRESH. The
+     * endpoint silently discards the front of a fresh prompt past about 196 KB and answers from
+     * the part it kept, so this is the one guard against a model that "forgets" mid-conversation.
+     * A warm conversation is not measured by its size: its prefix is in the endpoint's prompt
+     * cache and only the new tail is read. Set per deployment only when the endpoint is known to
+     * accept more; see `promptBudget` for what a bad value becomes, and `src/deepai/window.js`
+     * for where the default comes from.
+     */
+    promptBudgetBytes: promptBudget(env.PROMPT_BUDGET_BYTES),
+    /*
      * DeepAI's own browser sign-in, finishing at `/callback`. Off by default: DeepAI
      * hard-codes `127.0.0.1` as the redirect host, so it only completes when the browser
      * reaches that address as this gateway. The paste-the-JSON route works from anywhere,
      * which is why it is the default.
      */
   };
+}
+
+/**
+ * Parse the fresh-prompt budget.
+ *
+ * Only a positive whole number of bytes is a budget. Everything else - unset, empty, `0`,
+ * negative, fractional or nonsense - falls back to the measured default rather than to "no
+ * limit": a typo in the environment must not turn off the one guard between a caller and a
+ * silently truncated conversation.
+ *
+ * @param {string|undefined} value
+ * @returns {number} bytes.
+ */
+function promptBudget(value) {
+  if (typeof value !== 'string' || value.trim() === '') return PROMPT_BUDGET_BYTES;
+  const bytes = Number(value.trim());
+  if (!Number.isInteger(bytes) || bytes <= 0) return PROMPT_BUDGET_BYTES;
+  return bytes;
 }
 
 /**
@@ -97,6 +126,8 @@ export function createApp(db, options = {}) {
     logRequests: options.logRequests !== false,
     // The key cap for this deployment, or `undefined` to fall back to the default.
     maxKeys: options.maxKeys,
+    // The largest amount of fresh prompt this deployment allows, or `undefined` for the measured default.
+    promptBudgetBytes: options.promptBudgetBytes,
   };
 
   const app = express();
