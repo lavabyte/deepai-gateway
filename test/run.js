@@ -4450,7 +4450,7 @@ await checkAsync('the text-only retry after an image refusal is measured too', a
  * Several accounts can be signed in at once, which is how the isolation cases get two keys on one
  * gateway.
  */
-async function deepaiGateway({ usernames = ['prompt-user'], budget, usage } = {}) {
+async function deepaiGateway({ usernames = ['prompt-user'], budget, usage, respond } = {}) {
   const { openDatabase } = await import('../src/db.js');
   const { saveAccount } = await import('../src/store.js');
   const { generateKey } = await import('../src/keys.js');
@@ -4476,7 +4476,17 @@ async function deepaiGateway({ usernames = ['prompt-user'], budget, usage } = {}
         { status: 200, headers: { 'content-type': 'application/json' } });
     }
     const raw = String(init.body);
-    sent.push({ raw, bytes: Buffer.byteLength(raw, 'utf8'), payload: JSON.parse(raw), session: String(init.headers?.session_id ?? '') });
+    const payload = JSON.parse(raw);
+    sent.push({ raw, bytes: Buffer.byteLength(raw, 'utf8'), payload, session: String(init.headers?.session_id ?? '') });
+    /*
+     * A case can answer a particular upstream request itself - the needle test writes a summary
+     * that carries a fact from the middle of the transcript - while every other request keeps the
+     * default `ok` answer.
+     */
+    if (typeof respond === 'function') {
+      const custom = respond({ url: String(url), raw, payload });
+      if (custom !== undefined) return custom;
+    }
     /*
      * A usage object only when a test asks for one: the endpoint does not always send usage in a
      * stream, and a case that says nothing about usage must look like that, not like a zero.
@@ -4710,6 +4720,72 @@ await checkAsync('a long conversation is summarized into a checkpoint instead of
     await gateway.close();
   }
 });
+
+await checkAsync('a fact in the middle of a long conversation survives the checkpoint', async () => {
+  /*
+   * The needle test. A model can repeat the goal at the start and the newest tool result at the
+   * end while having lost the one fact in between, so those two assertions are not enough. Here a
+   * unique fact sits in a middle turn that compaction removes; the summarizer receives it and
+   * writes it into the checkpoint, and the final request must carry it. The original turn itself
+   * must not survive verbatim, or the test would pass by keeping the needle in the recent tail
+   * instead of by carrying it through the summary.
+   */
+  const needle = 'NEBULA-KEY-7431';
+  const summaries = [];
+  const gateway = await deepaiGateway({
+    respond: ({ payload }) => {
+      if (payload.max_completion_tokens !== 4_096) return undefined;
+      const prompt = JSON.stringify(payload.messages ?? []);
+      summaries.push(prompt);
+      if (!prompt.includes(needle)) return undefined;
+      const summary = '## Goal\nKeep working on the gateway.\n\n## Important fact\n'
+        + `${needle} is the launch key. Do not lose it.`;
+      return new Response(`data: ${JSON.stringify({
+        choices: [{ delta: { content: summary }, finish_reason: 'stop' }],
+      })}\n\ndata: [DONE]\n\n`,
+      { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  try {
+    const conversation = [{
+      role: 'user',
+      content: 'Fix the gateway and keep the launch key safe. Do not lose any fact from this transcript.',
+    }];
+    for (let step = 0; step < 26; step += 1) {
+      conversation.push({ role: 'assistant', content: `step ${step}: ` + 'a'.repeat(7_000) });
+      conversation.push({ role: 'user', content: `result ${step}: ` + 'b'.repeat(7_000) });
+      if (step === 8) {
+        conversation.push({
+          role: 'user',
+          content: `IMPORTANT FACT: the launch key is ${needle}. Keep it for later.`,
+        });
+      }
+    }
+    const at = conversation.findIndex((message) => String(message.content).includes(needle));
+    assert.ok(at > 10 && at < conversation.length - 10,
+      `the needle starts in the middle, not at either end: ${at}/${conversation.length}`);
+
+    const answered = await gateway.ask(conversation);
+    assert.equal(answered.status, 200, 'the long conversation is served');
+    const header = gatewayPrompt(answered);
+    assert.match(String(header.trim), /compact/, `the header says it was compacted: ${header.trim}`);
+    assert.ok(header.fresh <= header['budget-bytes'],
+      `the forwarded prompt fits the fresh budget: ${header.fresh} <= ${header['budget-bytes']}`);
+
+    assert.ok(summaries.length >= 1, 'the middle turns reached the summarizer');
+    assert.ok(summaries.some((prompt) => prompt.includes(needle)),
+      'the needle was in the text handed to the summarizer');
+    const final = gateway.sent.at(-1);
+    assert.match(final.raw, new RegExp(needle), 'the checkpoint carried the needle to the model');
+    assert.equal(final.payload.messages.some((message) => String(message.content).startsWith('IMPORTANT FACT:')), false,
+      'the original middle turn was replaced, so the needle survived through the summary');
+    assert.match(final.raw, /Fix the gateway and keep the launch key safe/, 'the goal is still there');
+    assert.match(final.raw, /result 25:/, 'the newest work is still there');
+  } finally {
+    await gateway.close();
+  }
+});
+
 await checkAsync('a request the endpoint truncated anyway is visible in the log', async () => {
   /*
    * Every path through the handler keeps a *fresh* prompt under the wall, so the requests that can
