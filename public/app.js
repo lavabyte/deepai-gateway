@@ -422,12 +422,10 @@ async function finishBrowserLogin(prefix = '') {
   } catch (error) {
     /*
      * DeepAI Code does not serve this account - it is not a bad key, and no amount of signing
-     * in again changes it - so it is said in those words, and the endpoint report is run so
-     * the answer that said it is on the screen rather than in a log the visitor cannot read.
+     * in again changes it - so it is said in those words.
      */
     if (error?.code === 'social-login-required') {
       toast(t('signin.socialNotSupported'), 'error');
-      await runDiagnose();
     } else {
       toast(failureMessage(error), 'error');
     }
@@ -1258,33 +1256,6 @@ function renderAccountBadge() {
 }
 
 /**
- * Ask DeepAI what it makes of the stored key, and show the answers.
- *
- * Three endpoints answer three different questions about one key - does the counter know it
- * (`/theos`), will the lane serve it the catalog (`/models`), does the website know it
- * (`/get_usage_summary`) - and a sign-in can fail one and pass the others. Summarising that as
- * "DeepAI rejects the key" hides which of the three said no, which is the only part that says
- * what to do next, so the answers are shown with DeepAI's own error codes.
- *
- * @returns {Promise<void>}
- */
-async function runDiagnose() {
-  const report = $('diagnose-report');
-  if (!report) return;
-  try {
-    const result = await api('/account/diagnose', { method: 'POST' });
-    report.hidden = false;
-    report.innerHTML = `<h4 class="tiny muted mt-3">${esc(t('account.diagnoseTitle'))}</h4>`
-      + result.steps.map((step) => `<div class="tiny mono" data-step="${esc(step.label)}">`
-        + `${esc(step.ok ? t('account.diagnoseOk') : t('account.diagnoseRefused'))} ${esc(step.path)} `
-        + `${esc(String(step.status === 0 ? (step.note ?? 'unreachable') : step.status))}`
-        + `${step.code === undefined ? '' : ` ${esc(step.code)}`}</div>`).join('');
-  } catch (error) {
-    toast(failureMessage(error), 'error');
-  }
-}
-
-/**
  * Say why this account cannot be used, when DeepAI named a reason.
  *
  * Not "no balance": a dash is also what a slow read looks like. When DeepAI answers
@@ -1530,13 +1501,11 @@ function accountCard() {
         </div>` : ''}
       <div class="row mt-3 row--wrap">
         <button class="btn btn--secondary btn--sm" id="refresh-allowance">${t('account.refresh')}</button>
-        <button class="btn btn--ghost btn--sm" id="diagnose-account">${t('account.diagnose')}</button>
-        <button class="btn btn--ghost btn--sm" id="forget-account">${t('account.forget')}</button>
+        <button class="btn btn--danger btn--sm" id="forget-account">${t('account.forget')}</button>
         <span class="spacer"></span>
         <span class="tiny muted">${esc(keyQuotaLabel(account.keyQuota))}</span>
       </div>
       ${accessIssueNote(account)}
-      <div id="diagnose-report" hidden></div>
       <div class="tiny muted mt-2">
         ${t('account.sessionNote', { when: account.sessionExpiresAt ? when(account.sessionExpiresAt) : t('common.never') })}
       </div>
@@ -1731,9 +1700,6 @@ function wireAccountCard(rerender) {
     rerender();
   });
 
-  // "DeepAI rejects this account's key" is a verdict, and the reader deserves the evidence.
-  $('diagnose-account')?.addEventListener('click', async () => void runDiagnose());
-
   // Removing the account is destructive, so it gets its own confirm step.
   $('forget-account')?.addEventListener('click', async () => {
     const confirmed = await confirmAction({
@@ -1783,7 +1749,6 @@ async function renderHome() {
   view.innerHTML = `
     <div class="page__head">
       <h1 class="page__title">${t('home.title')}</h1>
-      <p class="page__sub">${t('home.subtitle')}</p>
     </div>
 
     <div class="stack">
@@ -1836,27 +1801,6 @@ async function renderHome() {
             </div>
           </div>
 
-          <div class="card card--flush">
-            <div class="card__head">
-              <div>
-                <div class="card__title">${t('home.recent')}</div>
-                <div class="card__sub">${t('home.recentSub')}</div>
-              </div>
-              <div class="row" style="gap:6px">
-                <a class="btn btn--ghost btn--sm" href="/api/usage/export?format=csv" download>${t('home.export')}</a>
-                <a class="btn btn--ghost btn--sm" href="#/keys">${t('home.manageKeys')}</a>
-              </div>
-            </div>
-            <div class="table-wrap">
-              <table class="table">
-                <thead><tr>
-                  <th>${t('metric.when')}</th><th>${t('metric.model')}</th><th>${t('metric.key')}</th><th class="num">${t('metric.tokens')}</th>
-                  <th class="num hide-sm">${t('metric.inOut')}</th><th class="num hide-sm">${t('metric.time')}</th><th>${t('metric.status')}</th>
-                </tr></thead>
-                <tbody>${requestRows(recent.requests, true)}</tbody>
-              </table>
-            </div>
-          </div>
         </div>
 
         <div class="stack">
@@ -1876,6 +1820,28 @@ async function renderHome() {
             <div class="tiny muted mt-2">${t('home.useItSub')}</div>
             <div class="stack mt-3" id="home-snippets"></div>
           </div>
+        </div>
+      </div>
+
+      <div class="card card--flush mt-3">
+        <div class="card__head">
+          <div>
+            <div class="card__title">${t('home.recent')}</div>
+            <div class="card__sub">${t('home.recentSub')}</div>
+          </div>
+          <div class="row" style="gap:6px">
+            <a class="btn btn--ghost btn--sm" href="/api/usage/export?format=csv" download>${t('home.export')}</a>
+            <a class="btn btn--ghost btn--sm" href="#/keys">${t('home.manageKeys')}</a>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr>
+              <th>${t('metric.when')}</th><th>${t('metric.model')}</th><th>${t('metric.key')}</th><th class="num">${t('metric.tokens')}</th>
+              <th class="num hide-sm">${t('metric.inOut')}</th><th class="num hide-sm">${t('metric.time')}</th><th>${t('metric.status')}</th>
+            </tr></thead>
+            <tbody>${requestRows(recent.requests, true)}</tbody>
+          </table>
         </div>
       </div>
     </div>`;
@@ -2181,10 +2147,6 @@ function openKeyModal(existing, onDone) {
   const modelList = document.createElement('div');
   modelList.className = 'pill-list';
   const pills = new Map();
-  const selection = document.createElement('div');
-  selection.className = 'tiny muted mt-2';
-  selection.dataset.role = 'selected-models';
-
   /*
    * `data-on` paints a pill; `aria-pressed` says the same thing to a screen reader, which
    * cannot see a colour. Both are kept in one place so a click and a quick pick cannot
@@ -2194,20 +2156,6 @@ function openKeyModal(existing, onDone) {
     const on = selected.has(id);
     pill.dataset.on = String(on);
     pill.setAttribute('aria-pressed', String(on));
-  };
-  const syncSelection = () => {
-    // An unrestricted key allows every model, including ones not in today's catalog.
-    if (unrestricted) {
-      selection.textContent = t('common.allModels');
-      return;
-    }
-    const names = [...selected].map((id) => {
-      const pill = pills.get(id);
-      return pill === undefined ? id : pill.textContent;
-    });
-    selection.textContent = names.length === 0
-      ? t('form.modelsSelectedNone')
-      : t('form.modelsSelected', { names: names.join(', ') });
   };
 
   for (const model of catalog) {
@@ -2232,12 +2180,7 @@ function openKeyModal(existing, onDone) {
     modelList.appendChild(hint);
   }
 
-  const modelsField = field(
-    t('form.allowedModels'),
-    modelList,
-    t('form.allowedModelsHint'),
-  );
-  modelsField.appendChild(selection);
+  const modelsField = field(t('form.allowedModels'), modelList);
 
   const quickPicks = document.createElement('div');
   quickPicks.className = 'row';
@@ -2265,7 +2208,6 @@ function openKeyModal(existing, onDone) {
     selected.clear();
     for (const id of ids) selected.add(id);
     for (const [id, pill] of pills) paintPill(id, pill);
-    syncSelection();
   };
   freeButton.addEventListener('click', () => { unrestricted = false; setSelection(freeIds); });
   // The mirror of "select free": an explicitly billed key, for a caller that is meant to use
@@ -2278,7 +2220,6 @@ function openKeyModal(existing, onDone) {
     unrestricted = true;
     setSelection(catalog.map((model) => model.id));
   });
-  syncSelection();
 
   // --- Conditional visibility --------------------------------------------
   // Fields that cannot apply are removed from the form rather than disabled,

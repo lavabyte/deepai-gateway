@@ -151,14 +151,12 @@ export function installMachineIdFromDatabase(db, log = () => {}) {
     : '';
   if (override !== '') {
     installed = override;
-    log(`machine identity: DEEPAI_MACHINE_ID (${override.slice(0, 16)}...)`);
     return override;
   }
 
   const detectedValue = detectedId();
   if (detectedValue !== '') {
     installed = detectedValue;
-    log('machine identity: read from this host');
     return detectedValue;
   }
 
@@ -182,13 +180,11 @@ export function storedMachineId(db, log = () => {}) {
   try {
     const row = db.prepare('SELECT value FROM meta WHERE key = ?').get('machine_id');
     if (typeof row?.value === 'string' && row.value !== '') {
-      log('machine identity: kept from the first start, stored in this database');
       return row.value;
     }
     const generated = digest(randomUUID());
     db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
       .run('machine_id', generated);
-    log('machine identity: generated for this gateway and stored (this host has no identifier)');
     return generated;
   } catch (error) {
     log(`machine identity: could not be stored (${error?.message ?? error})`);

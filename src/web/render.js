@@ -190,13 +190,6 @@ export function modelsView({ models, usage = null, t }) {
           </table>
         </div>
       </div>
-
-      <div class="card">
-        <div class="eyebrow">${t('models.howBilling')}</div>
-        <p class="muted mt-2" style="font-size:13px;max-width:78ch">
-          ${t('models.billing', { free: t('common.free') })}
-        </p>
-      </div>
     </div>`;
 }
 

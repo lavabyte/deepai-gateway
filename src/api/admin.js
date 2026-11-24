@@ -14,7 +14,6 @@
 import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { checkKey } from '../deepai/account.js';
-import { API_ORIGIN, laneHeaders } from '../deepai/wire.js';
 import {
   DEFAULT_MAX_KEYS,
   WINDOWS,
@@ -166,49 +165,6 @@ export function adminRouter(db, runtime) {
     res.json({ ok: true });
   });
 
-  /**
-   * Ask DeepAI, endpoint by endpoint, what it makes of the stored key.
-   *
-   * "DeepAI rejects this account's key" is a conclusion, and the dashboard had no way to show
-   * the evidence behind it. DeepAI answers three different questions with three different
-   * endpoints - does the counter know this key (`/theos`), will the lane serve it the catalog
-   * (`/models`), does the website know it (`/get_usage_summary`) - and an account can pass one
-   * and fail another. Showing the three answers, and DeepAI's own error codes beside them, is
-   * the difference between "sign in again" and knowing which of the three said no.
-   *
-   * The key is not echoed back: the report is statuses and codes only.
-   */
-  router.post('/account/diagnose', requireSession, async (req, res) => {
-    const account = req.account;
-    const ask = async (label, path, absolute) => {
-      const url = absolute ? `${API_ORIGIN}${path}` : `${API_ORIGIN}/deepai_code${path}`;
-      try {
-        const response = await fetch(url, {
-          headers: { ...laneHeaders(), 'Api-Key': account.apiKey },
-          signal: AbortSignal.timeout(10_000),
-          redirect: 'error',
-        });
-        const body = await response.json().catch(() => undefined);
-        return {
-          label,
-          path,
-          status: response.status,
-          ok: response.ok,
-          code: typeof body?.error?.code === 'string' ? body.error.code : undefined,
-        };
-      } catch (error) {
-        return { label, path, status: 0, ok: false, code: undefined, note: String(error?.message ?? error).slice(0, 120) };
-      }
-    };
-    const steps = await Promise.all([
-      ask('allowance', '/theos'),
-      ask('catalog', '/models'),
-      ask('website', '/get_usage_summary', true),
-    ]);
-    recordAuthEvent(db, 'refresh', { username: account.username, detail: 'diagnosed' });
-    res.json({ ok: true, steps });
-  });
-
   router.post('/account/refresh', requireSession, async (req, res) => {
     const result = await refreshAllowance(db, runtime, req.account.username);
     res.json(result);
@@ -289,7 +245,6 @@ export function adminRouter(db, runtime) {
     );
 
     const row = db.prepare('SELECT * FROM api_keys WHERE id = ?').get(id);
-    runtime.log?.(`created API key "${name}" for ${owner}`);
     // The plaintext is returned once and never stored.
     return res.status(201).json({
       key: publicKey(row, keyUsage(db, id, row.limit_window)),
@@ -349,7 +304,6 @@ export function adminRouter(db, runtime) {
     const row = ownedKey(req, res);
     if (row === undefined) return undefined;
     db.prepare('DELETE FROM api_keys WHERE id = ?').run(row.id);
-    runtime.log?.(`revoked API key "${row.name}"`);
     return res.json({ ok: true, revoked: { id: row.id, name: row.name } });
   });
 
@@ -646,6 +600,5 @@ export async function refreshAllowance(db, runtime, username) {
   // A successful read clears whatever reason an earlier refusal left behind.
   saveAllowance(db, username, check.allowance);
   recordAuthEvent(db, 'refresh', { username, detail: `balance ${check.allowance.balance ?? '?'}` });
-  runtime.log?.(`allowance refreshed for ${username}: ${check.allowance.balance ?? '?'} Credits`);
   return { ok: true, allowance: check.allowance };
 }

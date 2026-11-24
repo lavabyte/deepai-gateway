@@ -3976,11 +3976,16 @@ await checkAsync('booting the server does not crash and says what it is doing', 
     });
 
     const said = lines.join('\n');
+    assert.match(said, /pricing: .+ \(\d+\/\d+ models, captured /, 'prices are reported first');
+    assert.match(said, /database: :memory:/, 'then the database in use');
+    assert.match(said, /stored API keys: 0/, 'and how many keys are stored');
+    assert.match(said, /API key limit per account: 5 \(MAX_KEYS\)/, 'the cap is stated even at its default');
+    assert.match(said, /no DeepAI accounts yet/, 'a fresh database is worth reporting');
     assert.match(said, /listening on http:\/\/127\.0\.0\.1:\d+/, 'the boot banner must be printed');
     assert.match(said, /OpenAI base URL: http:\/\/127\.0\.0\.1:\d+\/v1/, 'and the endpoint to point a client at');
-    assert.match(said, /no DeepAI accounts yet/, 'a fresh database is worth reporting');
-    // Loopback means there is nothing exposed to warn about.
-    assert.ok(!said.includes('not loopback'), 'no exposure note on a loopback host');
+    assert.ok(!said.includes('machine identity'), 'no machine-identity debug line');
+    assert.ok(!said.includes('upstream channel'), 'no keep-alive pool debug line');
+    assert.ok(!said.includes('not loopback'), 'no exposure note');
     assert.ok(!said.includes('cannot open it'), 'no workaround to explain for a flow that no longer exists');
   } finally {
     console.log = realLog;
@@ -3993,7 +3998,7 @@ await checkAsync('booting the server does not crash and says what it is doing', 
   }
 });
 
-await checkAsync('a non-loopback boot warns about what it exposes', async () => {
+await checkAsync('a non-loopback boot keeps the same short summary', async () => {
   const { start } = await import('../server.js');
   const { mkdtempSync, rmSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
@@ -4022,10 +4027,12 @@ await checkAsync('a non-loopback boot warns about what it exposes', async () => 
       poll();
     });
 
-    // The dashboard is cookie-protected but reachable, and an operator should know.
     const said = lines.join('\n');
-    assert.match(said, /not loopback/, 'an exposed host must be called out');
-    assert.match(said, /dashboard is reachable from the network/);
+    assert.match(said, /listening on http:\/\/0\.0\.0\.0:\d+/, 'the host it actually bound is printed');
+    assert.match(said, /API key limit per account: 5 \(MAX_KEYS\)/);
+    assert.ok(!said.includes('machine identity'), 'no machine-identity debug line');
+    assert.ok(!said.includes('upstream channel'), 'no keep-alive pool debug line');
+    assert.ok(!said.includes('not loopback'), 'no exposure note');
     // Nothing may promise a workaround for the sign-in flow that was removed.
     assert.ok(!said.includes('cannot open it'), 'no advice about a flow that no longer exists');
   } finally {
@@ -4039,6 +4046,27 @@ await checkAsync('a non-loopback boot warns about what it exposes', async () => 
   }
 });
 
+await checkAsync('request logs cover gateway traffic, not the dashboard', async () => {
+  const { createApp } = await import('../server.js');
+  const db = openDatabase(':memory:');
+  const lines = [];
+  const app = createApp(db, { log: (message) => lines.push(message), logRequests: true });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await (await fetch(`${base}/`)).text();
+    await (await fetch(`${base}/api/account`)).text();
+    await (await fetch(`${base}/v1/models`)).text();
+    // `finish` follows the body, so the lines are there by the time the reads settle.
+    assert.ok(lines.some((line) => line.includes('GET /v1/models')), 'gateway traffic is logged');
+    assert.ok(!lines.some((line) => line.includes('/api/account')), 'dashboard polling is not logged');
+    assert.ok(!lines.some((line) => line.includes('GET / ')), 'the dashboard document is not logged');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    db.close();
+  }
+});
 await checkAsync('the project presents one consistent identity', async () => {
   const { readFileSync, readdirSync, statSync } = await import('node:fs');
   const { join } = await import('node:path');
@@ -4100,14 +4128,12 @@ await checkAsync('upstream traffic goes through one kept-alive pool', async () =
     assert.ok(transport.KEEP_ALIVE_TIMEOUT_MS >= 60_000,
       `the idle window must outlast a pause between turns (got ${transport.KEEP_ALIVE_TIMEOUT_MS}ms)`);
 
-    const lines = [];
-    const direct = transport.installUpstreamPool({ env: {}, log: (line) => lines.push(line) });
+    const direct = transport.installUpstreamPool({ env: {} });
     assert.equal(direct.constructor.name, 'Agent', 'a direct connection uses the plain agent');
     assert.equal(typeof direct.dispatch, 'function', 'and it is an agent, not one request');
     assert.notEqual(globalThis.fetch, originalFetch,
       'the process fetches through the pool and nothing else');
     assert.equal(typeof globalThis.fetch, 'function', 'which stays a working fetch');
-    assert.match(lines.join('\n'), /keep-alive pool/, 'and says so at boot');
 
     // A deployment behind an egress proxy keeps that path: the agent follows the same
     // variables the built-in client does, and the same switch turns it off.
@@ -6780,66 +6806,6 @@ await checkAsync('a password account is refused by name, and the reason stays on
   }
 });
 
-await checkAsync('the account can be asked what DeepAI makes of its key, endpoint by endpoint', async () => {
-  /*
-   * The dashboard used to hand down a verdict - "DeepAI rejects this account's key" - with no
-   * evidence behind it, and the verdict was wrong in the one case that mattered: DeepAI's
-   * counter (`/theos`) refuses some keys that its lane (`/models`) serves happily, so the same
-   * account was reported broken while requests would have gone through.
-   *
-   * Three endpoints answer three different questions about one key. Showing the three answers,
-   * with DeepAI's own error codes, is what makes the next step obvious instead of guessed.
-   */
-  const { openDatabase } = await import('../src/db.js');
-  const { createApp } = await import('../server.js');
-  const { saveAccount, createSession } = await import('../src/store.js');
-  const fresh = openDatabase(':memory:');
-  saveAccount(fresh, { apiKey: 'the-key', username: 'someone@example.com', isPro: false });
-  const session = createSession(fresh, 'someone@example.com');
-  const app = createApp(fresh, { log: () => {}, logRequests: false });
-  const server = app.listen(0, '127.0.0.1');
-  await new Promise((resolve) => server.once('listening', resolve));
-  const base = `http://127.0.0.1:${server.address().port}`;
-
-  const realFetch = globalThis.fetch;
-  const seen = [];
-  globalThis.fetch = async (url, init) => {
-    const target = String(url);
-    // Only DeepAI is stubbed: the request to this gateway has to reach the gateway.
-    if (!target.startsWith('https://api.deepai.org')) return realFetch(url, init);
-    seen.push({ target, key: String(init?.headers?.['Api-Key'] ?? '') });
-    if (target.endsWith('/deepai_code/theos')) {
-      return new Response(JSON.stringify({ error: { code: 'auth_required' } }),
-        { status: 401, headers: { 'content-type': 'application/json' } });
-    }
-    return new Response(JSON.stringify({ models: [], is_authenticated: true }),
-      { status: 200, headers: { 'content-type': 'application/json' } });
-  };
-  try {
-    const response = await fetch(`${base}/api/account/diagnose`, {
-      method: 'POST', headers: { cookie: `deepai_gateway_session=${session.token}` },
-    });
-    assert.equal(response.status, 200);
-    const { steps } = await response.json();
-    assert.deepEqual(steps.map((step) => step.path), ['/theos', '/models', '/get_usage_summary'],
-      'the three questions, in the order they are worth reading');
-    assert.deepEqual(steps.map((step) => step.ok), [false, true, true]);
-    assert.equal(steps[0].code, 'auth_required', "DeepAI's own word, not a paraphrase");
-    assert.equal(steps[0].status, 401);
-
-    // The key goes to DeepAI and nowhere near the answer.
-    assert.ok(seen.every((call) => call.key === 'the-key'), 'every probe carries the stored key');
-    assert.ok(!JSON.stringify(steps).includes('the-key'), 'and it is never echoed back to the browser');
-
-    const anon = await fetch(`${base}/api/account/diagnose`, { method: 'POST' });
-    assert.equal(anon.status, 401, 'and it is the session\'s own account that is asked about');
-  } finally {
-    globalThis.fetch = realFetch;
-    await new Promise((resolve) => server.close(resolve));
-    fresh.close();
-  }
-});
-
 await checkAsync('the lane check-in mark is kept and sent back while it is fresh', async () => {
   /*
    * Read out of the app: `/deepai_code/theos` is a check-in, and its answer carries
@@ -7726,11 +7692,10 @@ await checkAsync('the client reads the catalog out of the document, and never as
   assert.equal(models[0].displayName, 'GLM 5.3 Flash', 'and the label the picker shows');
 
   /*
-   * Editing a restricted key must say what is selected twice: on the pills and in a line
-   * that names them. A model the catalog no longer offers has no pill, so without that line
-   * the only trace of it was an invisible id in the saved array. The past expiry also has to
-   * raise its warning - the same field used to round up to 23:59 and make an expired key look
-   * alive until it was saved, when it was quietly revived.
+   * Editing a restricted key marks the catalog's pills as chosen; the selection is not
+   * repeated in a separate line beneath the field. The past expiry also has to raise its
+   * warning - the same field used to round up to 23:59 and make an expired key look alive
+   * until it was saved, when it was quietly revived.
    */
   vm.runInContext(`openKeyModal(${JSON.stringify({
     id: 'key_repro',
@@ -7749,9 +7714,8 @@ await checkAsync('the client reads the catalog out of the document, and never as
     for (const child of item.children ?? []) walk(child);
   };
   walk(nodes.get('modal-body'));
-  const summary = all.find((item) => item.dataset?.role === 'selected-models');
-  assert.equal(summary?.textContent, 'Selected: GLM 5.3, retired-model',
-    'a retired model stays visible in the editor by id');
+  assert.equal(all.find((item) => item.dataset?.role === 'selected-models'), undefined,
+    'the editor does not repeat the selection as a separate list');
   const editorPills = all.filter((item) => item.dataset?.model !== undefined);
   assert.equal(editorPills.find((item) => item.dataset.model === 'glm-5.3')?.dataset.on, 'true');
   assert.equal(editorPills.find((item) => item.dataset.model === 'glm-5.3')?.['aria-pressed'], 'true');

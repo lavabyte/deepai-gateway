@@ -472,10 +472,8 @@ by saying nothing.
 A key the lane also refuses is DeepAI's decision about the account the sign-in landed on, and
 no client of DeepAI can mint an entitlement DeepAI will not mint - the desktop app's own sign-in
 is the same URL, the same `desktop_auth` exchange and the same headers, byte for byte, and there
-is no branch anywhere in it on how the visitor authenticated. So the dashboard says that, names
-the account it is signed into, and shows the three answers with DeepAI's own error codes -
-**Check DeepAI access**, run automatically after a refused sign-in - instead of asking for a key
-from the app.
+is no branch anywhere in it on how the visitor authenticated. So the dashboard says that and
+names the account it is signed into, instead of asking for a key from the app.
 
 Three steps for the browser flow:
 
@@ -718,9 +716,9 @@ The gateway allows **at most 5 keys**. Create keys with:
   **All models** and **Clear** quick actions. *All models* is an unrestricted
   key that also covers models DeepAI adds later; *Clear* allows nothing.
 
-Editing a key shows the selected models twice: the pills are marked as pressed, and
-a line below them names every selection. A model that has since disappeared from the
-catalog stays in the list by its id, so saving an edit cannot silently drop it.
+Editing a key marks the chosen models on their pills. A model that has since disappeared from
+the catalog stays in the saved selection by its id, so an edit that does not touch the picker
+cannot silently drop it.
 
 The form hides anything that does not apply, so it only ever shows decisions
 that matter.

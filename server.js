@@ -25,7 +25,7 @@ import { initPricing, pricingStatus, startPricingRefresh } from './src/pricing.j
 import { v1Router } from './src/api/v1.js';
 import { attachSession } from './src/middleware/session.js';
 import { listAccounts, clearSessionCookie, destroySession, forgetInactiveAccounts, newestAccountApiKey, recordAuthEvent } from './src/store.js';
-import { DEFAULT_MAX_KEYS, parseMaxKeys, totalKeyCount } from './src/keys.js';
+import { parseMaxKeys, totalKeyCount } from './src/keys.js';
 import { byModel, startOfMonth } from './src/usage.js';
 import { escapeHtml, modelPills, modelsUnavailableView, modelsView, localeFor, translator } from './src/web/render.js';
 
@@ -144,10 +144,14 @@ export function createApp(db, options = {}) {
 
   if (options.logRequests !== false) {
     app.use((req, res, next) => {
-      if (req.path.startsWith('/v1/') || req.path.startsWith('/api/')) {
+      // Only gateway traffic: dashboard polling and key management would otherwise fill the
+      // log with requests that are not serving a model. The path is captured now because a
+      // mounted router strips its prefix from `req` before `finish` runs.
+      const path = req.originalUrl.split('?')[0];
+      if (path.startsWith('/v1/')) {
         const started = Date.now();
         res.on('finish', () => {
-          runtime.log(`${req.method} ${req.path} -> ${res.statusCode} (${Date.now() - started}ms)`);
+          runtime.log(`${req.method} ${path} -> ${res.statusCode} (${Date.now() - started}ms)`);
         });
       }
       next();
@@ -265,6 +269,9 @@ export function createApp(db, options = {}) {
    *
    * @returns {Promise<{models: Array<object>|null, reason: string}>}
    */
+  // One refusal per outage, not one per page load: the dashboard retries the catalog on
+  // every document while the stored key is refused.
+  let loggedCatalogRefusal = false;
   const readCatalogForPage = async () => {
     const apiKey = newestAccountApiKey(db);
     if (apiKey === undefined) {
@@ -274,9 +281,11 @@ export function createApp(db, options = {}) {
     }
     try {
       const models = catalogSnapshot() ?? await ensureCatalog(AbortSignal.timeout(10_000), apiKey);
+      loggedCatalogRefusal = false;
       return { models, reason: '' };
     } catch (error) {
-      if (error?.code === CATALOG_KEY_REFUSED) {
+      if (error?.code === CATALOG_KEY_REFUSED && !loggedCatalogRefusal) {
+        loggedCatalogRefusal = true;
         // The stored DeepAI key is the deployment's, not the visitor's, so an operator has to
         // act - and the log is where they look, since a visitor can do nothing about it.
         runtime.log('model catalog: the stored DeepAI key was refused - sign in again in the dashboard');
@@ -429,12 +438,7 @@ export function start(overrides = {}) {
   const keyCount = totalKeyCount(db);
   console.log(`[deepai-gateway] database: ${settings.database}`);
   console.log(`[deepai-gateway] stored API keys: ${keyCount}`);
-  // A deployment that set a limit other than the default, so a key-count problem is visible
-  // in the log rather than puzzling in the dashboard. The default says nothing: it is the
-  // value every deployment started with.
-  if (settings.maxKeys !== DEFAULT_MAX_KEYS) {
-    console.log(`[deepai-gateway] API key limit per account: ${settings.maxKeys} (MAX_KEYS)`);
-  }
+  console.log(`[deepai-gateway] API key limit per account: ${settings.maxKeys} (MAX_KEYS)`);
   console.log(
     accounts.length === 0
       ? '[deepai-gateway] no DeepAI accounts yet - open the dashboard to log in'
@@ -473,17 +477,6 @@ export function start(overrides = {}) {
     const port = typeof address === 'object' && address !== null ? address.port : settings.port;
     console.log(`[deepai-gateway] listening on http://${settings.host}:${port}`);
     console.log(`[deepai-gateway] OpenAI base URL: http://${settings.host}:${port}/v1`);
-    const exposed = settings.host !== '127.0.0.1' && settings.host !== 'localhost';
-    if (exposed) {
-      // The dashboard is protected by a cookie, but an operator should still
-      // know the panel is reachable from the network.
-      console.log('[deepai-gateway] note: HOST is not loopback - the dashboard is reachable from the network');
-    }
-    // A setting that deletes accounts is worth stating out loud at every boot.
-    if (settings.forgetAccountAfterDays > 0) {
-      console.log(`[deepai-gateway] retention: accounts unused for ${settings.forgetAccountAfterDays} day(s) are forgotten (FORGET_ACCOUNT_AFTER_DAYS); usage history is kept`);
-    }
-
   });
 
   const shutdown = () => {

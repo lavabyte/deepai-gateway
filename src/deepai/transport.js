@@ -64,7 +64,6 @@ function proxyFromEnv(env) {
  */
 export function installUpstreamPool(options = {}) {
   const env = options.env ?? process.env;
-  const log = options.log ?? (() => {});
   const settings = {
     keepAliveTimeout: KEEP_ALIVE_TIMEOUT_MS,
     keepAliveMaxTimeout: KEEP_ALIVE_MAX_TIMEOUT_MS,
@@ -75,8 +74,5 @@ export function installUpstreamPool(options = {}) {
   const dispatcher = proxy === '' ? new Agent(settings) : new EnvHttpProxyAgent(settings);
   setGlobalDispatcher(dispatcher);
   globalThis.fetch = undiciFetch;
-  log(proxy === ''
-    ? `upstream channel: one keep-alive pool, ${KEEP_ALIVE_TIMEOUT_MS / 1000}s idle window`
-    : `upstream channel: one keep-alive pool through ${proxy}, ${KEEP_ALIVE_TIMEOUT_MS / 1000}s idle window`);
   return dispatcher;
 }
