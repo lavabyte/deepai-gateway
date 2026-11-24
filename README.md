@@ -68,7 +68,7 @@ each one; `npm start` reads `.env`, so nothing has to be exported in your shell.
 | `DATABASE` | `./data/deepai.db` | SQLite file |
 | `TRUST_PROXY` | unset | Set `1` behind a TLS proxy: trust `X-Forwarded-*` and set `Secure` cookies |
 | `FORGET_ACCOUNT_AFTER_DAYS` | `0` | Forget accounts nobody has used for this many days - see [Retention](#retention). `0` (the default) forgets nothing |
-| `PROMPT_BUDGET_BYTES` | `176400` | Largest amount of prompt sent upstream that DeepAI has to read fresh: 90% of the measured 196 KB wall - see [the fresh part](#what-it-enforces-is-the-fresh-part) |
+| `PROMPT_BUDGET_BYTES` | unset | Optional override for the largest prompt sent upstream that DeepAI has to read fresh. Unset means each model's catalog `contextWindow - maxTokens`; see [the fresh part](#what-it-enforces-is-the-fresh-part) |
 | `LOG_REQUESTS` | `1` | Set `0` to silence per-request logging |
 | `PRICING_CACHE` | `./data/pricing.json` | Where the fetched price table is cached |
 
@@ -151,7 +151,7 @@ Two consequences are built in here. **The catalog is not proof of access** - it 
 And a refusal DeepAI named is said in its own terms, kept on the account so a reload still
 explains it, and never paraphrased as "the key was rejected".
 
-### The context window: 320,000, and the 196 KB a prompt costs when it is read fresh
+### What a cold prompt costs: the measured wall at about 196 KB
 
 Measured against the live endpoint with a conversation-shaped transcript - alternating messages of
 random words, so no tokenizer can compress them and no prompt cache can serve them, i.e. every byte
@@ -196,6 +196,7 @@ the size of the request, and the wall is at about **196 KB**. The earlier table 
 162,000 characters happened to weigh the same as 196 KB of prose.
 
 That measurement is what prompted the work here, and it is written down because it is real.
+It is a property of the endpoint at one point in time, not a constant the gateway may assume.
 Measured again on the same endpoint, the same body size answered from the whole prompt in one run
 and from a fraction of it in the next, depending on what the text was: 200 KB of contiguous licence
 text came back with 4,218 prompt tokens and a hallucinated answer, 200 KB of prose with 25,634 and
@@ -231,31 +232,32 @@ tokens, then drops at a compaction - the app compacts at `contextWindow - reserv
 290,000 of 320,000 - and climbs again. The fresh part stays in the tens or hundreds of tokens even
 on the turns whose body is 1.7 MB.
 
-So there is one published window, and one enforced wall:
+So there is one published window per model, and one enforced budget derived from it:
 
 | field | value | what it is |
 | --- | --- | --- |
-| `context_window` | 320,000 | DeepAI's own `contextWindow` from `/deepai_code/models`, the number the desktop app compacts against |
+| `context_window` | `model.contextWindow` | DeepAI's own `contextWindow` from `/deepai_code/models`, the number the desktop app compacts against |
 
-`320000` is the number the desktop app reads out of the same catalog and spreads into its model
-config (`decodeDeepAIModels`, then `deepAIPiModels` passes the entry through unchanged), and it
-compacts at `contextWindow - reserveTokens` - which is where its observed 290,000-token compactions
-come from. Since a warm conversation of that size is served, that is the honest number to publish:
-a harness applying the app's own rule compacts where the app does.
+The desktop app reads that catalog entry and spreads it into its model config unchanged, and it
+compacts at `contextWindow - reserveTokens`. The gateway publishes the same per-model number, so a
+harness applying the app's own rule compacts where the app does. The measured 196 KB behaviour of
+a *cold* request is not a model window and is not published as one: it cannot be derived from the
+catalog, and baking it in made the gateway shorten healthy conversations. It remains a documented
+measurement and an optional operator override, not a default.
 
 **The gateway only shortens a prompt that would lose its start.** A caller sends its whole
 transcript every turn. While the fresh part fits, nothing is touched: the endpoint's prompt cache
 does the work, and the harness does its own compaction when it decides to. When a cold prompt -
-or a new tail - is past the budget, the gateway shortens it before sending, because the
+or a new tail - is past the model's budget, the gateway shortens it before sending, because the
 alternative is not a refusal from DeepAI but a `200` with the front silently gone. The rewrite
 lives in `deepai/fit.js`, happens only on that request, and does only as much as the budget
 needs:
 
-1. one message larger than its allowance (40,000 characters, 50,000 for a tool result) keeps its
-   head and tail and gets a `[gateway: N characters omitted here ...]` note where the middle was;
+1. one message larger than its share keeps its head and tail and gets a
+   `[gateway: N characters omitted here ...]` note where the middle was;
 2. if that is not enough, the middle turns are summarized into a checkpoint by a free catalog
    model, in the shape the DeepAI Code app uses for its own compactions; the goal at the head and
-   the newest ~60 KB of work stay verbatim;
+   the newest share of work stay verbatim;
 3. if the summary call fails, those turns are dropped, again with a note, so the request is served
    rather than refused.
 
@@ -307,15 +309,18 @@ without use.
 
 #### What it enforces is the fresh part
 
-The budget is 176,400 bytes - 90% of the 196 KB wall, the same rule DeepAI Code applies to its own
-context, compacting before the limit rather than after it - and it is measured on what the endpoint
-has to read for this request: the messages after the last one the conversation's remembered tail
-covers, serialized as they are sent. On a cold conversation that is the whole serialized body, tools
-and JSON framing included, which is what the budget always measured. On a warm one it is the new
-tail, measured through the same body serializer so the tool catalog and framing are counted too;
-a conversation of any total size is forwarded untouched while that fits. `PROMPT_BUDGET_BYTES`
-moves the budget without a code change; a value that is not a positive whole number falls back to
-the default, because a typo must not turn the guard off.
+The budget is derived per request from the selected model's catalog entry:
+`(contextWindow - maxTokens) * CHARS_PER_TOKEN`, the same shape the desktop app uses when it
+compacts at `contextWindow - reserveTokens`. There is no gateway constant to update when DeepAI
+changes a model, and no default number to go stale. `PROMPT_BUDGET_BYTES` is an optional explicit
+override for a deployment that measured a tighter limit; unset or invalid means "use the model",
+never "fall back to the old 176,400".
+
+The budget is measured on what the endpoint has to read for this request: the messages after the
+last one the conversation's remembered tail covers, serialized as they are sent. On a cold
+conversation that is the whole serialized body, tools and JSON framing included. On a warm one it
+is the new tail, measured through the same body serializer so the tool catalog and framing are
+counted too; a conversation of any total size is forwarded untouched while that fits.
 
 A request whose fresh part is past the budget is shortened before it goes upstream, as above. Only
 if even the shortened prompt cannot fit - the current turn alone is larger than the budget, or the
@@ -326,9 +331,9 @@ contract:
 {
   "error": {
     "message": "This request asks DeepAI to read 200,041 bytes of prompt fresh, even after the
-                gateway compacted it, and its current turn alone is larger than the 176,400-byte
-                budget. Past about 196,000 bytes the endpoint silently discards the start of a
-                fresh prompt; the x-gateway-prompt header on this refusal carries the numbers.",
+                gateway compacted it, and this model's catalog window allows at most 189,440
+                bytes fresh. The current turn alone is larger than that budget, so compacting
+                the conversation cannot help; the x-gateway-prompt header carries the numbers.",
     "type": "invalid_request_error",
     "code": "context_length_exceeded",
     "param": null
@@ -354,21 +359,21 @@ The same facts ride on every answer in an `x-gateway-prompt` header, semicolon-s
 | `received` | bytes of prompt text that arrived |
 | `body` | bytes of the serialized upstream body, tools included |
 | `fresh` | bytes the endpoint has to read rather than serve from cache: the whole body when cold, the new tail when warm. What the budget is measured on |
-| `window` | the token window DeepAI declares, `320000` |
-| `budget` | that window in characters, `1280000` |
-| `wall` | the measured byte wall, `196000` |
-| `budget-bytes` | the byte budget on the fresh part, `176400` unless `PROMPT_BUDGET_BYTES` says otherwise |
+| `window` | the token window DeepAI's catalog declares for this model, or `unknown` |
+| `budget` | that window in characters, or `unknown` |
+| `budget-bytes` | the byte budget on the fresh part: the model's window less its output allowance, or `PROMPT_BUDGET_BYTES` when set |
 | `trim` | how the request was shortened: `none`, or a combination of `cut<n>`, `compact<n>`, `drop<n>` |
 | `reused` | `yes` when the request continued a session the endpoint should already have cached |
 
-The Models page still shows the window each model declares, `320.0k`, because that page is the
-catalog; `/v1/models` publishes the same number, because it is the one a harness should compact
-against.
+The Models page shows the window each model declares, because that page is the catalog;
+`/v1/models` publishes the same per-model number, because it is the one a harness should compact
+against. A model whose catalog entry has no window is shown without one rather than with a
+made-up fallback.
 
 One failure is left that the gateway cannot prevent after the fact, and the signal for it is the
 endpoint's own accounting rather than the gateway's expectation: a request whose body is past the
-wall and whose answer reports **no cache hit at all** was read fresh in full, so its front may have
-been dropped. That happens when an operator raises `PROMPT_BUDGET_BYTES` above the wall, or when a
+model's budget and whose answer reports **no cache hit at all** was read fresh in full, so its front
+may have been dropped. That happens when an operator sets a larger `PROMPT_BUDGET_BYTES`, or when a
 server-side cache expires under a conversation this gateway still believes is warm. Nothing in the
 answer says so and nothing is retried, but an operator can see it:
 
@@ -588,19 +593,19 @@ The price shown is `theosPerRequest`, which is what DeepAI charges per call.
 
 ### The window published is the one a harness should compact against
 
-`/v1/models` publishes `context_window` as `320000`: DeepAI's own catalog figure, and what this
-gateway actually serves - a conversation whose prefix is in the endpoint's prompt cache is
-forwarded however large it is, so a warm 290,000-token chat works here as it works in the app.
-`/v1/models/details` carries the same field, because it is a JSON endpoint any key holder can call,
-not a dashboard-only view.
+`/v1/models` publishes `context_window` as the selected model's own `contextWindow` from the
+catalog, and what this gateway actually serves - a conversation whose prefix is in the endpoint's
+prompt cache is forwarded however large it is, so a warm chat of that size works here as it works
+in the app. `/v1/models/details` carries the same field, because it is a JSON endpoint any key
+holder can call, not a dashboard-only view. There is no local 320,000 fallback: if the catalog did
+not send a window, the field is omitted.
 
-What is shortened, on the request path, is something else: a *cold* prompt - or a new tail - larger
-than 176,400 bytes, because past about 196 KB of prompt the endpoint has to read it silently drops
-the front. The gateway compacts it before sending, rather than handing DeepAI a prompt it will
-truncate. A warm conversation is never shortened for its size. Keeping the conversation on one
-session is what makes that distinction hold, and a harness compaction is the case it exists for.
-The measurements and the mechanism are in **"The context window: 320,000, and the 196 KB a prompt
-costs when it is read fresh"** above.
+What is shortened, on the request path, is a *cold* prompt - or a new tail - larger than the
+budget derived from that model's window. The gateway compacts it before sending, rather than
+handing DeepAI a prompt that may lose its front. A warm conversation is never shortened for its
+size. Keeping the conversation on one session is what makes that distinction hold, and a harness
+compaction is the case it exists for. The measurements and the mechanism are in **"What a cold
+prompt costs: the measured wall at about 196 KB"** above.
 
 
 ### Log in / log out
@@ -889,7 +894,7 @@ hardcode them:
   "reasoning_levels": ["none", "low", "medium", "high"],
   "input_modalities": ["text", "image"],
   "output_modalities": ["text"],
-  "context_window": 320000,
+  "context_window": 1048576,
   "max_output_tokens": 131072,
   "api": "openai-completions",
   "credits_per_second": { "none": "0", "low": "0", "medium": "0", "high": "0" },
@@ -1431,10 +1436,9 @@ turn - see [Performance](#performance)).
 - Images are forwarded to models whose catalog entry declares `image` input, and replaced by a
   note in the text for models that do not - or that refused one in the last 15 minutes. See
   [Images](#images).
-- A *cold* prompt, or a new tail, larger than 176,400 bytes is shortened before it is sent: past
-  about 196 KB of prompt it has to read fresh, the endpoint silently drops the front. A warm
-  conversation is never shortened for its size. A single turn that still cannot fit is refused with
-  `context_length_exceeded`. See
+- A *cold* prompt, or a new tail, larger than the selected model's catalog budget is shortened
+  before it is sent; a warm conversation is never shortened for its size. A single turn that still
+  cannot fit is refused with `context_length_exceeded`. See
   [the fresh part](#what-it-enforces-is-the-fresh-part).
 - At most 5 gateway keys per account.
 - The dashboard has no password of its own: authentication *is* the DeepAI account,

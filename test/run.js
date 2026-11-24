@@ -76,6 +76,13 @@ import {
  * translated string would render as its key and the text assertions below would fail for
  * the wrong reason. The real files are served instead.
  */
+/*
+ * The prompt budget these tests pin. Production derives it from each model's catalog entry, but a
+ * test needs a small, deterministic number so its conversation is actually over the line; this is
+ * a fixture, not a default the gateway falls back to.
+ */
+const TEST_PROMPT_BUDGET = 176_400;
+
 const LOCALE_CODES = ['en', 'pl', 'de', 'es', 'hi'];
 const LOCALE_PATH = (code) => new URL(`../public/locales/${code}.json`, import.meta.url);
 
@@ -887,7 +894,7 @@ await checkAsync('app mounts; /healthz is minimal and /v1/models requires a key'
       const free = details.data.find((model) => model.id === 'glm-5.3-flash');
       assert.equal(free.tier, 'free');
       assert.equal(free.displayName, 'GLM 5.3 Flash Free');
-      assert.equal(free.context_window, 320_000, 'the details view publishes the same window');
+      assert.equal(free.context_window, 1_048_576, 'the details view publishes the catalog window');
       assert.equal(free.context_window_claimed, undefined, 'and no second number beside it');
 
       const unauthorized = await fetch(`${base}/v1/chat/completions`, {
@@ -1383,17 +1390,12 @@ await checkAsync('/v1/models carries modalities, reasoning levels and names', as
     assert.deepEqual(free.output_modalities, ['text']);
     assert.deepEqual(free.reasoning_levels, ['none', 'low', 'medium', 'high']);
     /*
-     * The window published is DeepAI's own 320,000, unchanged: it is what the desktop app reads
-     * out of the same catalog and compacts against (`contextWindow - reserveTokens`, which is
-     * where its observed ~290,000-token compactions come from), and it is what this gateway
-     * serves - a conversation whose prefix is in the endpoint's prompt cache is forwarded however
-     * large it is. A smaller published window would make harnesses compact for nothing.
-     *
-     * The real limit is not a window and is not on the whole conversation: it is about 196 KB of
-     * prompt the endpoint has to read FRESH, which is enforced on the request path (see
-     * `src/deepai/window.js`). There is no second, smaller window for a client to trip over.
+     * The window published is the one in DeepAI's catalog for this model. It is what the desktop
+     * app reads out of the same catalog and compacts against (`contextWindow - reserveTokens`),
+     * and it is what this gateway serves. There is no local 320,000 fallback and no separately
+     * advertised byte wall: a harness should compact against the same number the app does.
      */
-    assert.equal(free.context_window, 320_000, 'the window is the catalog\'s own, not a smaller one');
+    assert.equal(free.context_window, 1_048_576, 'the window is the catalog\'s own');
     assert.equal(free.context_window_claimed, undefined, 'and there is no second number beside it');
     assert.equal(free.prompt_limit_bytes, undefined, 'no separately enforced byte wall is advertised');
     assert.ok(free.max_output_tokens > 0);
@@ -4450,7 +4452,7 @@ await checkAsync('the text-only retry after an image refusal is measured too', a
  * Several accounts can be signed in at once, which is how the isolation cases get two keys on one
  * gateway.
  */
-async function deepaiGateway({ usernames = ['prompt-user'], budget, usage, respond } = {}) {
+async function deepaiGateway({ usernames = ['prompt-user'], budget = TEST_PROMPT_BUDGET, usage, respond } = {}) {
   const { openDatabase } = await import('../src/db.js');
   const { saveAccount } = await import('../src/store.js');
   const { generateKey } = await import('../src/keys.js');
@@ -4540,14 +4542,14 @@ function gatewayPrompt(response) {
 
 await checkAsync('a cold prompt past the fresh budget is shortened visibly, not silently truncated', async () => {
   /*
-   * A cold conversation has to be read whole, so its whole body is the fresh part. Past about
-   * 196 KB of fresh prompt the endpoint does not refuse anything - it answers from the part it
-   * kept, usually the tail, with a normal 200 - which from a caller is a model that has forgotten
-   * the conversation. So the gateway shortens it before it leaves, and says so in the prompt and
-   * on `x-gateway-prompt`: a visible cut is the difference between a model that knows its history
-   * was condensed and one that silently lost it.
+   * A cold conversation has to be read whole, so its whole body is the fresh part. Past the
+   * endpoint's fresh-prompt limit it does not refuse anything - it answers from the part it kept,
+   * usually the tail, with a normal 200 - which from a caller is a model that has forgotten the
+   * conversation. The budget here is pinned low by the test fixture; production derives it from
+   * the model's catalog entry. The gateway shortens it before it leaves, and says so in the prompt
+   * and on `x-gateway-prompt`: a visible cut is the difference between a model that knows its
+   * history was condensed and one that silently lost it.
    */
-  const { PROMPT_BUDGET_BYTES, PROMPT_WALL_BYTES } = await import('../src/deepai/window.js');
   const gateway = await deepaiGateway();
   try {
     const cold = [{ role: 'user', content: 'x'.repeat(200_000) }];
@@ -4556,17 +4558,16 @@ await checkAsync('a cold prompt past the fresh budget is shortened visibly, not 
     assert.equal(answered.status, 200, 'the request is served, not refused');
     assert.equal(gateway.sent.length, 1, 'exactly one request reaches upstream');
     const header = gatewayPrompt(answered);
-    assert.ok(header.fresh <= PROMPT_BUDGET_BYTES, `the fresh body fits the budget: ${header.fresh}`);
+    assert.ok(header.fresh <= TEST_PROMPT_BUDGET, `the fresh body fits the budget: ${header.fresh}`);
     assert.equal(header.fresh, header.body, 'a cold request reads its whole body fresh');
     assert.match(String(header.trim), /^(cut|compact|drop)/, `the header says what was shortened: ${header.trim}`);
-    assert.equal(header['budget-bytes'], PROMPT_BUDGET_BYTES);
-    assert.equal(header.wall, PROMPT_WALL_BYTES);
-    assert.equal(header.window, 320_000, 'the window DeepAI declares still rides along');
-    assert.equal(header.budget, 1_280_000, 'beside that window in characters');
+    assert.equal(header['budget-bytes'], TEST_PROMPT_BUDGET);
+    assert.equal(header.window, 1_048_576, 'the catalog window for this model rides along');
+    assert.equal(header.budget, 4_194_304, 'beside that window in characters');
     assert.equal(header.reused, 'no', 'nothing of this prompt is cached');
 
     const sent = gateway.sent[0];
-    assert.ok(sent.bytes <= PROMPT_WALL_BYTES, `the body that left is under the wall: ${sent.bytes}`);
+    assert.ok(sent.bytes <= TEST_PROMPT_BUDGET, `the body that left is under the budget: ${sent.bytes}`);
     assert.match(sent.raw, /characters omitted here/, 'the oversized message says where its middle went');
 
     const row = gateway.db.prepare('SELECT status, ok, error_code FROM usage ORDER BY rowid DESC LIMIT 1').get();
@@ -4788,61 +4789,35 @@ await checkAsync('a fact in the middle of a long conversation survives the check
 
 await checkAsync('a request the endpoint truncated anyway is visible in the log', async () => {
   /*
-   * Every path through the handler keeps a *fresh* prompt under the wall, so the requests that can
-   * still be truncated are the ones where the gateway's idea of the cache was wrong: an operator
-   * raised `PROMPT_BUDGET_BYTES` above the wall, or a server-side cache expired under a
-   * conversation this gateway still believes is warm. The signal is therefore the endpoint's own
-   * accounting - a body past the wall answered with no cache hit at all - and not the `reused`
-   * flag. Nothing in the answer says the front was dropped, so the log names it instead: that is
-   * the failure the gateway cannot prevent after the fact, and an operator should find it.
+   * The request that can still be truncated is one where the gateway believes the session is warm
+   * and the endpoint disagrees because its cache expired. The signal is therefore the endpoint's
+   * own accounting - a whole body past the budget answered with no cache hit at all - and not the
+   * `reused` flag. Nothing in the answer says the front was dropped, so the log names it instead:
+   * that is the failure the gateway cannot prevent after the fact, and an operator should find it.
    */
-  const { PROMPT_WALL_BYTES } = await import('../src/deepai/window.js');
-  const gateway = await deepaiGateway({
-    budget: 400_000,
-    // The endpoint's own accounting, and it says nothing was cached: the whole body was read fresh.
-    usage: { prompt_tokens: 300, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 0 } },
-  });
-  try {
-    const answer = await gateway.ask([{ role: 'user', content: 'x'.repeat(300_000) }]);
-    assert.equal(answer.status, 200, 'the raised budget forwards it');
-    const header = gatewayPrompt(answer);
-    assert.ok(header.body > PROMPT_WALL_BYTES, 'and the body is past the wall');
-    assert.equal(header.reused, 'no', 'on a cold session');
-    const suspect = gateway.lines.find((line) => line.includes('truncation-suspect'));
-    assert.ok(suspect !== undefined, `the log names it: ${gateway.lines.join(' | ')}`);
-    assert.match(suspect, /^truncation-suspect session=[0-9a-f]{8} reused=(yes|no) body=\d+B fresh=\d+B$/);
-    assert.ok(suspect.includes(`body=${header.body}B`), `with the body it carried: ${suspect}`);
-    assert.equal(suspect.includes('reused=no'), true, 'and says the gateway thought it was cold');
-  } finally {
-    await gateway.close();
-  }
-
-  /*
-   * The other way it happens: the gateway believes the session is warm and the endpoint disagrees,
-   * because its cache expired. Same log line, `reused=yes` - and a cache hit that really came back
-   * is not this case, however large the body.
-   */
+  const raisedBudget = 400_000;
   const expired = await deepaiGateway({
-    budget: 400_000,
+    budget: raisedBudget,
     usage: { prompt_tokens: 300, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 0 } },
   });
   try {
     await expired.ask([
-      { role: 'user', content: 'first turn' },
-      { role: 'assistant', content: 'first answer' },
-      { role: 'user', content: 'second turn' },
+      { role: 'user', content: `read this ${'a'.repeat(149_990)}` },
+      { role: 'assistant', content: `it says ${'b'.repeat(149_990)}` },
+      { role: 'user', content: 'go on' },
     ]);
     const warm = await expired.ask([
-      { role: 'user', content: 'first turn' },
-      { role: 'assistant', content: 'first answer' },
-      { role: 'user', content: 'second turn' },
-      { role: 'assistant', content: 'second answer' },
-      { role: 'user', content: 'x'.repeat(300_000) },
+      { role: 'user', content: `read this ${'a'.repeat(149_990)}` },
+      { role: 'assistant', content: `it says ${'b'.repeat(149_990)}` },
+      { role: 'user', content: 'go on' },
+      { role: 'assistant', content: `done ${'c'.repeat(59_990)}` },
+      { role: 'user', content: `and then ${'d'.repeat(59_990)}` },
     ]);
     assert.equal(warm.status, 200, 'a warm tail inside the raised budget is forwarded');
     const warmHeader = gatewayPrompt(warm);
     assert.equal(warmHeader.reused, 'yes', 'the session really was warm');
-    assert.ok(warmHeader.body > PROMPT_WALL_BYTES, `and the body is past the wall: ${warmHeader.body}`);
+    assert.ok(warmHeader.body > raisedBudget, `and the body is past the budget: ${warmHeader.body}`);
+    assert.ok(warmHeader.fresh < raisedBudget, 'while only the new tail is fresh');
     const expiredLine = expired.lines.find((line) => line.includes('truncation-suspect'));
     assert.ok(expiredLine !== undefined, `the log names it: ${expired.lines.join(' | ')}`);
     assert.equal(expiredLine.includes('reused=yes'), true,
@@ -4872,7 +4847,6 @@ await checkAsync('a warm conversation is forwarded whole however large it is, on
    * is cut, and the second turn goes out under the same session id as the first - which is what
    * makes it warm.
    */
-  const { PROMPT_BUDGET_BYTES, PROMPT_WALL_BYTES } = await import('../src/deepai/window.js');
   const gateway = await deepaiGateway();
   const system = { role: 'system', content: 'You are a coding agent.' };
   const turn1 = [
@@ -4890,16 +4864,16 @@ await checkAsync('a warm conversation is forwarded whole however large it is, on
     const first = await gateway.ask(turn1);
     assert.equal(first.status, 200, 'the first turn is inside the budget');
     const firstHeader = gatewayPrompt(first);
-    assert.ok(firstHeader.body < PROMPT_BUDGET_BYTES, `and its body proves it: ${firstHeader.body}`);
+    assert.ok(firstHeader.body < TEST_PROMPT_BUDGET, `and its body proves it: ${firstHeader.body}`);
     assert.equal(firstHeader.reused, 'no', 'there is nothing cached for it yet');
 
     const second = await gateway.ask(turn2);
-    assert.equal(second.status, 200, 'a body past the wall is answered when the session is warm');
+    assert.equal(second.status, 200, 'a body past the budget is answered when the session is warm');
     const header = gatewayPrompt(second);
-    assert.ok(header.body > PROMPT_WALL_BYTES,
-      `the body is past the wall (${header.body} > ${PROMPT_WALL_BYTES})`);
-    assert.ok(header.fresh < PROMPT_BUDGET_BYTES,
-      `but only the new tail is fresh (${header.fresh} < ${PROMPT_BUDGET_BYTES})`);
+    assert.ok(header.body > TEST_PROMPT_BUDGET,
+      `the body is past the budget (${header.body} > ${TEST_PROMPT_BUDGET})`);
+    assert.ok(header.fresh < TEST_PROMPT_BUDGET,
+      `but only the new tail is fresh (${header.fresh} < ${TEST_PROMPT_BUDGET})`);
     assert.equal(header.reused, 'yes', 'and the header says the session is warm');
 
     assert.equal(gateway.sent.length, 2, 'both turns reached DeepAI');
@@ -5080,23 +5054,44 @@ await checkAsync('a caller-supplied x-session-id always wins, and is reused verb
   }
 });
 
-await checkAsync('the fresh budget is configuration, and a bad value falls back to the default', async () => {
+await checkAsync('a request without an override takes its budget from the model catalog', async () => {
   /*
-   * How much of the endpoint's wall a deployment is willing to use is an operator question, so it
-   * is settable without a code change. A value that is not a positive whole number falls back to
-   * the measured default rather than to no limit: a typo in the environment must not turn off the
-   * guard between a caller and a silently truncated conversation.
+   * The production path: no PROMPT_BUDGET_BYTES, no test fixture. The catalog entry for this model
+   * declares 1,048,576 tokens of context and 131,072 of output, so the budget is the remaining
+   * 917,504 tokens in characters. A 200 KB prompt is nowhere near it and must go out untouched -
+   * the old 176,400-byte default would have cut it.
+   */
+  const gateway = await deepaiGateway({ budget: null });
+  try {
+    const answer = await gateway.ask([{ role: 'user', content: 'x'.repeat(200_000) }]);
+    assert.equal(answer.status, 200, 'the model budget accepts what the old fixture cut');
+    const header = gatewayPrompt(answer);
+    assert.equal(header.window, 1_048_576, 'the catalog window rides along');
+    assert.equal(header['budget-bytes'], (1_048_576 - 131_072) * 4,
+      'and the enforced budget is that window less the model output allowance');
+    assert.equal(header.trim, 'none', 'so nothing is shortened');
+    assert.equal(gateway.sent.length, 1, 'exactly one request reaches upstream');
+  } finally {
+    await gateway.close();
+  }
+});
+
+await checkAsync('the fresh budget is configured or comes from the model, never a constant', async () => {
+  /*
+   * How much of a model's window a deployment is willing to use is an operator question, so it is
+   * settable without a code change. Unset is not "the old 176,400": it means the request path uses
+   * the selected model's catalog entry. A value that is not a positive whole number is ignored for
+   * the same reason - a typo must not replace a fresh catalog window with a stale constant.
    */
   const { config } = await import('../server.js');
-  const { PROMPT_BUDGET_BYTES: MEASURED } = await import('../src/deepai/window.js');
 
-  assert.equal(MEASURED, 176_400, 'the default is the measured 90% of the wall');
-  assert.equal(config({}).promptBudgetBytes, MEASURED, 'a fresh clone gets the measured budget');
+  assert.equal(config({}).promptBudgetBytes, undefined,
+    'unset means the selected model supplies the budget');
   assert.equal(config({ PROMPT_BUDGET_BYTES: '200000' }).promptBudgetBytes, 200_000,
-    'and an operator can tune it');
+    'and an operator can set an explicit override');
   for (const value of ['', '   ', 'abc', '0', '-1', '176400.5', '12 bytes']) {
-    assert.equal(config({ PROMPT_BUDGET_BYTES: value }).promptBudgetBytes, MEASURED,
-      `PROMPT_BUDGET_BYTES=${JSON.stringify(value)} is not a budget, so the default stands`);
+    assert.equal(config({ PROMPT_BUDGET_BYTES: value }).promptBudgetBytes, undefined,
+      `PROMPT_BUDGET_BYTES=${JSON.stringify(value)} is not a budget, so the model supplies it`);
   }
 
   /* And it is the number that binds, through the same path `createApp` takes it from. */
@@ -5105,8 +5100,11 @@ await checkAsync('the fresh budget is configuration, and a bad value falls back 
     assert.equal((await gateway.ask([{ role: 'user', content: 'x'.repeat(1_000) }])).status, 200,
       'a lowered budget forwards what fits it');
     const over = await gateway.ask([{ role: 'user', content: 'y'.repeat(3_000) }]);
-    assert.equal(over.status, 400, 'and refuses what does not');
-    assert.equal(gatewayPrompt(over)['budget-bytes'], 2_000, 'the configured budget is the one enforced');
+    assert.equal(over.status, 200, 'and shortens what does not fit');
+    const overHeader = gatewayPrompt(over);
+    assert.equal(overHeader['budget-bytes'], 2_000, 'the configured budget is the one enforced');
+    assert.ok(overHeader.fresh <= 2_000, `the fresh part fits it: ${overHeader.fresh}`);
+    assert.match(String(overHeader.trim), /^cut/, 'and the caller is told it was shortened');
   } finally {
     await gateway.close();
   }

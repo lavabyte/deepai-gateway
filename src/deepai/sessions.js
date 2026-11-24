@@ -11,8 +11,8 @@
  * Deriving the id from the transcript opening (`conversationId`) keeps it stable from turn to
  * turn - until the harness compacts, replacing the opening with a summary, or rewrites its
  * system prompt, which harnesses do (date, cwd, model name). Then the id changes, the endpoint
- * has no cache for it, the whole multi-megabyte transcript has to be read fresh, and everything
- * past about 196 KB of fresh prompt is silently discarded from the front (see
+ * has no cache for it, the whole multi-megabyte transcript has to be read fresh, and a prompt
+ * past the endpoint's limit for a cold request has its front silently discarded (see
  * `deepai/window.js`). From a caller that looks like a working conversation answered as though
  * it had just been opened.
  *

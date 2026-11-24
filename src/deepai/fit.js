@@ -1,15 +1,14 @@
 /**
- * Make a prompt fit the part of DeepAI's wall this gateway sends fresh.
+ * Make a prompt fit the budget the model's catalog entry gives it.
  *
- * The endpoint does not refuse a prompt that is too large: past about 196 KB of body it reads
- * what it kept - usually the tail - and answers with a normal 200, so a caller sees a model that
- * has forgotten the start of a working conversation. The app avoids that by compacting before its
- * context fills; this module does the same thing before the request leaves the gateway, but only
- * when the fresh part of the prompt would cross the wall.
+ * There is no fixed byte wall here. A model's budget comes from its own `contextWindow` and
+ * `maxTokens` (see `deepai/window.js`), so a catalog change moves the budget without a code
+ * change. When the caller has set `PROMPT_BUDGET_BYTES`, that explicit operator value wins for
+ * deployments that measured a tighter limit on their own endpoint.
  *
- * Three rules, in order, and only for a prompt that is already over the line:
+ * Three rules, in order, and only for a prompt that is already over its budget:
  *
- * 1. A single message larger than its allowance keeps its head and tail, with a note where the
+ * 1. A single message larger than its share keeps its head and tail, with a note where the
  *    middle was. A file read is most useful at its start, a build log at its end.
  * 2. The turns between the goal and the most recent work are summarized into a checkpoint by a
  *    free model, in the same format the DeepAI Code app uses for its own compactions.
@@ -24,20 +23,17 @@
  */
 
 import { compactMessages } from './compaction.js';
-import { PROMPT_BUDGET_BYTES, PROMPT_WALL_BYTES } from './window.js';
 
-/** One tool result keeps its start and its end, and says what it lost in between. */
-const TOOL_RESULT_CHARS = 50_000;
-
-/** And so does one message that is not a tool result: a pasted file, a whole test log. */
-const MESSAGE_CHARS = 40_000;
-
-/** Room kept aside for the sentence that tells the model its conversation was shortened. */
-const NOTE_RESERVE_BYTES = 800;
-
-/** How much recent work a compaction keeps verbatim, and how much room it leaves for the checkpoint. */
-const KEEP_RECENT_BYTES = 60_000;
-const SUMMARY_RESERVE_BYTES = 16_000;
+/*
+ * These are shares of the budget, not context sizes. They decide how much of a model's own
+ * window one message may keep and how much recent work survives verbatim; the budget itself is
+ * always the model entry or the operator's explicit override.
+ */
+const NOTE_SHARE = 0.005;
+const KEEP_RECENT_SHARE = 0.34;
+const SUMMARY_RESERVE_SHARE = 0.09;
+const TOOL_ALLOWANCE_SHARE = 0.28;
+const MESSAGE_ALLOWANCE_SHARE = 0.23;
 
 const textOf = (message) => {
   const content = message?.content;
@@ -59,8 +55,8 @@ const textOf = (message) => {
  */
 function middleCut(text, keep) {
   if (text.length <= keep) return text;
-  const note = (omitted) => `\n\n[gateway: ${omitted.toLocaleString('en-US')} characters omitted here - `
-    + `DeepAI Code reads about ${PROMPT_WALL_BYTES.toLocaleString('en-US')} bytes of prompt per request]\n\n`;
+  const note = (omitted) => `\n\n[gateway: ${omitted.toLocaleString('en-US')} characters omitted here `
+    + `to fit the model's prompt budget]\n\n`;
   let room = Math.max(2, keep - note(text.length).length);
   let fitted = Math.max(2, keep - note(text.length - room).length);
   if (fitted !== room) {
@@ -112,11 +108,10 @@ function checkpointMessage(count, removed, summary) {
   return {
     role: 'user',
     content: `[gateway: ${count} earlier messages (${bytes.toLocaleString('en-US')} bytes) were `
-      + `compacted into the checkpoint below - they were not dropped. DeepAI Code reads about `
-      + `${PROMPT_WALL_BYTES.toLocaleString('en-US')} bytes of prompt per request, so the part of `
-      + `this conversation that no longer fits was summarized by the model itself, in the same format `
-      + `the DeepAI Code app uses for its own compactions. Treat the checkpoint as the history of the `
-      + `work already done.]\n\n${summary}`,
+      + `compacted into the checkpoint below - they were not dropped. The part of this conversation `
+      + `that no longer fits the model's prompt budget was summarized by the model itself, in the same `
+      + `format the DeepAI Code app uses for its own compactions. Treat the checkpoint as the history `
+      + `of the work already done.]\n\n${summary}`,
   };
 }
 
@@ -154,7 +149,7 @@ async function checkpointFor(context, units) {
 }
 
 /**
- * Shorten a conversation until the fresh part DeepAI has to read fits its wall.
+ * Shorten a conversation until the fresh part DeepAI has to read fits its budget.
  *
  * @param {Array<object>} messages - OpenAI-shaped messages.
  * @param {object} options
@@ -173,14 +168,30 @@ export async function fitPrompt(messages, options = {}) {
   const measure = typeof options.measure === 'function'
     ? options.measure
     : (list) => Buffer.byteLength(JSON.stringify(list), 'utf8');
+  /*
+   * No local default. Without a catalog window or an operator override there is no number this
+   * gateway can honestly call the model's budget, so it forwards the prompt as the caller wrote
+   * it instead of inventing one.
+   */
   const budgetBytes = Number.isInteger(options.budgetBytes) && options.budgetBytes > 0
     ? options.budgetBytes
-    : PROMPT_BUDGET_BYTES;
-  const room = Math.max(2_000, budgetBytes - NOTE_RESERVE_BYTES);
-  const target = Math.min(room, KEEP_RECENT_BYTES + SUMMARY_RESERVE_BYTES);
+    : undefined;
+  if (budgetBytes === undefined) {
+    return {
+      messages: Array.isArray(messages) ? [...messages] : [],
+      trimmed,
+    };
+  }
 
-  /** What one message may keep: a tool result has more room than a message because it is output. */
-  const allowance = (message) => (message?.role === 'tool' ? TOOL_RESULT_CHARS : MESSAGE_CHARS);
+  const noteReserve = Math.max(1, Math.floor(budgetBytes * NOTE_SHARE));
+  const room = Math.max(1, budgetBytes - noteReserve);
+  const keepRecentBytes = Math.max(1, Math.floor(room * KEEP_RECENT_SHARE));
+  const summaryReserveBytes = Math.max(1, Math.floor(room * SUMMARY_RESERVE_SHARE));
+  const target = Math.min(room, keepRecentBytes + summaryReserveBytes);
+
+  /** What one message may keep, as a share of this model's budget. */
+  const allowance = (message) => Math.max(1, Math.floor(room
+    * (message?.role === 'tool' ? TOOL_ALLOWANCE_SHARE : MESSAGE_ALLOWANCE_SHARE)));
 
   // The system prompt is the standing instruction, never a turn to be dropped.
   const head = [];
@@ -219,7 +230,7 @@ export async function fitPrompt(messages, options = {}) {
     for (let index = units.length - 1; index >= 1; index -= 1) {
       total += unitBytes(units[index]);
       start = index;
-      if (total >= KEEP_RECENT_BYTES) break;
+      if (total >= keepRecentBytes) break;
     }
     return start;
   };
@@ -305,8 +316,7 @@ export async function fitPrompt(messages, options = {}) {
     if (trimmed.cut > 0) parts.push(`${trimmed.cut} oversized messages were shortened`);
     final = [...head, {
       role: 'user',
-      content: `[gateway: ${parts.join(' and ')} to fit DeepAI Code's prompt limit of about `
-        + `${PROMPT_WALL_BYTES.toLocaleString('en-US')} bytes per request]`,
+      content: `[gateway: ${parts.join(' and ')} to fit the model's prompt budget]`,
     }, ...final.slice(head.length)];
   }
   return { messages: final, trimmed };
