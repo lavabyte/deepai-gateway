@@ -718,8 +718,28 @@ The gateway allows **at most 5 keys**. Create keys with:
   **All models** and **Clear** quick actions. *All models* is an unrestricted
   key that also covers models DeepAI adds later; *Clear* allows nothing.
 
+Editing a key shows the selected models twice: the pills are marked as pressed, and
+a line below them names every selection. A model that has since disappeared from the
+catalog stays in the list by its id, so saving an edit cannot silently drop it.
+
 The form hides anything that does not apply, so it only ever shows decisions
 that matter.
+
+### When a key expires
+
+An expiry date is a status, not a deletion. The key stays in the list with
+`expired` next to it and its usage stays attached. Requests carrying it are
+refused with HTTP 401 and `key_expired`.
+
+An expired key is still one of the five keys, so it keeps its slot until it is
+revoked or its date is moved into the future. Extending the date revives the same
+key; nothing has to be recreated. The editor says when a past date has made the key
+inactive.
+
+There is no automatic tombstone or cleanup pass. Revoking is the one destructive
+action, and it deletes the key outright - see below. The old soft-revoke code was
+removed on purpose: keeping a tombstone added a second destructive action and rows
+that only ever accumulated.
 
 ### Revoking a key deletes it
 

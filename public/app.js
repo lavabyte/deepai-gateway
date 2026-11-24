@@ -1953,10 +1953,22 @@ async function renderKeys() {
     return `<span class="badge ${map[status] ?? 'badge--gray'}"><span class="dot"></span>${esc(t(`status.${status}`))}</span>`;
   };
 
+  const modelNames = (ids) => ids.map((id) => (
+    state.models.find((model) => model.id === id)?.displayName ?? id
+  ));
+
   const modelCell = (key) => {
     if (key.modelsRestricted !== true) return `<span class="tiny muted">${t('common.allModels')}</span>`;
     if (key.allowedModels.length === 0) return `<span class="badge badge--red">${t('common.none')}</span>`;
-    return `<span class="tiny muted">${counted('metric.allowed', key.allowedModels.length)}</span>`;
+    /*
+     * The count alone made a restricted key look the same whichever models it held. The names
+     * are shown for the first two, and the rest stay behind the title, so a table row stays a
+     * row rather than turning into the key's whole allow-list.
+     */
+    const names = modelNames(key.allowedModels);
+    const shown = names.slice(0, 2).join(', ');
+    const more = names.length > 2 ? ` +${names.length - 2}` : '';
+    return `<span class="tiny muted" title="${esc(names.join(', '))}">${esc(shown)}${esc(more)}</span>`;
   };
 
   const row = (key) => `
@@ -2119,8 +2131,25 @@ function openKeyModal(existing, onDone) {
   const expiryDate = document.createElement('input');
   expiryDate.className = 'input';
   expiryDate.type = 'date';
-  if (existing?.expiresAt) expiryDate.value = new Date(existing.expiresAt).toISOString().slice(0, 10);
+  const originalExpiryDate = existing?.expiresAt
+    ? new Date(existing.expiresAt).toISOString().slice(0, 10)
+    : '';
+  if (existing?.expiresAt) expiryDate.value = originalExpiryDate;
   const expiryField = field(t('form.expiryDate'), expiryDate, t('form.expiryHint'));
+
+  /*
+   * A date field has no time, so a new expiry means the end of that day. An existing expiry
+   * keeps its exact instant while the displayed date is unchanged: without this, opening an
+   * expired key and pressing Save would quietly move its expiry to 23:59 and revive it.
+   */
+  const expiryAt = () => {
+    if (expiryMode.value !== 'date' || expiryDate.value === '') return null;
+    if (existing?.expiresAt !== null && existing?.expiresAt !== undefined
+        && expiryDate.value === originalExpiryDate) {
+      return existing.expiresAt;
+    }
+    return new Date(`${expiryDate.value}T23:59:59`).getTime();
+  };
 
   // --- Models -------------------------------------------------------------
   // Free models are preselected: a new key is useful immediately, and the
@@ -2152,16 +2181,46 @@ function openKeyModal(existing, onDone) {
   const modelList = document.createElement('div');
   modelList.className = 'pill-list';
   const pills = new Map();
+  const selection = document.createElement('div');
+  selection.className = 'tiny muted mt-2';
+  selection.dataset.role = 'selected-models';
+
+  /*
+   * `data-on` paints a pill; `aria-pressed` says the same thing to a screen reader, which
+   * cannot see a colour. Both are kept in one place so a click and a quick pick cannot
+   * disagree about what is selected.
+   */
+  const paintPill = (id, pill) => {
+    const on = selected.has(id);
+    pill.dataset.on = String(on);
+    pill.setAttribute('aria-pressed', String(on));
+  };
+  const syncSelection = () => {
+    // An unrestricted key allows every model, including ones not in today's catalog.
+    if (unrestricted) {
+      selection.textContent = t('common.allModels');
+      return;
+    }
+    const names = [...selected].map((id) => {
+      const pill = pills.get(id);
+      return pill === undefined ? id : pill.textContent;
+    });
+    selection.textContent = names.length === 0
+      ? t('form.modelsSelectedNone')
+      : t('form.modelsSelected', { names: names.join(', ') });
+  };
+
   for (const model of catalog) {
     const pill = model.node.cloneNode(true);
     pill.title = t(model.premier ? 'models.pillPremium' : 'models.pillFree');
-    pill.dataset.on = String(selected.has(model.id));
+    paintPill(model.id, pill);
     pill.addEventListener('click', () => {
       // Touching any pill means an explicit list, not "every model".
       unrestricted = false;
       if (selected.has(model.id)) selected.delete(model.id);
       else selected.add(model.id);
-      pill.dataset.on = String(selected.has(model.id));
+      paintPill(model.id, pill);
+      syncSelection();
     });
     pills.set(model.id, pill);
     modelList.appendChild(pill);
@@ -2178,6 +2237,7 @@ function openKeyModal(existing, onDone) {
     modelList,
     t('form.allowedModelsHint'),
   );
+  modelsField.appendChild(selection);
 
   const quickPicks = document.createElement('div');
   quickPicks.className = 'row';
@@ -2204,7 +2264,8 @@ function openKeyModal(existing, onDone) {
   const setSelection = (ids) => {
     selected.clear();
     for (const id of ids) selected.add(id);
-    for (const [id, pill] of pills) pill.dataset.on = String(selected.has(id));
+    for (const [id, pill] of pills) paintPill(id, pill);
+    syncSelection();
   };
   freeButton.addEventListener('click', () => { unrestricted = false; setSelection(freeIds); });
   // The mirror of "select free": an explicitly billed key, for a caller that is meant to use
@@ -2217,18 +2278,36 @@ function openKeyModal(existing, onDone) {
     unrestricted = true;
     setSelection(catalog.map((model) => model.id));
   });
+  syncSelection();
 
   // --- Conditional visibility --------------------------------------------
   // Fields that cannot apply are removed from the form rather than disabled,
   // so the dialog only shows decisions that actually matter.
+  const expiryNote = document.createElement('div');
+  expiryNote.className = 'note note--warning';
+  expiryNote.textContent = t('form.expiryPassed');
+  expiryNote.hidden = true;
+
+  /*
+   * An expired key is kept, not deleted: the list still shows when it ended, the row can be
+   * extended, and the request path refuses it with `key_expired` until then. The note makes
+   * that state visible in the editor instead of leaving a past date to look like a typo.
+   */
+  const syncExpiry = () => {
+    const value = expiryAt();
+    expiryNote.hidden = value === null || !Number.isFinite(value) || value > Date.now();
+  };
+
   const syncVisibility = () => {
     const limited = window_.value !== 'unlimited';
     tokensField.hidden = !limited;
     requestsField.hidden = !limited;
     expiryField.hidden = expiryMode.value !== 'date';
+    syncExpiry();
   };
   window_.addEventListener('change', syncVisibility);
   expiryMode.addEventListener('change', syncVisibility);
+  expiryDate.addEventListener('change', syncExpiry);
   syncVisibility();
 
   const error = document.createElement('div');
@@ -2255,6 +2334,7 @@ function openKeyModal(existing, onDone) {
     requestsField,
     field(t('form.expires'), expiryMode),
     expiryField,
+    expiryNote,
     quickPicks,
     modelsField,
     error,
@@ -2271,9 +2351,7 @@ function openKeyModal(existing, onDone) {
       limitWindow: window_.value,
       limitTokens: !limited || limitTokens.value === '' ? null : Number(limitTokens.value),
       limitRequests: !limited || limitRequests.value === '' ? null : Number(limitRequests.value),
-      expiresAt: expiryMode.value === 'never'
-        ? null
-        : (expiryDate.value === '' ? null : new Date(`${expiryDate.value}T23:59:59`).getTime()),
+      expiresAt: expiryAt(),
       // "All models" means unrestricted (future models included); anything
       // else is an explicit list, and an empty list allows nothing.
       modelsRestricted: !unrestricted,

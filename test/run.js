@@ -1229,6 +1229,65 @@ await checkAsync('the gateway refuses a sixth API key', async () => {
   }
 });
 
+await checkAsync('an expired key is kept, refuses requests, and can be revived', async () => {
+  /*
+   * Expiry is not deletion. The row stays so the dashboard can say when the key ended and what
+   * it spent, and it still occupies a slot: a deployment that wants the slot back either extends
+   * the key or revokes it, which is the one destructive action. The alternative - quietly deleting
+   * the row on the next listing - would erase that history without asking.
+   */
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const session = sessionFor(fresh, 'expiry-user');
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  const call = asUser(base, session);
+
+  try {
+    const created = await call('/api/keys', {
+      method: 'POST',
+      body: {
+        name: 'old key',
+        limitWindow: 'unlimited',
+        modelsRestricted: false,
+        expiresAt: Date.now() - 60_000,
+      },
+    });
+    assert.equal(created.status, 201, 'a past expiry is accepted and makes an expired key');
+    const key = created.body.key;
+    assert.equal(key.status, 'expired');
+    assert.ok(key.expiresAt < Date.now());
+
+    const listed = await call('/api/keys');
+    assert.ok(listed.body.keys.some((row) => row.id === key.id), 'the expired key is still listed');
+    assert.equal(listed.body.quota.used, 1, 'and still holds its slot until it is revoked');
+
+    const refused = await fetch(`${base}/v1/models`, {
+      headers: { authorization: `Bearer ${created.body.plaintext}` },
+    });
+    assert.equal(refused.status, 401, 'an expired key does not authenticate');
+    const refusal = await refused.json();
+    assert.equal(refusal.error.code, 'key_expired');
+
+    // Extending the date revives the same key; nothing has to be recreated.
+    const revived = await call(`/api/keys/${key.id}`, {
+      method: 'PATCH',
+      body: { expiresAt: Date.now() + 60_000 },
+    });
+    assert.equal(revived.status, 200);
+    assert.equal(revived.body.key.status, 'active');
+    assert.ok(revived.body.key.expiresAt > Date.now());
+
+    const after = await call('/api/keys');
+    assert.equal(after.body.quota.used, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 await checkAsync('a key records its DeepAI owner and unrestricted keys allow everything', async () => {
   const fresh = openDatabase(':memory:');
   const { createApp } = await import('../server.js');
@@ -7588,13 +7647,21 @@ await checkAsync('the client reads the catalog out of the document, and never as
 
   const node = () => ({
     innerHTML: '', textContent: '', hidden: false, disabled: false, className: '',
-    dataset: {}, style: {}, value: '', children: [], content: undefined,
+    dataset: {}, style: {}, value: '', children: [], content: undefined, attrs: {},
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
     addEventListener() {}, appendChild(c) { this.children.push(c); },
     append(...c) { this.children.push(...c); }, remove() {},
     replaceChildren(...c) { this.children = Array.from(c); },
+    cloneNode() {
+      const copy = node();
+      copy.dataset = { ...this.dataset };
+      copy.textContent = this.textContent;
+      copy.className = this.className;
+      return copy;
+    },
     querySelector: () => null, querySelectorAll: () => [],
-    setAttribute() {}, getAttribute: () => null, closest: () => null,
+    setAttribute(k, v) { this.attrs[k] = v; this[k] = v; },
+    getAttribute(k) { return this.attrs[k] ?? null; }, closest: () => null,
     focus() {}, select() {}, insertAdjacentHTML() {}, scrollIntoView() {},
   });
 
@@ -7657,6 +7724,40 @@ await checkAsync('the client reads the catalog out of the document, and never as
   assert.equal(models.map((model) => model.premier).join(','), 'false,true',
     'and their tiers, which is what the badges read');
   assert.equal(models[0].displayName, 'GLM 5.3 Flash', 'and the label the picker shows');
+
+  /*
+   * Editing a restricted key must say what is selected twice: on the pills and in a line
+   * that names them. A model the catalog no longer offers has no pill, so without that line
+   * the only trace of it was an invisible id in the saved array. The past expiry also has to
+   * raise its warning - the same field used to round up to 23:59 and make an expired key look
+   * alive until it was saved, when it was quietly revived.
+   */
+  vm.runInContext(`openKeyModal(${JSON.stringify({
+    id: 'key_repro',
+    name: 'restricted',
+    modelsRestricted: true,
+    allowedModels: ['glm-5.3', 'retired-model'],
+    expiresAt: Date.now() - 60_000,
+    limitWindow: 'unlimited',
+    limitTokens: null,
+    limitRequests: null,
+    status: 'expired',
+  })}, () => {})`, sandbox);
+  const all = [];
+  const walk = (item) => {
+    all.push(item);
+    for (const child of item.children ?? []) walk(child);
+  };
+  walk(nodes.get('modal-body'));
+  const summary = all.find((item) => item.dataset?.role === 'selected-models');
+  assert.equal(summary?.textContent, 'Selected: GLM 5.3, retired-model',
+    'a retired model stays visible in the editor by id');
+  const editorPills = all.filter((item) => item.dataset?.model !== undefined);
+  assert.equal(editorPills.find((item) => item.dataset.model === 'glm-5.3')?.dataset.on, 'true');
+  assert.equal(editorPills.find((item) => item.dataset.model === 'glm-5.3')?.['aria-pressed'], 'true');
+  assert.equal(editorPills.find((item) => item.dataset.model === 'glm-5.3-flash')?.dataset.on, 'false');
+  assert.equal(all.find((item) => item.className === 'note note--warning')?.hidden, false,
+    'an expired key is marked expired in its editor');
 
   await vm.runInContext('render()', sandbox);
   assert.deepEqual(modelRequests, [], 'nothing in the client may ask for a model list');
