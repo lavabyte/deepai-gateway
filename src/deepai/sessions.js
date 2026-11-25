@@ -29,6 +29,12 @@
  * this table is sent to DeepAI or injected into a prompt; it only decides which `session_id` header
  * goes on the request, and which part of the prompt the fresh-byte guard has to count.
  *
+ * The row has no local lifetime. DeepAI owns the prompt cache and its expiry; this table only
+ * remembers where the conversation got to, so the next turn can be matched to it. A row is removed
+ * when its account is deleted, or when the endpoint answers an over-budget body with no cache hit
+ * at all - the server's own signal that the hint is stale. There is no seven-day sweep and no
+ * per-account cap: the cache's lifetime is DeepAI's decision, not a timer here.
+ *
  * Isolation is per account: a row is looked up by `owner`, and a row belonging to another
  * account never matches, whatever the transcript says.
  *
@@ -52,12 +58,6 @@ export const MIN_SHARED_MESSAGES = 3;
  * is not enough to join two conversations.
  */
 export const RECENT_MESSAGES = 8;
-
-/** How many conversations one account may remember; the oldest is dropped past this. */
-export const MAX_SESSIONS_PER_OWNER = 32;
-
-/** How long a remembered conversation stays matchable without being used, in milliseconds. */
-export const SESSION_IDLE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** The shape of one entry in a stored tail: a SHA-256 digest in hex. */
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -205,13 +205,11 @@ function parseStored(row) {
   return { digests: [], compacted: false };
 }
 
-/** One row, by session id, if it belongs to this account and is still alive. */
-function rowFor(db, sessionId, owner, now) {
-  const row = db.prepare(
+/** One row, by session id, if it belongs to this account. */
+function rowFor(db, sessionId, owner) {
+  return db.prepare(
     'SELECT session_id, tail, updated_at FROM conversation_sessions WHERE session_id = ? AND owner = ?',
   ).get(sessionId, owner);
-  if (row === undefined || row.updated_at < now - SESSION_IDLE_MS) return undefined;
-  return row;
 }
 
 /**
@@ -226,15 +224,14 @@ function rowFor(db, sessionId, owner, now) {
  * @param {string} owner
  * @param {string[]} digests - this request's tail.
  * @param {string} prefix - this request's opening fingerprint.
- * @param {number} now
  * @returns {{sessionId: string, covered: string[]}|undefined}
  */
-function continuationOf(db, owner, digests, prefix, now) {
+function continuationOf(db, owner, digests, prefix) {
   if (digests.length < MIN_SHARED_MESSAGES) return undefined;
   const rows = db.prepare(
-    'SELECT session_id, tail, updated_at FROM conversation_sessions WHERE owner = ? AND updated_at >= ? '
+    'SELECT session_id, tail, updated_at FROM conversation_sessions WHERE owner = ? '
     + 'ORDER BY updated_at DESC',
-  ).all(owner, now - SESSION_IDLE_MS);
+  ).all(owner);
 
   const currentPosition = new Map();
   digests.forEach((digest, index) => currentPosition.set(digest, index));
@@ -308,10 +305,10 @@ function sharedCount(covered, digests) {
  * while under-counting fresh is the silent truncation this exists to prevent.
  *
  * @param {import('node:sqlite').DatabaseSync} db
- * @param {{owner: string, messages: unknown, tools?: unknown, callerSessionId?: unknown, now?: number}} params
+ * @param {{owner: string, messages: unknown, tools?: unknown, callerSessionId?: unknown}} params
  * @returns {{sessionId: string, reused: boolean, covered: string[]}}
  */
-export function resolveSession(db, { owner, messages, tools, callerSessionId, now = Date.now() }) {
+export function resolveSession(db, { owner, messages, tools, callerSessionId }) {
   const digests = messageDigests(messages);
   const prefix = prefixHash(messages, tools);
 
@@ -321,7 +318,7 @@ export function resolveSession(db, { owner, messages, tools, callerSessionId, no
      * forwarded verbatim - the app does the same with its per-thread id - and a tail stored under
      * it is reused, so the fresh part is measured from where that conversation got to.
      */
-    const row = rowFor(db, callerSessionId, owner, now);
+    const row = rowFor(db, callerSessionId, owner);
     const stored = parseStored(row);
     const shared = sharedCount(stored.digests, digests);
     const cold = stored.compacted || (stored.prefix !== undefined && stored.prefix !== prefix);
@@ -329,13 +326,13 @@ export function resolveSession(db, { owner, messages, tools, callerSessionId, no
     return { sessionId: callerSessionId, reused: shared >= MIN_SHARED_MESSAGES, covered };
   }
 
-  const continuation = continuationOf(db, owner, digests, prefix, now);
+  const continuation = continuationOf(db, owner, digests, prefix);
   if (continuation !== undefined) {
     return { sessionId: continuation.sessionId, reused: true, covered: continuation.covered };
   }
 
   const sessionId = conversationId(messages, owner);
-  const row = rowFor(db, sessionId, owner, now);
+  const row = rowFor(db, sessionId, owner);
   const stored = parseStored(row);
   const shared = sharedCount(stored.digests, digests);
   const cold = stored.compacted || (stored.prefix !== undefined && stored.prefix !== prefix);
@@ -399,14 +396,14 @@ export function freshMessages(covered, messages) {
  * Called once a request has actually been answered: the row is a record of what the endpoint
  * received, so a request that never left the gateway must not teach it anything. The tail of the
  * row is this request's last {@link TAIL_MESSAGES} digests, which is what the next turn is
- * matched against.
+ * matched against. `updated_at` only breaks ties in favour of the most recently used conversation;
+ * it is not an expiry date.
  *
  * `session_id` is the primary key, so a session id is remembered once. Two accounts that send the
  * same caller-chosen `x-session-id` therefore keep a row for whichever used it first, and the
  * other one stays cold - it is never matched against a row it does not own. That is the safe side
  * of the collision: a missing row costs a cold request, a shared one would cost isolation.
  *
- * @param {import('node:sqlite').DatabaseSync} db
  * The row also carries a fingerprint of the request's opening - system prompt, tools, and the
  * messages before the first assistant reply - so a later request whose opening was rewritten is
  * treated as cold instead of trusting a tail the endpoint's cache no longer describes.
@@ -430,30 +427,20 @@ export function rememberSession(db, { sessionId, owner, keyId, messages, tools, 
     prefix: prefixHash(messages, tools),
     tail: messageDigests(messages),
   }), now);
-  pruneSessions(db, { owner, now });
 }
 
 /**
- * Drop what one account no longer needs: stale rows, and rows past the per-account cap.
+ * Forget one cache hint.
  *
- * The cap is what keeps this table bounded on a busy deployment, and the age is what stops a
- * conversation that ended a week ago from being continued. Only this account's rows are touched.
+ * Used when DeepAI itself says the hint is stale: an over-budget body that came back with zero
+ * cached tokens was read fresh despite the row. Keeping the row would make the next turn trust a
+ * prefix the endpoint no longer has. This removes only this account's row for this session id.
  *
  * @param {import('node:sqlite').DatabaseSync} db
- * @param {{owner: string, now?: number}} params
+ * @param {{sessionId: string, owner: string}} params
  * @returns {void}
  */
-export function pruneSessions(db, { owner, now = Date.now() }) {
-  db.prepare('DELETE FROM conversation_sessions WHERE owner = ? AND updated_at < ?')
-    .run(owner, now - SESSION_IDLE_MS);
-  db.prepare(`
-    DELETE FROM conversation_sessions
-     WHERE owner = ?
-       AND session_id NOT IN (
-         SELECT session_id FROM conversation_sessions
-          WHERE owner = ?
-          ORDER BY updated_at DESC, rowid DESC
-          LIMIT ?
-       )
-  `).run(owner, owner, MAX_SESSIONS_PER_OWNER);
+export function forgetSession(db, { sessionId, owner }) {
+  db.prepare('DELETE FROM conversation_sessions WHERE session_id = ? AND owner = ?')
+    .run(sessionId, owner);
 }

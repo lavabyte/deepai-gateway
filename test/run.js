@@ -353,9 +353,13 @@ check('accounts round-trip per username and never merge', () => {
   // Removal takes the account and its keys, and leaves other users alone.
   db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
               VALUES ('ktester', 'mine', 'sk-x', 'h-x', ?, 'unlimited', '[]', 'tester')`).run(Date.now());
+  db.prepare(`INSERT INTO conversation_sessions (session_id, owner, key_id, tail, updated_at)
+              VALUES ('s-tester', 'tester', 'ktester', '[]', ?)`).run(Date.now());
   clearAccount(db, 'tester');
   assert.equal(readAccount(db, 'tester'), undefined);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM api_keys WHERE owner_username = 'tester'").get().n, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM conversation_sessions WHERE owner = 'tester'").get().n, 0,
+    'and the cache hint goes with the account');
   assert.notEqual(readAccount(db, 'other'), undefined);
 });
 
@@ -4788,6 +4792,8 @@ await checkAsync('a request the endpoint truncated anyway is visible in the log'
     assert.ok(expiredLine !== undefined, `the log names it: ${expired.lines.join(' | ')}`);
     assert.equal(expiredLine.includes('reused=yes'), true,
       'and says the gateway expected a cache hit that did not come');
+    assert.equal(expired.db.prepare('SELECT COUNT(*) AS n FROM conversation_sessions').get().n, 0,
+      'the stale hint is forgotten, so the next turn is measured cold');
   } finally {
     await expired.close();
   }
@@ -5075,15 +5081,16 @@ await checkAsync('the fresh budget is configured or comes from the model, never 
   }
 });
 
-await checkAsync('remembered conversations are pruned, and a week-old one is not continued', async () => {
+await checkAsync('a remembered conversation does not expire by age or count', async () => {
   /*
-   * The session table is a cache key, not a history: it is capped per account, and a conversation
-   * nobody has touched for a week is dropped rather than continued - by then the endpoint's own
-   * cache has certainly gone, and matching it would only pretend the prompt is warm.
+   * The row is a cache hint, not a chat lifetime. DeepAI owns the prompt cache, so the gateway no
+   * longer drops a conversation after seven days or after a fixed number of rows: an old chat that
+   * is still being used stays matchable. The hint disappears when the account is deleted, or when
+   * the endpoint itself reports that an over-budget body had no cache hit.
    */
   const sessions = await import('../src/deepai/sessions.js');
   const db = openDatabase(':memory:');
-  const owner = 'prune-user';
+  const owner = 'keep-user';
   const transcript = (label) => [
     { role: 'user', content: `${label}: one` },
     { role: 'assistant', content: `${label}: two` },
@@ -5092,7 +5099,7 @@ await checkAsync('remembered conversations are pruned, and a week-old one is not
   ];
   const start = Date.UTC(2026, 9, 26);
 
-  for (let n = 0; n < sessions.MAX_SESSIONS_PER_OWNER + 1; n += 1) {
+  for (let n = 0; n < 40; n += 1) {
     sessions.rememberSession(db, {
       sessionId: `session-${n}`,
       owner,
@@ -5103,23 +5110,20 @@ await checkAsync('remembered conversations are pruned, and a week-old one is not
   }
   const kept = db.prepare('SELECT session_id FROM conversation_sessions WHERE owner = ? ORDER BY updated_at')
     .all(owner).map((row) => row.session_id);
-  assert.equal(kept.length, sessions.MAX_SESSIONS_PER_OWNER,
-    `one account keeps ${sessions.MAX_SESSIONS_PER_OWNER} conversations`);
-  assert.equal(kept.includes('session-0'), false, 'and the 33rd drops the oldest row');
-  assert.equal(kept.includes(`session-${sessions.MAX_SESSIONS_PER_OWNER}`), true, 'keeping the newest');
+  assert.equal(kept.length, 40, 'there is no per-account cap any more');
 
-  /* A row nobody has used for eight days is neither matched nor kept. */
+  /* A row nobody has used for eight days is still the same conversation. */
   const stale = transcript('stale conversation');
   sessions.rememberSession(db, { sessionId: 'session-stale', owner, keyId: 'k', messages: stale, now: start });
-  const later = start + sessions.SESSION_IDLE_MS + 24 * 60 * 60 * 1000;
-  const resolved = sessions.resolveSession(db, { owner, messages: stale, now: later });
-  assert.notEqual(resolved.sessionId, 'session-stale', 'a week-old conversation is not continued');
-  assert.equal(resolved.reused, false, 'and it is treated as cold');
-  sessions.rememberSession(db, { sessionId: 'session-new', owner, keyId: 'k', messages: transcript('new'), now: later });
+  const later = start + 8 * 24 * 60 * 60 * 1000;
+  const resolved = sessions.resolveSession(db, { owner, messages: stale });
+  assert.equal(resolved.sessionId, 'session-stale', 'a week-old conversation is continued');
+  assert.equal(resolved.reused, true, 'and it is still warm');
+  sessions.rememberSession(db, { sessionId: 'session-other', owner, keyId: 'k', messages: transcript('other'), now: later });
   assert.equal(
     db.prepare('SELECT COUNT(*) AS n FROM conversation_sessions WHERE session_id = ?').get('session-stale').n,
-    0,
-    'and the stale row is swept on the next write',
+    1,
+    'and the old row is not swept on the next write',
   );
 });
 

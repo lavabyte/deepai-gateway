@@ -292,8 +292,13 @@ else** - in the `conversation_sessions` table, the last 40 messages that are not
 transcript: no prompt text is kept, and nothing from that table is ever sent to DeepAI or injected
 into a prompt. It only decides which `session_id` header goes on the request and which part of the
 prompt counts as fresh. Isolation is by account: a row belonging to another account never matches,
-whatever the transcript says. Rows are capped at 32 per account and dropped after seven days
-without use.
+whatever the transcript says.
+
+There is no local chat lifetime: no seven-day expiry and no 32-conversation cap. DeepAI owns the
+prompt cache and decides when it is gone. The row is removed when its account is deleted, and when
+DeepAI answers an over-budget body with zero cached tokens - its own signal that the remembered
+prefix is stale. The next turn is then measured cold instead of trusting a cache that is no longer
+there.
 
 #### What it enforces is the fresh part
 
@@ -358,8 +363,9 @@ One failure is left that the gateway cannot prevent after the fact, and the sign
 endpoint's own accounting rather than the gateway's expectation: a request whose body is past the
 model's budget and whose answer reports **no cache hit at all** was read fresh in full, so its front
 may have been dropped. That happens when an operator sets a larger `PROMPT_BUDGET_BYTES`, or when a
-server-side cache expires under a conversation this gateway still believes is warm. Nothing in the
-answer says so and nothing is retried, but an operator can see it:
+server-side cache expires under a conversation this gateway still believes is warm. The gateway
+forgets that cache hint, so the next turn is measured cold instead of trusting a prefix DeepAI no
+longer has. Nothing is retried, but an operator can see it:
 
 ```
 truncation-suspect session=4f2a91c0 reused=yes body=300150B fresh=742B
@@ -378,8 +384,8 @@ The unit tests cover the cold case (a prompt past the budget refused with `conte
 and the action in its message, never sent to be silently truncated), the warm case (a body past the
 wall forwarded whole, under the same session id as the turn before), the harness-compaction case
 (the id kept, the whole prompt measured fresh), account isolation, parallel conversations of one
-key, a caller-supplied `x-session-id`, the configurable budget with its fallback, and the pruning
-that keeps the session table bounded.
+key, a caller-supplied `x-session-id`, the configurable budget with its fallback, and the fact that
+a cache hint is kept until DeepAI's own cache-miss signal or account deletion removes it.
 
 ### What a paid request costs: an equation on the catalog's price
 
@@ -833,8 +839,9 @@ The dashboard's **Export CSV** button uses the same endpoint.
 - **`conversation_sessions`** - one row per conversation the gateway has seen, per account:
   the session id sent to DeepAI and the last 40 **message digests**, newest last. Digests only -
   no prompt text, and nothing in it is ever sent upstream; it is the cache key that keeps a
-  conversation on one session across a compaction. Capped at 32 rows per account and dropped
-  after seven days without use.
+  conversation on one session across a compaction. There is no local expiry or row cap: DeepAI
+  owns the cache lifetime. The row is removed with its account, or when DeepAI reports a cache
+  miss on an over-budget body.
 
 ## How keys are stored
 

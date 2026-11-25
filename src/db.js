@@ -364,7 +364,9 @@ function migrateToV7(db) {
  * `conversation_sessions` lets the gateway recognise the same conversation from its recent
  * messages and reuse its id. `tail` holds one SHA-256 digest per message and an opening
  * fingerprint - a cache key, never the message text - and `owner`
- * keeps one account's conversations from matching another's. See `src/deepai/sessions.js` for
+ * keeps one account's conversations from matching another's. There is no local expiry or cap:
+ * DeepAI owns the prompt-cache lifetime, the row is removed when the account is deleted or when
+ * the endpoint reports a cache miss for an over-budget body. See `src/deepai/sessions.js` for
  * what is stored and why.
  */
 function migrateToV8(db) {

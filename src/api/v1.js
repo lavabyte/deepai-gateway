@@ -33,7 +33,7 @@ import {
   contextWindowOf,
   promptBudgetFor,
 } from '../deepai/window.js';
-import { freshMessages, rememberSession, resolveSession } from '../deepai/sessions.js';
+import { forgetSession, freshMessages, rememberSession, resolveSession } from '../deepai/sessions.js';
 import { creditsPerMinute, creditsPerThousand } from '../deepai/pricing.js';
 import { UpstreamError } from '../deepai/wire.js';
 import { acceptsImages, countImages, withoutImages } from '../deepai/images.js';
@@ -920,23 +920,6 @@ async function handleChatCompletion(db, req, res, options = {}) {
   });
 
   /*
-   * Where this conversation got to, so the next turn continues it.
-   *
-   * Recorded after the answer, not before: the row describes what the endpoint has actually
-   * received, so a request that was refused - or that failed before anything was sent - must not
-   * teach it anything. Digests only; `deepai/sessions.js` says what is stored and why.
-   */
-  if (status === 200) {
-    rememberSession(db, {
-      sessionId,
-      owner: req.gatewayKey.owner_username ?? '',
-      keyId: req.gatewayKey.id,
-      messages: sessionMessages,
-      tools: body.tools,
-    });
-  }
-
-  /*
    * The one failure this gateway cannot prevent, made visible instead.
    *
    * Every path through this handler keeps a *fresh* prompt under the model's budget, so the
@@ -946,11 +929,38 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * whole body fresh, and nothing in the answer says whether it kept the front. So the signal is
    * the endpoint's own accounting, not this gateway's expectation: a body past the budget whose
    * answer reports zero cached tokens. A stream that carries no usage at all is not this case -
-   * the absence of the number is not a zero - and neither is a cache hit. Nothing is changed and
-   * nothing is retried; an operator just gets to see it.
+   * the absence of the number is not a zero - and neither is a cache hit. Nothing is retried; an
+   * operator just gets to see it.
    */
-  if (promptBudgetBytes !== undefined && status === 200 && usage !== undefined
-    && usage.cacheReadTokens === 0 && upstreamBytes > promptBudgetBytes) {
+  const cacheMiss = promptBudgetBytes !== undefined && status === 200 && usage !== undefined
+    && usage.cacheReadTokens === 0 && upstreamBytes > promptBudgetBytes;
+
+  /*
+   * Where this conversation got to, so the next turn continues it.
+   *
+   * Recorded after the answer, not before: the row describes what the endpoint has actually
+   * received, so a request that was refused - or that failed before anything was sent - must not
+   * teach it anything. Digests only; `deepai/sessions.js` says what is stored and why.
+   *
+   * DeepAI owns the cache lifetime. When its own accounting says this over-budget body was read
+   * with no cache hit at all, the remembered tail is no longer a safe hint: forget it, so the next
+   * turn is measured cold instead of trusting a prefix the endpoint may have dropped.
+   */
+  if (status === 200) {
+    if (cacheMiss && session.reused && session.covered.length > 0) {
+      forgetSession(db, { sessionId, owner });
+    } else {
+      rememberSession(db, {
+        sessionId,
+        owner,
+        keyId: req.gatewayKey.id,
+        messages: sessionMessages,
+        tools: body.tools,
+      });
+    }
+  }
+
+  if (cacheMiss) {
     log?.(`truncation-suspect session=${sessionId.slice(0, 8)} reused=${session.reused ? 'yes' : 'no'} `
       + `body=${upstreamBytes}B fresh=${freshBytes}B`);
   }
