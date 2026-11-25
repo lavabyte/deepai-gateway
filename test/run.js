@@ -4501,9 +4501,11 @@ await checkAsync('the text-only retry after an image refusal is measured too', a
     await new Promise((resolve) => tight.server.close(resolve));
     assert.equal(refused.status, 400, 'a retry over the budget is refused');
     const error = await refused.json();
-    assert.equal(error.error?.code, 'context_length_exceeded');
+    assert.equal(error.error?.code, 'context_limit_reached');
     assert.match(error.error?.message ?? '', /text-only retry/,
       `the message says which body was too large: ${error.error?.message}`);
+    assert.match(error.error?.message ?? '', /Compact the session or start a new chat/,
+      'and what the caller can do about it');
     assert.equal(bodies.length, 1, 'and the oversized retry never left the gateway');
   } finally {
     globalThis.fetch = realFetch;
@@ -4620,52 +4622,52 @@ function gatewayPrompt(response) {
   const fields = {};
   for (const pair of String(response.headers.get('x-gateway-prompt')).split('; ')) {
     const [name, value] = pair.split('=');
-    fields[name] = value === 'yes' || value === 'no' || name === 'trim' ? value : Number(value);
+    fields[name] = value === 'yes' || value === 'no' ? value : Number(value);
   }
   return fields;
 }
 
-await checkAsync('a cold prompt past the fresh budget is shortened visibly, not silently truncated', async () => {
+await checkAsync('a prompt past the fresh budget is refused with a compact-or-new-chat error', async () => {
   /*
    * A cold conversation has to be read whole, so its whole body is the fresh part. Past the
-   * endpoint's fresh-prompt limit it does not refuse anything - it answers from the part it kept,
-   * usually the tail, with a normal 200 - which from a caller is a model that has forgotten the
-   * conversation. The budget here is pinned low by the test fixture; production derives it from
-   * the model's catalog entry. The gateway shortens it before it leaves, and says so in the prompt
-   * and on `x-gateway-prompt`: a visible cut is the difference between a model that knows its
-   * history was condensed and one that silently lost it.
+   * model's budget DeepAI does not refuse anything - it answers from the part it kept, usually
+   * the tail, with a normal 200 - which from a caller is a model that has forgotten the
+   * conversation. The gateway does not rewrite the transcript to hide that: it refuses, and the
+   * caller can compact its own session or start a new chat. The budget here is pinned low by the
+   * test fixture; production derives it from the model's catalog entry.
    */
   const gateway = await deepaiGateway();
   try {
     const cold = [{ role: 'user', content: 'x'.repeat(200_000) }];
-    const answered = await gateway.ask(cold);
+    const refused = await gateway.ask(cold);
 
-    assert.equal(answered.status, 200, 'the request is served, not refused');
-    assert.equal(gateway.sent.length, 1, 'exactly one request reaches upstream');
-    const header = gatewayPrompt(answered);
-    assert.ok(header.fresh <= TEST_PROMPT_BUDGET, `the fresh body fits the budget: ${header.fresh}`);
+    assert.equal(refused.status, 400, 'the request is refused before anything leaves');
+    assert.equal(gateway.sent.length, 0, 'nothing reaches upstream');
+    const header = gatewayPrompt(refused);
+    assert.ok(header.fresh > TEST_PROMPT_BUDGET, `the fresh body is over the budget: ${header.fresh}`);
     assert.equal(header.fresh, header.body, 'a cold request reads its whole body fresh');
-    assert.match(String(header.trim), /^(cut|compact|drop)/, `the header says what was shortened: ${header.trim}`);
     assert.equal(header['budget-bytes'], TEST_PROMPT_BUDGET);
     assert.equal(header.window, 1_048_576, 'the catalog window for this model rides along');
     assert.equal(header.budget, 4_194_304, 'beside that window in characters');
     assert.equal(header.reused, 'no', 'nothing of this prompt is cached');
+    assert.equal(header.trim, undefined, 'there is no shortened prompt to report');
 
-    const sent = gateway.sent[0];
-    assert.ok(sent.bytes <= TEST_PROMPT_BUDGET, `the body that left is under the budget: ${sent.bytes}`);
-    assert.match(sent.raw, /characters omitted here/, 'the oversized message says where its middle went');
+    const error = await refused.json();
+    assert.equal(error.error?.type, 'invalid_request_error');
+    assert.equal(error.error?.code, 'context_limit_reached');
+    assert.match(error.error?.message ?? '', /Compact the session or start a new chat/,
+      `the message tells the caller what to do: ${error.error?.message}`);
+    assert.match(error.error?.message ?? '', /x-gateway-prompt/, 'and where the numbers are');
 
     const row = gateway.db.prepare('SELECT status, ok, error_code FROM usage ORDER BY rowid DESC LIMIT 1').get();
-    assert.equal(row.status, 200, 'the answer is recorded like any other request');
-    assert.equal(row.ok, 1);
-    assert.equal(gateway.lines.some((line) => line.includes('compacted')), true,
-      `the log says what was shortened: ${gateway.lines.at(-1)}`);
+    assert.equal(row.status, 400, 'the refusal is recorded like any other request');
+    assert.equal(row.ok, 0);
+    assert.equal(row.error_code, 'context_limit_reached');
 
-    // A streaming caller gets the same treatment: the decision is made before the upstream call.
+    // A streaming caller gets the same refusal: the decision is made before the upstream call.
     const streaming = await gateway.ask(cold, { body: { stream: true } });
-    assert.equal(streaming.status, 200, 'a streaming caller is served the shortened prompt too');
-    assert.match(String(streaming.headers.get('content-type')), /text\/event-stream/);
-    assert.equal(gateway.sent.length, 2, 'and one more request went upstream for it');
+    assert.equal(streaming.status, 400, 'a streaming caller is refused too');
+    assert.equal(gateway.sent.length, 0, 'and still nothing reaches upstream');
   } finally {
     await gateway.close();
   }
@@ -4679,7 +4681,7 @@ await checkAsync('a conversation does not become warm from one repeated message'
    * follows the one message the two happen to share - and a body of hundreds of kilobytes measured
    * as a few bytes is forwarded, truncated by the endpoint, and reported to the caller as a model
    * that forgot. So a message in common is not enough: `reused` needs three, and when it is false
-   * the whole prompt is measured as fresh - and shortened if that whole prompt is over the budget.
+   * the whole prompt is measured as fresh - and refused if that whole prompt is over the budget.
    */
   const gateway = await deepaiGateway();
   try {
@@ -4701,13 +4703,12 @@ await checkAsync('a conversation does not become warm from one repeated message'
       { role: 'user', content: 'y'.repeat(200_000) },
       { role: 'assistant', content: 'hello' },
     ]);
-    assert.equal(impostor.status, 200, 'the cold body is shortened and served');
-    assert.equal(gateway.sent.length, before + 1, 'one shortened request reaches upstream');
+    assert.equal(impostor.status, 400, 'the cold body is refused');
+    assert.equal(gateway.sent.length, before, 'and nothing reaches upstream');
     const header = gatewayPrompt(impostor);
     assert.equal(header.reused, 'no', 'two shared messages are not a continuation');
     assert.equal(header.fresh, header.body, 'so the whole body is counted as fresh');
     assert.ok(header.fresh > 30_000, `and it is not mistaken for a tiny tail: ${header.fresh}`);
-    assert.match(String(header.trim), /^(cut|compact|drop)/, 'and the shortening is visible');
   } finally {
     await gateway.close();
   }
@@ -4746,127 +4747,7 @@ await checkAsync('a warm tail is measured with the tool catalog, not as if tools
     assert.equal(header.reused, 'yes', 'the tail continues the remembered conversation');
     assert.ok(header.fresh > 60_000,
       `the tool catalog is counted in the fresh bytes: ${header.fresh}`);
-    assert.equal(header.trim, 'none', 'and the request still fits without shortening');
     assert.ok(Array.isArray(gateway.sent.at(-1).payload.tools), 'the catalog really went upstream');
-  } finally {
-    await gateway.close();
-  }
-});
-
-await checkAsync('a long conversation is summarized into a checkpoint instead of losing its start', async () => {
-  /*
-   * The failure this fixes: 30 tool calls into a session, the transcript is a few hundred KB and
-   * the prompt cache is cold, so DeepAI keeps only the tail and the model asks what it is supposed
-   * to do. A checkpoint keeps the goal and the work in summary, and the newest turns verbatim, so
-   * the model still knows what it was asked and what it just did.
-   */
-  const gateway = await deepaiGateway();
-  try {
-    const conversation = [{ role: 'user', content: 'Fix the broken tool in the gateway, then run the tests.' }];
-    for (let step = 0; step < 26; step += 1) {
-      conversation.push({ role: 'assistant', content: `step ${step}: ` + 'a'.repeat(7_000) });
-      conversation.push({ role: 'user', content: `result ${step}: ` + 'b'.repeat(7_000) });
-    }
-    const answered = await gateway.ask(conversation);
-    assert.equal(answered.status, 200, 'the long conversation is served');
-    const header = gatewayPrompt(answered);
-    assert.ok(header.fresh <= header['budget-bytes'],
-      `the forwarded prompt fits the fresh budget: ${header.fresh} <= ${header['budget-bytes']}`);
-    assert.match(String(header.trim), /compact/, `the header says it was compacted: ${header.trim}`);
-    assert.ok(gateway.sent.length >= 2, 'a summary request and the compacted request');
-
-    const final = gateway.sent.at(-1);
-    assert.ok(final.bytes <= header['budget-bytes'], `the compacted body is under the budget: ${final.bytes}`);
-    assert.match(final.raw, /were compacted into the checkpoint/, 'the transcript carries the checkpoint note');
-    assert.match(final.raw, /Fix the broken tool in the gateway/, 'the goal survives');
-    assert.match(final.raw, /result 25:/, 'the newest work survives verbatim');
-    assert.doesNotMatch(final.raw, /result 0:/, 'the oldest work is in the summary, not still taking space');
-
-    /*
-     * The caller's next turn still carries the original, unshortened transcript, because the
-     * gateway's compaction is invisible to it. The session must still be recognized (same id,
-     * `reused=yes`) and must be measured cold, since the endpoint cached the checkpoint rather than
-     * that transcript; it is shortened again, and the newest work survives.
-     */
-    const nextTurn = [...conversation,
-      { role: 'assistant', content: 'step 26: ' + 'a'.repeat(7_000) },
-      { role: 'user', content: 'result 26: ' + 'b'.repeat(7_000) }];
-    const followed = await gateway.ask(nextTurn);
-    assert.equal(followed.status, 200, 'the next turn is served');
-    const followedHeader = gatewayPrompt(followed);
-    assert.equal(followedHeader.reused, 'yes', 'the same conversation is recognized');
-    assert.ok(followedHeader.fresh <= followedHeader['budget-bytes'],
-      `the next prompt also fits: ${followedHeader.fresh} <= ${followedHeader['budget-bytes']}`);
-    assert.match(String(followedHeader.trim), /compact/, `the next turn is compacted too: ${followedHeader.trim}`);
-    const followedFinal = gateway.sent.at(-1);
-    assert.equal(followedFinal.session, final.session, 'the same DeepAI session id is reused');
-    assert.match(followedFinal.raw, /result 26:/, 'the newest work survives the second compaction');
-    assert.match(followedFinal.raw, /Fix the broken tool in the gateway/, 'the goal survives the second compaction');
-  } finally {
-    await gateway.close();
-  }
-});
-
-await checkAsync('a fact in the middle of a long conversation survives the checkpoint', async () => {
-  /*
-   * The needle test. A model can repeat the goal at the start and the newest tool result at the
-   * end while having lost the one fact in between, so those two assertions are not enough. Here a
-   * unique fact sits in a middle turn that compaction removes; the summarizer receives it and
-   * writes it into the checkpoint, and the final request must carry it. The original turn itself
-   * must not survive verbatim, or the test would pass by keeping the needle in the recent tail
-   * instead of by carrying it through the summary.
-   */
-  const needle = 'NEBULA-KEY-7431';
-  const summaries = [];
-  const gateway = await deepaiGateway({
-    respond: ({ payload }) => {
-      if (payload.max_completion_tokens !== 4_096) return undefined;
-      const prompt = JSON.stringify(payload.messages ?? []);
-      summaries.push(prompt);
-      if (!prompt.includes(needle)) return undefined;
-      const summary = '## Goal\nKeep working on the gateway.\n\n## Important fact\n'
-        + `${needle} is the launch key. Do not lose it.`;
-      return new Response(`data: ${JSON.stringify({
-        choices: [{ delta: { content: summary }, finish_reason: 'stop' }],
-      })}\n\ndata: [DONE]\n\n`,
-      { status: 200, headers: { 'content-type': 'text/event-stream' } });
-    },
-  });
-  try {
-    const conversation = [{
-      role: 'user',
-      content: 'Fix the gateway and keep the launch key safe. Do not lose any fact from this transcript.',
-    }];
-    for (let step = 0; step < 26; step += 1) {
-      conversation.push({ role: 'assistant', content: `step ${step}: ` + 'a'.repeat(7_000) });
-      conversation.push({ role: 'user', content: `result ${step}: ` + 'b'.repeat(7_000) });
-      if (step === 8) {
-        conversation.push({
-          role: 'user',
-          content: `IMPORTANT FACT: the launch key is ${needle}. Keep it for later.`,
-        });
-      }
-    }
-    const at = conversation.findIndex((message) => String(message.content).includes(needle));
-    assert.ok(at > 10 && at < conversation.length - 10,
-      `the needle starts in the middle, not at either end: ${at}/${conversation.length}`);
-
-    const answered = await gateway.ask(conversation);
-    assert.equal(answered.status, 200, 'the long conversation is served');
-    const header = gatewayPrompt(answered);
-    assert.match(String(header.trim), /compact/, `the header says it was compacted: ${header.trim}`);
-    assert.ok(header.fresh <= header['budget-bytes'],
-      `the forwarded prompt fits the fresh budget: ${header.fresh} <= ${header['budget-bytes']}`);
-
-    assert.ok(summaries.length >= 1, 'the middle turns reached the summarizer');
-    assert.ok(summaries.some((prompt) => prompt.includes(needle)),
-      'the needle was in the text handed to the summarizer');
-    const final = gateway.sent.at(-1);
-    assert.match(final.raw, new RegExp(needle), 'the checkpoint carried the needle to the model');
-    assert.equal(final.payload.messages.some((message) => String(message.content).startsWith('IMPORTANT FACT:')), false,
-      'the original middle turn was replaced, so the needle survived through the summary');
-    assert.match(final.raw, /Fix the gateway and keep the launch key safe/, 'the goal is still there');
-    assert.match(final.raw, /result 25:/, 'the newest work is still there');
   } finally {
     await gateway.close();
   }
@@ -5006,7 +4887,6 @@ await checkAsync('a harness compaction keeps the session but is measured as a co
     assert.equal(header.fresh, header.body, 'the changed opening means the whole body is fresh');
     assert.ok(header.fresh < budget,
       `it fits the raised budget, so it is forwarded whole (${header.fresh} < ${budget})`);
-    assert.equal(header.trim, 'none', 'and the gateway did not shorten it');
     assert.equal(header.reused, 'yes', 'and the session id was kept across the compaction');
 
     assert.equal(gateway.sent.length, 2);
@@ -5154,7 +5034,6 @@ await checkAsync('a request without an override takes its budget from the model 
     assert.equal(header.window, 1_048_576, 'the catalog window rides along');
     assert.equal(header['budget-bytes'], (1_048_576 - 131_072) * 4,
       'and the enforced budget is that window less the model output allowance');
-    assert.equal(header.trim, 'none', 'so nothing is shortened');
     assert.equal(gateway.sent.length, 1, 'exactly one request reaches upstream');
   } finally {
     await gateway.close();
@@ -5185,11 +5064,12 @@ await checkAsync('the fresh budget is configured or comes from the model, never 
     assert.equal((await gateway.ask([{ role: 'user', content: 'x'.repeat(1_000) }])).status, 200,
       'a lowered budget forwards what fits it');
     const over = await gateway.ask([{ role: 'user', content: 'y'.repeat(3_000) }]);
-    assert.equal(over.status, 200, 'and shortens what does not fit');
+    assert.equal(over.status, 400, 'and refuses what does not fit');
     const overHeader = gatewayPrompt(over);
     assert.equal(overHeader['budget-bytes'], 2_000, 'the configured budget is the one enforced');
-    assert.ok(overHeader.fresh <= 2_000, `the fresh part fits it: ${overHeader.fresh}`);
-    assert.match(String(overHeader.trim), /^cut/, 'and the caller is told it was shortened');
+    assert.ok(overHeader.fresh > 2_000, `the fresh part is over it: ${overHeader.fresh}`);
+    assert.equal((await over.json()).error?.code, 'context_limit_reached');
+    assert.equal(gateway.sent.length, 1, 'only the request that fit went upstream');
   } finally {
     await gateway.close();
   }
@@ -5891,16 +5771,13 @@ await checkAsync('a 400 on a request carrying an image is retried as text', asyn
   }
 });
 
-await checkAsync('the log says what happened to an image, and why', async () => {
+await checkAsync('an image is sent only to a model that takes one, and a note says where it went', async () => {
   /*
    * An image that never reached the model and an image the model saw but ignored look
-   * identical from the answer: both come back as text that does not mention it. Without a
-   * line saying which, "images do not work" cannot be diagnosed from outside - which is
-   * exactly the question asked, and the reason this exists.
-   *
-   * The four cases are kept apart because each has a different fix: a model the catalog gives
-   * no vision is DeepAI's decision, `refused-recently` is this gateway's own memory (it
-   * expires), `sent` means the image left here and anything after is upstream.
+   * identical from the answer: both come back as text that does not mention it. The gateway
+   * therefore decides before the request, and the note in the body it sends is the record:
+   * a model the catalog gives no vision is DeepAI's decision, while a remembered refusal is
+   * this gateway's own memory (it expires).
    */
   const multimodal = await import('../src/deepai/multimodal.js');
   multimodal.forgetRejections();
@@ -5917,8 +5794,8 @@ await checkAsync('the log says what happened to an image, and why', async () => 
     VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'img-log')`).run(key.hash);
 
   const realFetch = globalThis.fetch;
-  const lines = [];
-  const app = createApp(db, { log: (message) => lines.push(message), logRequests: true });
+  const upstreamBodies = [];
+  const app = createApp(db, { log: () => {}, logRequests: true });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -5942,40 +5819,40 @@ await checkAsync('the log says what happened to an image, and why', async () => 
             contextWindow: 100000, maxTokens: 1000, premier: false, theosPerRequest: '0' },
         ] }), { status: 200, headers: { 'content-type': 'application/json' } });
       }
+      upstreamBodies.push(String(init?.body ?? ''));
       return new Response('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
         { status: 200, headers: { 'content-type': 'text/event-stream' } });
     };
 
-    const noteOf = (model) => {
-      const line = lines.filter((entry) => entry.includes(`v1 chat/completions ${model}`)).at(-1) ?? '';
-      // Everything from `images=` to the end of the line: the reason may contain a hyphen.
-      const at = line.indexOf('images=');
-      return at === -1 ? `no images= in: ${line}` : line.slice(at);
-    };
+    const lastBody = () => upstreamBodies.at(-1) ?? '';
+    const sentImage = () => lastBody().includes('data:image/png;base64,AA');
+    const omitted = /\[image omitted: this model does not accept images\]/;
 
     // No image at all.
     await ask('sees-images', false);
-    assert.equal(noteOf('sees-images'), 'images=0');
+    assert.equal(sentImage(), false, 'a text-only request carries no image');
+    assert.doesNotMatch(lastBody(), omitted, 'and no omission note');
 
     // An image, and a model the catalog says has vision: it is sent.
     await ask('sees-images', true);
-    assert.equal(noteOf('sees-images'), 'images=1 sent',
-      'a model with vision gets the image, and the log says so');
+    assert.equal(sentImage(), true, 'a model with vision gets the image');
+    assert.doesNotMatch(lastBody(), omitted, 'and no omission note');
 
-    // A model the catalog gives no vision: dropped before the request, and said why.
+    // A model the catalog gives no vision: dropped before the request, with a note.
     await ask('text-only', true);
-    assert.equal(noteOf('text-only'), 'images=1 dropped:catalog');
+    assert.equal(sentImage(), false, 'a model the catalog gives no vision never sees it');
+    assert.match(lastBody(), omitted, 'the image is replaced by a note where it was');
 
-    // A model that refused recently: dropped, with the other reason.
+    // A model that refused recently: dropped, with the same note.
     multimodal.noteMultimodalRejection('sees-images');
     await ask('sees-images', true);
-    assert.equal(noteOf('sees-images'), 'images=1 dropped:refused-recently',
-      'a remembered refusal is named as such, not confused with the catalog');
+    assert.equal(sentImage(), false, 'a remembered refusal drops it too');
+    assert.match(lastBody(), omitted, 'with the same note, not a silent drop');
 
     // And the memory expiring puts the image back on the wire.
     multimodal.forgetRejections();
     await ask('sees-images', true);
-    assert.equal(noteOf('sees-images'), 'images=1 sent', 'forgetting a refusal restores the image');
+    assert.equal(sentImage(), true, 'forgetting a refusal restores the image');
   } finally {
     globalThis.fetch = realFetch;
     multimodal.forgetRejections();

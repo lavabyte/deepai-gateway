@@ -362,8 +362,8 @@ function migrateToV7(db) {
  * a multi-megabyte prompt that the endpoint truncated from the front.
  *
  * `conversation_sessions` lets the gateway recognise the same conversation from its recent
- * messages and reuse its id. `tail` holds one SHA-256 digest per message, an opening fingerprint
- * and whether the last request was shortened - a cache key, never the message text - and `owner`
+ * messages and reuse its id. `tail` holds one SHA-256 digest per message and an opening
+ * fingerprint - a cache key, never the message text - and `owner`
  * keeps one account's conversations from matching another's. See `src/deepai/sessions.js` for
  * what is stored and why.
  */
@@ -373,7 +373,7 @@ function migrateToV8(db) {
       session_id TEXT PRIMARY KEY,   -- sent as session_id / x-session-affinity
       owner      TEXT NOT NULL,      -- account username: another account never matches
       key_id     TEXT,               -- the gateway key, for the log
-      tail       TEXT NOT NULL,      -- JSON {prefix, tail, compacted}: digest cache key, newest last
+      tail       TEXT NOT NULL,      -- JSON {prefix, tail} (older rows add compacted): cache key
       updated_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS conversation_sessions_owner

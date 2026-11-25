@@ -3,13 +3,14 @@
  *
  * There is no window, wall or character budget in this file. DeepAI publishes a
  * `contextWindow` per model; the desktop app reads that same number and compacts at
- * `contextWindow - reserveTokens`. This gateway does the same, so a model that DeepAI
- * changes is picked up on the next catalog read instead of needing a code change.
+ * `contextWindow - reserveTokens`. This gateway measures against the same point and refuses
+ * a prompt past it, so a model that DeepAI changes is picked up on the next catalog read
+ * instead of needing a code change.
  *
  * The earlier revisions here baked in `320000`, a measured 196 KB "wall" and a 176,400-byte
  * budget. Those numbers came from one endpoint at one time. The measured wall in particular is
  * not the model's window and cannot be derived from the catalog, so it must not be a policy
- * constant: a gateway that hardcodes it starts shortening healthy conversations when DeepAI
+ * constant: a gateway that hardcodes it starts refusing healthy conversations when DeepAI
  * changes the backend, and forwards already-doomed ones when the real limit moves the other way.
  * The fixed numbers are gone; an operator who has measured a tighter limit for their deployment
  * can still set `PROMPT_BUDGET_BYTES`, and otherwise the model's own catalog entry is the only
@@ -42,8 +43,8 @@ export function contextWindowOf(model) {
 /**
  * The prompt budget for one model, in bytes, derived from its catalog entry.
  *
- * The reserve is the model's own output allowance: the app compacts at
- * `contextWindow - reserveTokens`, and a prompt plus the answer has to fit the same window.
+ * The reserve is the model's own output allowance: the app compacts and this gateway refuses at
+ * `contextWindow - reserveTokens`, because a prompt plus the answer has to fit the same window.
  * Nothing is filled in when the catalog did not send a window - returning `undefined` means
  * "no local limit known", not an invented one.
  *

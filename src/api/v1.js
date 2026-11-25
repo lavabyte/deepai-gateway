@@ -33,7 +33,6 @@ import {
   contextWindowOf,
   promptBudgetFor,
 } from '../deepai/window.js';
-import { fitPrompt } from '../deepai/fit.js';
 import { freshMessages, rememberSession, resolveSession } from '../deepai/sessions.js';
 import { creditsPerMinute, creditsPerThousand } from '../deepai/pricing.js';
 import { UpstreamError } from '../deepai/wire.js';
@@ -146,53 +145,8 @@ function freshBodyBytes(params, messages, covered, usesResponses) {
   return upstreamBodyBytes({ ...params, messages: fresh }, usesResponses);
 }
 
-/**
- * The transcript in one readable line: how many of each role, and whether a system prompt is
- * among them.
- *
- * An answer that says "Hi, how can I help you today?" to a working conversation and an answer
- * to a conversation that arrived without its system prompt look identical from outside. This
- * is what tells them apart in a log, without writing anybody's prompt into it.
- *
- * @param {unknown} messages
- * @returns {string}
- */
-function transcriptShape(messages) {
-  const counts = new Map();
-  let systemFirst = false;
-  const list = Array.isArray(messages) ? messages : [];
-  for (const [index, message] of list.entries()) {
-    const role = typeof message?.role === 'string' ? message.role : 'none';
-    if (index === 0 && (role === 'system' || role === 'developer')) systemFirst = true;
-    const toolCall = Array.isArray(message?.tool_calls) && message.tool_calls.length > 0;
-    const label = toolCall ? `${role}+tool_calls` : role;
-    counts.set(label, (counts.get(label) ?? 0) + 1);
-  }
-  const parts = [...counts].map(([label, count]) => `${label}:${count}`);
-  return `${systemFirst ? 'sys-first' : 'NO-SYSTEM-FIRST'} ${parts.join(',')}`;
-}
-
 /** Model used when a request omits one. */
 const FALLBACK_MODEL = 'glm-5.3-flash';
-
-/**
- * The model that writes a checkpoint when a prompt has to be compacted.
- *
- * A compaction is work the gateway does for the caller, so it must not appear on the caller's
- * bill: only a free model is eligible, and the catalog's own `premier` flag is the authority.
- * Models served by `/responses` are skipped because the summarizer speaks chat-completions.
- *
- * @param {Array<object>} models - the catalog.
- * @returns {string|undefined} a model id, or undefined when the catalog lists no free model.
- */
-function freeCompactionModel(models) {
-  const free = (Array.isArray(models) ? models : []).filter((model) => model?.premier !== true
-    && model?.api !== 'openai-responses'
-    && Array.isArray(model?.input)
-    && model.input.includes('text'));
-  if (free.length === 0) return undefined;
-  return (free.find((model) => model.id === FALLBACK_MODEL) ?? free[0]).id;
-}
 
 /** Per-message structural overhead for role framing and JSON framing. */
 const MESSAGE_OVERHEAD = 10;
@@ -448,23 +402,6 @@ async function handleChatCompletion(db, req, res, options = {}) {
     : body.messages;
 
   /*
-   * What happened to the images, for the log.
-   *
-   * Without this an image that never reached the model and an image the model saw but
-   * ignored look exactly the same from the answer - both come back as text that does not
-   * mention it. The reason is kept separate because each has a different fix: `catalog` is
-   * DeepAI saying the model has no vision, `refused-recently` is this gateway's own memory
-   * of a refusal (it expires), and `sent` means the image left the gateway.
-   */
-  /*
-   * What the caller sent, and what this gateway would send on. An image can take a message out of
-   * the second one, so the two are not always equal - and a log that only showed the first would
-   * hide exactly the change a reader would need to explain a strange answer.
-   */
-  const arrived = promptShape(body.messages);
-  const forwarded = promptShape(messages);
-
-  /*
    * Which session this request belongs to, and what of its prompt the endpoint already has.
    *
    * The session id is what DeepAI keeps a conversation's prompt cache on. This gateway used to
@@ -493,7 +430,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
     callerSessionId: req.get('x-session-id'),
   });
   const sessionId = session.sessionId;
-  /* The caller's transcript, kept for the session row even if this request is shortened below. */
+  /* The transcript this request forwards, kept for the session row. */
   const sessionMessages = messages;
 
   const controller = new AbortController();
@@ -543,7 +480,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
     sessionId,
     signal: undefined,
   };
-  let upstreamBytes = upstreamBodyBytes(params, usesResponses);
+  const upstreamBytes = upstreamBodyBytes(params, usesResponses);
   /*
    * Only a tail this request actually shares counts as cached.
    *
@@ -552,50 +489,11 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * the same id - and treating that row as cached would measure the fresh part as whatever follows
    * the one message they happen to have in common. `reused` is the answer to "does this request
    * share a message with that row", and when it is false nothing is known to be cached, so the
-   * whole prompt is fresh. Over-counting fresh only shortens a request that might have fit;
+   * whole prompt is fresh. Over-counting fresh only refuses a request that might have fit;
    * under-counting fresh is the silent truncation this guard exists to prevent.
    */
-  let covered = session.reused ? session.covered : [];
-  let freshBytes = freshBodyBytes(params, messages, covered, usesResponses);
-  /*
-   * Over the model's budget, the conversation is compacted before it is sent.
-   *
-   * A refusal would be honest but useless to an agent already in the middle of a turn. The
-   * harness compacts against the same catalog window on its own schedule; this is the gateway's
-   * own last chance to keep the prompt inside that window when the caller did not. A model with
-   * no catalog window has no budget here, so nothing is compacted on a guess.
-   *
-   * So the oldest turns after the goal are summarized here, with a free model, and the recent
-   * work is kept verbatim. The compacted prompt is a new prefix, so nothing of the old one can
-   * be treated as cached: `covered` is cleared and the whole new body is measured again.
-   */
-  let trimNote = '';
-  if (promptBudgetBytes !== undefined && freshBytes > promptBudgetBytes) {
-    const before = promptShape(messages);
-    const compacted = await fitPrompt(messages, {
-      measure: (list) => upstreamBodyBytes({ ...params, messages: list }, usesResponses),
-      budgetBytes: promptBudgetBytes,
-      apiKey: account.apiKey,
-      model: freeCompactionModel(models),
-      sessionId,
-      conversation: sessionId,
-      signal: controller.signal,
-      log,
-    });
-    messages = compacted.messages;
-    params.messages = messages;
-    covered = [];
-    upstreamBytes = upstreamBodyBytes(params, usesResponses);
-    freshBytes = freshBodyBytes(params, messages, covered, usesResponses);
-    const parts = [];
-    if (compacted.trimmed.compacted > 0) parts.push("compact" + compacted.trimmed.compacted);
-    if (compacted.trimmed.dropped > 0) parts.push("drop" + compacted.trimmed.dropped);
-    if (compacted.trimmed.cut > 0) parts.push("cut" + compacted.trimmed.cut);
-    trimNote = parts.join("+");
-    log?.("v1 " + upstreamModel + " compacted: " + before.bytes + "B -> " + promptShape(messages).bytes
-      + "B fresh=" + freshBytes + "B budget=" + promptBudgetBytes + "B (" + (trimNote || "no change") + ") "
-      + "session=" + sessionId.slice(0, 8));
-  }
+  const covered = session.reused ? session.covered : [];
+  const freshBytes = freshBodyBytes(params, messages, covered, usesResponses);
 
   /*
    * The same facts on the wire, for a caller that never reads a log.
@@ -604,45 +502,40 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * the whole serialized upstream request, tools and framing included. `fresh` is the part of it
    * the endpoint has to read rather than serve from its prompt cache - on a cold conversation the
    * whole body, on a warm one just the messages after the covered tail - and it is the number the
-   * budget is measured against. `window` is the token window
-   * DeepAI's catalog declares for this model, `budget` that window in characters, and
-   * `budget-bytes` the byte budget enforced below (the model's window less its output allowance,
-   * or the operator's explicit override). `reused` says whether this request continued a session
-   * the endpoint should already have cached. A client cannot learn any of this from DeepAI.
+   * budget is measured against. `window` is the token window DeepAI's catalog declares for this
+   * model, `budget` that window in characters, and `budget-bytes` the byte budget enforced below
+   * (the model's window less its output allowance, or the operator's explicit override). `reused`
+   * says whether this request continued a session the endpoint should already have cached. A
+   * client cannot learn any of this from DeepAI.
    *
-   * Set after compaction, so it describes what actually leaves rather than what arrived; the
-   * fallback refusal below carries the same numbers. `trim` is `none` unless a compaction ran,
-   * then `compact<n>` / `drop<n>` / `cut<n>`. Semicolon-separated `key=value`, as it always was.
+   * The refusal below carries the same numbers. Semicolon-separated `key=value`, as it always was.
    */
   res.setHeader('x-gateway-prompt', [
     `sent=${promptShape(messages).bytes}`,
-    `received=${arrived.bytes}`,
+    `received=${promptShape(body.messages).bytes}`,
     `body=${upstreamBytes}`,
     `fresh=${freshBytes}`,
     `window=${windowTokens ?? 'unknown'}`,
     `budget=${promptBudgetChars ?? 'unknown'}`,
     ...(promptBudgetBytes === undefined ? [] : [`budget-bytes=${promptBudgetBytes}`]),
     `reused=${session.reused ? 'yes' : 'no'}`,
-    `trim=${trimNote === '' ? 'none' : trimNote}`,
   ].join('; '));
 
   /*
-   * The fallback: if compaction could not bring a fresh prompt under the budget, it is refused
-   * rather than sent to be silently truncated.
+   * A prompt past the model's budget is refused, not rewritten.
    *
-   * The refusal is OpenAI's own shape - 400 with `code: "context_length_exceeded"` - because that
-   * is the error every agent harness already recognises. In practice it is unreachable: `fitPrompt`
-   * cuts and drops until the body fits, and only a prompt whose current turn alone is larger than
-   * the whole budget gets here. A warm conversation of any total size is not measured this way:
-   * its prefix is in the endpoint's prompt cache, so only the tail is counted.
+   * The caller owns the conversation and its compaction: the harness compacts against the same
+   * catalog window, and a checkpoint written here would put text on the wire the caller never saw,
+   * then make the caller's original transcript arrive cold on the next turn. One chat is one
+   * session here, so the honest answer is an error that asks for a compaction or a new chat rather
+   * than a different prompt. A model with no catalog window has no budget and is forwarded as
+   * written.
    */
   if (promptBudgetBytes !== undefined && freshBytes > promptBudgetBytes) {
     const freshText = freshBytes.toLocaleString('en-US');
     const budget = promptBudgetBytes.toLocaleString('en-US');
-    log?.(`v1 ${upstreamModel} refused after compaction: ${freshBytes}B of fresh prompt over the `
-      + `${promptBudgetBytes}B fresh budget from the model's catalog window `
-      + `session=${sessionId.slice(0, 8)} trimmed=${trimNote || 'none'} `
-      + transcriptShape(body.messages));
+    log?.(`v1 ${upstreamModel} refused: ${freshBytes}B fresh over ${promptBudgetBytes}B budget `
+      + `session=${sessionId.slice(0, 8)}`);
     record(db, {
       keyId: req.gatewayKey.id,
       keyName: req.gatewayKey.name,
@@ -661,26 +554,18 @@ async function handleChatCompletion(db, req, res, options = {}) {
       durationMs: Date.now() - startedAt,
       firstTokenMs: null,
       streamed,
-      errorCode: 'context_length_exceeded',
+      errorCode: 'context_limit_reached',
     });
     return apiError(
       res,
       400,
-      `This request asks DeepAI to read ${freshText} bytes of prompt fresh even after the gateway `
-        + `compacted it, and this model's catalog window allows at most ${budget} bytes fresh. `
-        + `The current turn alone is larger than that budget, so compacting the conversation cannot `
-        + `help; the x-gateway-prompt header on this refusal carries the numbers.`,
-      'context_length_exceeded',
+      `This request would ask DeepAI to read ${freshText} bytes of prompt fresh, but this model's `
+        + `catalog window allows at most ${budget} bytes. The gateway has not shortened it. `
+        + `Compact the session or start a new chat, then retry. The x-gateway-prompt header on this `
+        + `refusal carries the numbers.`,
+      'context_limit_reached',
     );
   }
-
-  const imageNote = imageCount === 0
-    ? 'images=0'
-    : !catalogAcceptsImages
-      ? `images=${imageCount} dropped:catalog`
-      : recentlyRefused
-        ? `images=${imageCount} dropped:refused-recently`
-        : `images=${imageCount} sent`;
 
   const id = `chatcmpl-${randomUUID().replace(/-/g, '').slice(0, 24)}`;
   const created = Math.floor(Date.now() / 1000);
@@ -695,7 +580,6 @@ async function handleChatCompletion(db, req, res, options = {}) {
   const calls = new Map();
   let usage;
   let finish = 'stop';
-  let firstEventMs;
   let firstTokenMs;
   let roleSent = false;
   let status = 200;
@@ -728,7 +612,6 @@ async function handleChatCompletion(db, req, res, options = {}) {
        * so a refusal still reaches the caller as a refusal rather than as a 200.
        */
       if (event.type === 'open') {
-        if (firstEventMs === undefined) firstEventMs = Date.now() - startedAt;
         if (write !== undefined && !roleSent) {
           roleSent = true;
           write({ role: 'assistant' });
@@ -874,13 +757,13 @@ async function handleChatCompletion(db, req, res, options = {}) {
     const retryBytes = freshBodyBytes(retryParams, retryMessages, covered, usesResponses);
     if (promptBudgetBytes !== undefined && retryBytes > promptBudgetBytes) {
       status = 400;
-      errorCode = 'context_length_exceeded';
+      errorCode = 'context_limit_reached';
       failure = new UpstreamError(
         `The text-only retry after the image refusal would ask DeepAI to read `
           + `${retryBytes.toLocaleString('en-US')} bytes of prompt fresh, over this gateway's `
           + `${promptBudgetBytes.toLocaleString('en-US')}-byte fresh budget. `
-          + 'Send the question without the image, or compact the conversation and retry.',
-        'CONTEXT_LENGTH_EXCEEDED',
+          + 'Compact the session or start a new chat, then send the question without the image.',
+        'CONTEXT_LIMIT_REACHED',
         { status: 400 },
       );
     } else {
@@ -889,7 +772,6 @@ async function handleChatCompletion(db, req, res, options = {}) {
       calls.clear();
       usage = undefined;
       finish = 'stop';
-      firstEventMs = undefined;
       firstTokenMs = undefined;
       status = 200;
       errorCode = undefined;
@@ -1014,58 +896,6 @@ async function handleChatCompletion(db, req, res, options = {}) {
     }
   }
 
-  /*
-   * What the effort setting did, as opposed to what it asked for.
-   *
-   * Measured on the free models and on the paid ones: DeepAI accepts `reasoning_effort` and
-   * ignores it. A request sent with `none` still comes back with a hundred-odd reasoning tokens,
-   * every shape of "off" the API can express was tried, and no value is ever refused - `banana`
-   * and `999` are answered like `high`. So the log says both halves: what was asked for, and what
-   * came back. A line reading `effort=none reasoning=127` is not a bug report about this gateway.
-   */
-  /*
-   * How fast the model talked, measured the way a caller would measure it: the tokens that came
-   * back over the time it took to produce them, starting from the first one.
-   *
-   * Both halves are on the same line as the request's own timings, so a caller comparing "the app
-   * feels twice as fast" with this gateway has something to compare: a rate per request, for the
-   * same model and the same prompt, instead of an impression. Reasoning tokens are excluded on
-   * purpose - they are not what the reader sees arrive - and counted separately, which is why the
-   * two can differ by a factor of two on a model that thinks.
-   */
-  const generationMs = firstTokenMs === undefined
-    ? 0
-    : Math.max(1, Date.now() - startedAt - firstTokenMs);
-  const outputTokens = usage?.outputTokens ?? 0;
-  const speedNote = generationMs > 0 && outputTokens > 0
-    ? `speed=${(outputTokens / (generationMs / 1000)).toFixed(1)}tok/s `
-    : '';
-
-  const askedEffort = effortOf(requestedEffort(body));
-  const effortNote = askedEffort === undefined && (usage?.reasoningTokens ?? 0) === 0
-    ? ' '
-    : `effort=${askedEffort ?? 'unset'} reasoning=${usage?.reasoningTokens ?? 0} `;
-
-  /*
-   * Where the time went, on one line.
-   *
-   * The three numbers answer the only question a slow request raises: the catalog read
-   * (this gateway's own work), the wait for DeepAI to accept the call, and the wait for its
-   * first token (the model's work). Reading them together is what tells a gateway problem
-   * from a slow model instead of guessing at both.
-   */
-  log?.(`v1 chat/completions ${upstreamModel} stream=${streamed ? 'yes' : 'no'} status=${status} `
-    + `catalog=${catalogMs}ms `
-    + `first-event=${firstEventMs ?? '-'}ms first-token=${firstTokenMs ?? '-'}ms `
-    + `total=${Date.now() - startedAt}ms${waitedMs > 0 ? ` waited=${waitedMs}ms` : ''} `
-    + `prompt ${arrived.count}msg/${arrived.chars}ch/${arrived.bytes}B in, `
-    + `${forwarded.count}msg/${forwarded.chars}ch/${forwarded.bytes}B out `
-    + `fresh=${freshBytes}B reused=${session.reused ? 'yes' : 'no'} `
-    + `session=${sessionId.slice(0, 8)} ${transcriptShape(body.messages)} `
-    + `${speedNote}`
-    + `${effortNote}`
-    + imageNote);
-
   record(db, {
     keyId: req.gatewayKey.id,
     keyName: req.gatewayKey.name,
@@ -1103,7 +933,6 @@ async function handleChatCompletion(db, req, res, options = {}) {
       keyId: req.gatewayKey.id,
       messages: sessionMessages,
       tools: body.tools,
-      compacted: trimNote !== '',
     });
   }
 

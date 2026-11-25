@@ -20,10 +20,8 @@
  * well as the digest of each of the last few messages that are not `system`/`developer` (those are
  * the ones a harness rewrites). A request that shares a run of those digests with a remembered
  * conversation is a continuation of it, and reuses its session id; its tail counts as cached only
- * when the opening fingerprint still matches and the last request was not shortened here. (A
- * shortened request leaves the endpoint's cache holding the checkpoint, not the caller's original
- * transcript, which is what arrives next.) `deepai/fit.js` then shortens a cold prompt that no
- * longer fits.
+ * when the opening fingerprint still matches. A prompt whose fresh part is over the model's budget
+ * is refused by the caller, which can compact its own session and try again.
  *
  * **What is stored is digests and one opening fingerprint** - one SHA-256 hex digest per message
  * plus a hash of the system prompt, tools and opening messages, never the text itself. It is a
@@ -181,7 +179,8 @@ function prefixHash(messages, tools) {
  *
  * A row is a cache hint, never a source of truth: an unreadable one is treated as empty, which
  * makes the request cold rather than failing it. Rows written before the fingerprint existed are
- * arrays of digests; they are still read, with no fingerprint to check.
+ * arrays of digests; they are still read, with no fingerprint to check. A `compacted` flag is
+ * read from rows written by older versions that rewrote prompts; those rows are still cold.
  *
  * @param {{tail?: unknown}} row
  * @returns {{prefix?: string, digests: string[], compacted: boolean}}
@@ -247,9 +246,9 @@ function continuationOf(db, owner, digests, prefix, now) {
     /*
      * A changed opening - a harness compaction, a rewritten system prompt, a new tool catalog -
      * still belongs to the same conversation, so its id is kept. Nothing of its prefix is cached,
-     * though: the caller measures the whole prompt fresh, and compacts it here if it is too large.
-     * A row whose last request this gateway itself compacted is cold for the same reason: the
-     * endpoint cached the checkpoint, not the caller's original transcript that arrives next turn.
+     * though: the caller measures the whole prompt fresh, and refuses it if it is too large. A row
+     * written by a version that compacted here is cold for the same reason: the endpoint cached
+     * the checkpoint, not the caller's original transcript that arrives next turn.
      */
     const cold = compacted || (storedPrefix !== undefined && storedPrefix !== prefix);
     const storedPosition = new Map();
@@ -305,7 +304,7 @@ function sharedCount(covered, digests) {
  * from the first few thousand characters, so two unrelated conversations can open identically and
  * be handed the same row, and one coincidentally equal message - a repeated `ok`, a tool echo - is
  * not enough to call that cached. When `reused` is false the caller measures the whole prompt as
- * fresh, which is the safe direction: over-counting fresh shortens a request that might have fit,
+ * fresh, which is the safe direction: over-counting fresh refuses a request that might have fit,
  * while under-counting fresh is the silent truncation this exists to prevent.
  *
  * @param {import('node:sqlite').DatabaseSync} db
@@ -352,9 +351,9 @@ export function resolveSession(db, { owner, messages, tools, callerSessionId, no
  * fresh, which is the number the byte budget has always measured.
  *
  * This is a cache hint, not an assertion about what the endpoint kept: when a session's cache has
- * expired server-side, the endpoint reads the whole prompt fresh again whatever this returns, and
- * the answer that follows is the shortened one. Nothing here can tell that apart; the log line
- * for a cold request that came back with no cache hit is what makes it visible.
+ * expired server-side, the endpoint reads the whole prompt fresh again whatever this returns.
+ * Nothing here can tell that apart; the log line for a request that came back with no cache hit
+ * is what makes it visible.
  *
  * @param {string[]} covered - digests from {@link resolveSession}.
  * @param {unknown} messages
@@ -412,15 +411,13 @@ export function freshMessages(covered, messages) {
  * messages before the first assistant reply - so a later request whose opening was rewritten is
  * treated as cold instead of trusting a tail the endpoint's cache no longer describes.
  *
- * `messages` are the caller's transcript as it arrived, not the shortened one this gateway sent:
- * the next turn will carry the caller's version, and matching it is what keeps the session id
- * stable across a gateway compaction. `compacted` then marks the row cold, because the endpoint's
- * cache holds the checkpoint rather than that original transcript.
+ * `messages` are the caller's transcript as it arrived: the next turn will carry the same version,
+ * and matching it is what keeps the session id stable.
  *
- * @param {{sessionId: string, owner: string, keyId?: string|null, messages: unknown, tools?: unknown, compacted?: boolean, now?: number}} params
+ * @param {{sessionId: string, owner: string, keyId?: string|null, messages: unknown, tools?: unknown, now?: number}} params
  * @returns {void}
  */
-export function rememberSession(db, { sessionId, owner, keyId, messages, tools, compacted = false, now = Date.now() }) {
+export function rememberSession(db, { sessionId, owner, keyId, messages, tools, now = Date.now() }) {
   db.prepare(`
     INSERT INTO conversation_sessions (session_id, owner, key_id, tail, updated_at)
     VALUES (?, ?, ?, ?, ?)
@@ -432,7 +429,6 @@ export function rememberSession(db, { sessionId, owner, keyId, messages, tools, 
   `).run(sessionId, owner, keyId ?? null, JSON.stringify({
     prefix: prefixHash(messages, tools),
     tail: messageDigests(messages),
-    compacted,
   }), now);
   pruneSessions(db, { owner, now });
 }
