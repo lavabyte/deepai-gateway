@@ -257,6 +257,10 @@ once a turn (date, working directory, model name); ignoring it keeps the id stab
 conversation grows. When the harness compacts, the first user message becomes a summary, so the id
 changes and DeepAI starts a new cache. That is correct: the prompt prefix changed too.
 
+Two conversations that open with a byte-identical first user message would get the same id, since
+nothing is stored to tell them apart. A caller running parallel chats can always separate them by
+sending its own `x-session-id`, which wins over the derived one.
+
 There is no `conversation_sessions` table, no message digests, no last-use timestamp, no seven-day
 expiry and no per-account cap. There is nothing to prune, and nothing to invalidate when DeepAI's
 cache expires: DeepAI owns the cache, and the next turn simply starts a new one. The caller's
