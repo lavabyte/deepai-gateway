@@ -68,7 +68,7 @@ each one; `npm start` reads `.env`, so nothing has to be exported in your shell.
 | `DATABASE` | `./data/deepai.db` | SQLite file |
 | `TRUST_PROXY` | unset | Set `1` behind a TLS proxy: trust `X-Forwarded-*` and set `Secure` cookies |
 | `FORGET_ACCOUNT_AFTER_DAYS` | `0` | Forget accounts nobody has used for this many days - see [Retention](#retention). `0` (the default) forgets nothing |
-| `PROMPT_BUDGET_BYTES` | unset | Optional override for the largest prompt sent upstream that DeepAI has to read fresh. Unset means each model's catalog `contextWindow - maxTokens`; see [the fresh part](#what-it-enforces-is-the-fresh-part) |
+| `PROMPT_BUDGET_BYTES` | unset | Optional override for the largest serialized prompt sent upstream. Unset means each model's catalog `contextWindow - maxTokens`; see [the whole prompt](#what-it-enforces-is-the-whole-prompt) |
 | `LOG_REQUESTS` | `1` | Set `0` to silence per-request logging |
 | `PRICING_CACHE` | `./data/pricing.json` | Where the fetched price table is cached |
 
@@ -204,33 +204,16 @@ the start of the prompt only, 170 KB of prose with 45,921 and both markers. What
 does to a long prompt, it does by content - which is exactly why nothing can be *predicted* from the
 size of a body, and why the gateway does not try to guess what survived.
 
-#### The wall is on what is read fresh, not on the conversation
+#### The budget is the model's window, not a guess about the cache
 
 Every probe above was a single cold request: nothing of it had been seen before, so the whole
-prompt was read and the wall showed up at about 196 KB of it. A conversation is not that. DeepAI
-serves a prompt from its prompt cache once the conversation's prefix is in it, and then only the new
-tail is read; the prefix can be megabytes.
+prompt was read and the wall showed up at about 196 KB. That is a backend measurement, not the
+model's context window, and it is not a policy constant here.
 
-Two independent records on this machine say so. The gateway's own traffic, in `data/deepai.db`
-(`usage.input_tokens` is fresh input, `usage.cache_read_tokens` is cached):
-
-| when | model | fresh prompt tokens | cached prompt tokens |
-| --- | --- | --- | --- |
-| 2026-10-26 16:40Z | deepseek-v4.1-flash | **194** | **720,896** |
-| 2026-10-26 16:40Z | deepseek-v4.1-flash | **155** | **719,744** |
-
-`720,896` cached tokens is a request far larger than 320,000, let alone than 196 KB, and it was
-answered. Across the 96 answered requests that reported a cache hit, the average fresh part was
-8,321 tokens.
-
-The desktop app's own session store, `~/.deepai-code/userdata/deepai/pi/deepai/sessions/` -
-append-only JSONL, replayed by walking `parentId` back to the newest `compaction` record - shows the
-same thing from the client side. In one session of 1,593 model turns, 86% of turns sent a request
-body over 196 KB, the largest 1.75 MB; the endpoint answered the largest with `cacheRead` 291,328
-and `input` 424. Measured over that session, `cacheRead` climbs with the transcript to about 290,000
-tokens, then drops at a compaction - the app compacts at `contextWindow - reserveTokens`, about
-290,000 of 320,000 - and climbs again. The fresh part stays in the tens or hundreds of tokens even
-on the turns whose body is 1.7 MB.
+A conversation is different. DeepAI serves a prompt from its cache once the prefix is in it, and
+the gateway's own traffic shows requests with **720,896 cached tokens against 155 fresh ones**.
+The cache makes those tokens cheaper and faster to read, but it does not remove them from the
+model's context window. A prompt does not gain capacity because it is warm.
 
 So there is one published window per model, and one enforced budget derived from it:
 
@@ -246,9 +229,9 @@ catalog, and baking it in made the gateway shorten healthy conversations. It rem
 measurement and an optional operator override, not a default.
 
 **The gateway refuses a prompt that would lose its start.** A caller sends its whole transcript
-every turn. While the fresh part fits, nothing is touched: the endpoint's prompt cache does the
-work, and the harness does its own compaction when it decides to. When a cold prompt - or a new
-tail - is past the model's budget, the gateway returns a `400` before sending anything and leaves
+every turn, and the budget is measured on that whole serialized request. The endpoint's prompt
+cache still does its work, and the harness does its own compaction when it decides to. When the
+prompt is past the model's budget, the gateway returns a `400` before sending anything and leaves
 the transcript alone. DeepAI would otherwise answer with a `200` from the tail, silently missing
 the front; the error tells the caller to compact the session or start a new chat, then retry, and
 `x-gateway-prompt` carries the numbers.
@@ -258,49 +241,28 @@ the gateway would put text on the wire the caller never saw, then make the calle
 transcript arrive cold on the next turn. The gateway can measure the prompt; it cannot decide which
 part of somebody else's conversation is safe to forget.
 
-#### One session per conversation, across compaction and restarts
+#### One session per conversation, without storing anything
 
 The cache is addressed by the session id this gateway sends - `session_id`,
-`x-client-request-id` and `x-session-affinity`, the same three headers the app sends. That is why
-the id has to survive everything a harness does between turns. It used to be derived from the
-conversation's opening (the system prompt and the first user message), which is stable until the
-harness compacts - the opening becomes a summary - or rewrites its system prompt, which harnesses do
-at least once a turn: the date, the working directory, the model name. At that moment the id
-changed, the endpoint had no cache for the new one, the whole multi-megabyte transcript had to be
-read fresh, and everything past about 196 KB of it was discarded from the front. That is the bug
-report: a working conversation greeted with "Hi, how can I help you today?".
+`x-client-request-id` and `x-session-affinity`, the same three headers the app sends. The id has
+one job: keep the turns of one conversation on one DeepAI cache. It is not a conversation record.
 
-So the gateway remembers, per conversation and per account, where the conversation got to, and
-recognises the next turn as a continuation even when the opening is gone. A request whose tail
-shares at least three messages with a remembered conversation - with the newest shared message among
-the last eight of both sides - is that conversation, and reuses its session id. Resolution order:
+Resolution is stateless:
 
 1. the caller's own `x-session-id`, which always wins and is forwarded verbatim;
-2. a remembered conversation this request continues;
-3. otherwise the id derived from the transcript opening, which is stable for a first turn.
+2. otherwise a hash of the account and the **first user message**.
 
-The row also holds a fingerprint of the request's opening - the system prompt, the tool catalog,
-and the messages before the first assistant reply. If any of those changed - a harness compaction,
-a rewritten system prompt, a new tool list - the id is still reused, but nothing is counted as
-cached: the whole prompt is fresh, and is refused if it does not fit. That is the safe side of
-the same bug. A warm tail is only evidence of a warm prompt prefix when the prefix itself is
-unchanged.
+The system prompt is deliberately not part of that hash, because a harness rewrites it at least
+once a turn (date, working directory, model name); ignoring it keeps the id stable while the
+conversation grows. When the harness compacts, the first user message becomes a summary, so the id
+changes and DeepAI starts a new cache. That is correct: the prompt prefix changed too.
 
-**What is stored is one SHA-256 digest per message and one opening fingerprint, and nothing
-else** - in the `conversation_sessions` table, the last 40 messages that are not
-`system`/`developer`, because those are the ones a harness rewrites. It is a cache key, not a
-transcript: no prompt text is kept, and nothing from that table is ever sent to DeepAI or injected
-into a prompt. It only decides which `session_id` header goes on the request and which part of the
-prompt counts as fresh. Isolation is by account: a row belonging to another account never matches,
-whatever the transcript says.
+There is no `conversation_sessions` table, no message digests, no last-use timestamp, no seven-day
+expiry and no per-account cap. There is nothing to prune, and nothing to invalidate when DeepAI's
+cache expires: DeepAI owns the cache, and the next turn simply starts a new one. The caller's
+transcript is the only record of the conversation.
 
-There is no local chat lifetime: no seven-day expiry and no 32-conversation cap. DeepAI owns the
-prompt cache and decides when it is gone. The row is removed when its account is deleted, and when
-DeepAI answers an over-budget body with zero cached tokens - its own signal that the remembered
-prefix is stale. The next turn is then measured cold instead of trusting a cache that is no longer
-there.
-
-#### What it enforces is the fresh part
+#### What it enforces is the whole prompt
 
 The budget is derived per request from the selected model's catalog entry:
 `(contextWindow - maxTokens) * CHARS_PER_TOKEN`, the same shape the desktop app uses when it
@@ -309,22 +271,22 @@ changes a model, and no default number to go stale. `PROMPT_BUDGET_BYTES` is an 
 override for a deployment that measured a tighter limit; unset or invalid means "use the model",
 never "fall back to the old 176,400".
 
-The budget is measured on what the endpoint has to read for this request: the messages after the
-last one the conversation's remembered tail covers, serialized as they are sent. On a cold
-conversation that is the whole serialized body, tools and JSON framing included. On a warm one it
-is the new tail, measured through the same body serializer so the tool catalog and framing are
-counted too; a conversation of any total size is forwarded untouched while that fits.
+The budget is measured on the whole serialized request: every message in `messages`, the tool
+catalog and the JSON framing. A cached prefix is cheaper to read, but its
+tokens still occupy the model's context window, so cache state does not change whether the request
+fits. Measuring the whole prompt is also the only number the gateway can know without storing
+anything about the conversation.
 
-A request whose fresh part is past the budget is refused before it goes upstream, with the
+A request whose whole prompt is past the budget is refused before it goes upstream, with the
 OpenAI error shape and a code that names the reason:
 
 ```json
 {
   "error": {
-    "message": "This request would ask DeepAI to read 200,041 bytes of prompt fresh, but this
-                model's catalog window allows at most 189,440 bytes. The gateway has not
-                shortened it. Compact the session or start a new chat, then retry. The
-                x-gateway-prompt header on this refusal carries the numbers.",
+    "message": "This request's serialized prompt and tools are 300,150 bytes, but this model's
+                catalog window allows at most 262,144 bytes. The gateway has not shortened it.
+                Compact the session or start a new chat, then retry. The x-gateway-prompt
+                header on this refusal carries the numbers.",
     "type": "invalid_request_error",
     "code": "context_limit_reached",
     "param": null
@@ -347,45 +309,26 @@ The same facts ride on every answer in an `x-gateway-prompt` header, semicolon-s
 | --- | --- |
 | `sent` | bytes of prompt text leaving the gateway, unchanged |
 | `received` | bytes of prompt text that arrived |
-| `body` | bytes of the serialized upstream body, tools included |
-| `fresh` | bytes the endpoint has to read rather than serve from cache: the whole body when cold, the new tail when warm. What the budget is measured on |
+| `body` | bytes of the serialized upstream body, tools included. What the budget is measured on |
 | `window` | the token window DeepAI's catalog declares for this model, or `unknown` |
 | `budget` | that window in characters, or `unknown` |
-| `budget-bytes` | the byte budget on the fresh part: the model's window less its output allowance, or `PROMPT_BUDGET_BYTES` when set |
-| `reused` | `yes` when the request continued a session the endpoint should already have cached |
+| `budget-bytes` | the byte budget on the whole prompt: the model's window less its output allowance, or `PROMPT_BUDGET_BYTES` when set |
 
 The Models page shows the window each model declares, because that page is the catalog;
 `/v1/models` publishes the same per-model number, because it is the one a harness should compact
 against. A model whose catalog entry has no window is shown without one rather than with a
 made-up fallback.
 
-One failure is left that the gateway cannot prevent after the fact, and the signal for it is the
-endpoint's own accounting rather than the gateway's expectation: a request whose body is past the
-model's budget and whose answer reports **no cache hit at all** was read fresh in full, so its front
-may have been dropped. That happens when an operator sets a larger `PROMPT_BUDGET_BYTES`, or when a
-server-side cache expires under a conversation this gateway still believes is warm. The gateway
-forgets that cache hint, so the next turn is measured cold instead of trusting a prefix DeepAI no
-longer has. Nothing is retried, but an operator can see it:
-
-```
-truncation-suspect session=4f2a91c0 reused=yes body=300150B fresh=742B
-```
-
-`reused=yes` there is the whole point: the gateway thought the prefix was cached, the endpoint
-disagreed. At the default budget a genuinely cold request of that size is refused before it is
-sent, so the endpoint is not handed a prompt it will truncate.
-
 The app does truncate its own tool output (a file read is capped, bash output is capped), which
 keeps a single turn small, but not the transcript: measured on this machine's own session store, the
 transcript of one long chat reached 241,019 prompt tokens over 1,378 model turns before its fifth
 compaction.
 
-The unit tests cover the cold case (a prompt past the budget refused with `context_limit_reached`
-and the action in its message, never sent to be silently truncated), the warm case (a body past the
-wall forwarded whole, under the same session id as the turn before), the harness-compaction case
-(the id kept, the whole prompt measured fresh), account isolation, parallel conversations of one
-key, a caller-supplied `x-session-id`, the configurable budget with its fallback, and the fact that
-a cache hint is kept until DeepAI's own cache-miss signal or account deletion removes it.
+The unit tests cover the refusal at the model's budget with `context_limit_reached` and the action
+in its message, the tool catalog counting toward the budget, the harness-compaction case (a new id
+and the whole new prompt measured), account isolation, parallel conversations of one key, a
+caller-supplied `x-session-id`, the configurable budget with its fallback, and the fact that a
+conversation id is derived without writing anything to the database.
 
 ### What a paid request costs: an equation on the catalog's price
 
@@ -582,18 +525,17 @@ The price shown is `theosPerRequest`, which is what DeepAI charges per call.
 ### The window published is the one a harness should compact against
 
 `/v1/models` publishes `context_window` as the selected model's own `contextWindow` from the
-catalog, and what this gateway actually serves - a conversation whose prefix is in the endpoint's
-prompt cache is forwarded however large it is, so a warm chat of that size works here as it works
-in the app. `/v1/models/details` carries the same field, because it is a JSON endpoint any key
-holder can call, not a dashboard-only view. There is no local 320,000 fallback: if the catalog did
-not send a window, the field is omitted.
+catalog, and the gateway enforces that window against the whole serialized prompt.
+`/v1/models/details` carries the same field, because it is a JSON endpoint any key holder can
+call, not a dashboard-only view. There is no local 320,000 fallback: if the catalog did not send a
+window, the field is omitted.
 
-What is refused, on the request path, is a *cold* prompt - or a new tail - larger than the budget
-derived from that model's window. The gateway does not compact it before sending: it returns
-`context_limit_reached`, rather than handing DeepAI a prompt that may lose its front. A warm
-conversation is never refused for its total size. Keeping the conversation on one session is what
-makes that distinction hold, and a harness compaction is the case it exists for. The measurements
-and the mechanism are in **"What a cold prompt costs: the measured wall at about 196 KB"** above.
+What is refused, on the request path, is any prompt whose whole serialized body is larger than the
+budget derived from that model's window. The gateway does not compact it before sending: it
+returns `context_limit_reached`, rather than handing DeepAI a prompt that may lose its front.
+There is no warm-prompt exemption, because a cached prompt still fills the same window. The
+measurements and the mechanism are in **"What a cold prompt costs: the measured wall at about
+196 KB"** above.
 
 
 ### Log in / log out
@@ -824,7 +766,7 @@ so a plain copy of the `.db` file is complete on its own.
 SQLite iterator, so exporting a large history does not load it all into memory.
 The dashboard's **Export CSV** button uses the same endpoint.
 
-## How accounts and sessions are stored
+## How accounts and browser sessions are stored
 
 - **`accounts`** - one row per DeepAI user: `username`, the DeepAI `api_key`, the
   cached Credits allowance, `is_pro`, and `last_seen_at` (the last time the account was
@@ -836,12 +778,9 @@ The dashboard's **Export CSV** button uses the same endpoint.
 - **`api_keys`** - as below, plus `owner_username` (which account pays) and
   `owner_key_hash` (the DeepAI key it was created with, kept as a record).
 - **`auth_events`** - append-only login/logout/refresh/denied trail, per account.
-- **`conversation_sessions`** - one row per conversation the gateway has seen, per account:
-  the session id sent to DeepAI and the last 40 **message digests**, newest last. Digests only -
-  no prompt text, and nothing in it is ever sent upstream; it is the cache key that keeps a
-  conversation on one session across a compaction. There is no local expiry or row cap: DeepAI
-  owns the cache lifetime. The row is removed with its account, or when DeepAI reports a cache
-  miss on an over-budget body.
+
+Conversations have no table: the session id sent to DeepAI is derived from the first user
+message on every request (or supplied by the caller), so there is nothing to expire or prune.
 
 ## How keys are stored
 
@@ -1154,13 +1093,12 @@ v1 glm-5.3-flash capacity: the model is busy, waiting 2000ms (attempt 2 of 4)
 ### Session affinity, and parallel conversations
 
 DeepAI routes a turn by the session it belongs to (`X-Session-Affinity`), which is how the same
-conversation keeps its prompt cache - and the cache is what lets a conversation be far larger than
-anything the endpoint would read fresh. This gateway sends `x-session-id` from the request when the
-caller passes one, and otherwise resolves one per conversation: a request whose recent messages
-continue a conversation this gateway has seen reuses that conversation's id, even across a harness
-compaction or a rewritten system prompt, and a first turn gets an id derived from its opening.
-What is remembered is a digest per message and an opening fingerprint - never the text - see
-**"One session per conversation, across compaction and restarts"** above.
+conversation keeps its prompt cache. The cache makes a prompt cheaper, not larger: the budget is
+still the model's window. This gateway sends `x-session-id` from the request when the caller
+passes one, and otherwise derives one from the account and the first user message. The system
+prompt is ignored so a harness rewriting it each turn does not break the session; a compaction
+changes the first user message, so it starts a new one. Nothing is stored - see **"One session per
+conversation, without storing anything"** above.
 
 So a client that runs several conversations or subagents in parallel through one key gets a
 distinct session for each, as the desktop app does with its per-thread session id. A caller that
@@ -1399,7 +1337,7 @@ glyph still reads at 32px.
 
 ```
 server.js               Express wiring, static hosting, error shaping
-src/db.js               SQLite schema and migrations (v4: accounts + sessions, v5: revoke deletes, v6: last_seen_at)
+src/db.js               SQLite schema and migrations (v4: accounts + sessions, v5: revoke deletes, v6: last_seen_at, v9: no conversation table)
 src/keys.js             key generation, hashing, limit checks
 src/usage.js            usage recording and every aggregate query
 src/pricing.js          live OpenRouter prices, cache, and the savings estimate
@@ -1444,10 +1382,9 @@ turn - see [Performance](#performance)).
 - Images are forwarded to models whose catalog entry declares `image` input, and replaced by a
   note in the text for models that do not - or that refused one in the last 15 minutes. See
   [Images](#images).
-- A *cold* prompt, or a new tail, larger than the selected model's catalog budget is refused with
-  `context_limit_reached` before it is sent; a warm conversation is never refused for its total
-  size. The message asks the caller to compact the session or start a new chat. See
-  [the fresh part](#what-it-enforces-is-the-fresh-part).
+- A prompt larger than the selected model's catalog budget is refused with
+  `context_limit_reached` before it is sent. The message asks the caller to compact the session or
+  start a new chat. See [the whole prompt](#what-it-enforces-is-the-whole-prompt).
 - At most 5 gateway keys per account.
 - The dashboard has no password of its own: authentication *is* the DeepAI account,
   proven by a key only DeepAI could have issued. Anyone who can reach the port and

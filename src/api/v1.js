@@ -33,7 +33,7 @@ import {
   contextWindowOf,
   promptBudgetFor,
 } from '../deepai/window.js';
-import { forgetSession, freshMessages, rememberSession, resolveSession } from '../deepai/sessions.js';
+import { conversationId } from '../deepai/sessions.js';
 import { creditsPerMinute, creditsPerThousand } from '../deepai/pricing.js';
 import { UpstreamError } from '../deepai/wire.js';
 import { acceptsImages, countImages, withoutImages } from '../deepai/images.js';
@@ -58,8 +58,8 @@ import {
  * `count` is how many messages the caller sent, `chars` how much text they carry, `bytes` that
  * text in UTF-8. `chars` is the unit the token meter in `estimateUsage` reads: `chars /
  * CHARS_PER_TOKEN` is the same `prompt_tokens` this gateway reports when DeepAI sends no usage.
- * `bytes` is what the log reports, and the serialized body it belongs to is what the fresh-byte
- * budget is measured on - see `upstreamBodyBytes` and `freshBodyBytes`.
+ * `bytes` is what the log reports, and the serialized body it belongs to is what the context
+ * budget is measured on - see `upstreamBodyBytes`.
  *
  * `imageBytes` is the payload of any image parts, counted apart so a log can say how much of a
  * prompt was an image rather than text. It is not subtracted from anything: an image is prompt
@@ -118,31 +118,6 @@ function promptShape(messages) {
 function upstreamBodyBytes(params, usesResponses) {
   const body = usesResponses ? responsesBody(params) : completionBody(params);
   return Buffer.byteLength(JSON.stringify(body), 'utf8');
-}
-
-/**
- * The bytes this request makes the endpoint read fresh, in the same unit as the budget.
- *
- * A conversation whose prefix the endpoint already cached costs nothing to carry: only the
- * messages after the last one the stored tail covers are read fresh, and that is the part the
- * model's budget applies to. Those messages are measured as the transport would serialize them,
- * so an image part or a tool call counts what it actually weighs.
- *
- * With nothing covered - a cold conversation, or one this account has no row for - the fresh part
- * is the whole serialized body, tools and framing included, which is the number the budget has
- * always measured. On a warm one it is the tail, measured through the same body builder so the
- * tool catalog and framing are not invisible to the guard.
- *
- * @param {object} params - the completion params, as passed to the transport.
- * @param {Array<object>} messages - the messages that would be sent.
- * @param {string[]} covered - digests the endpoint should already have cached.
- * @param {boolean} usesResponses - whether this model is served by `/deepai_code/responses`.
- * @returns {number} UTF-8 bytes.
- */
-function freshBodyBytes(params, messages, covered, usesResponses) {
-  const fresh = freshMessages(covered, messages);
-  if (fresh === messages) return upstreamBodyBytes(params, usesResponses);
-  return upstreamBodyBytes({ ...params, messages: fresh }, usesResponses);
 }
 
 /** Model used when a request omits one. */
@@ -402,36 +377,16 @@ async function handleChatCompletion(db, req, res, options = {}) {
     : body.messages;
 
   /*
-   * Which session this request belongs to, and what of its prompt the endpoint already has.
+   * Which session this request belongs to.
    *
-   * The session id is what DeepAI keeps a conversation's prompt cache on. This gateway used to
-   * derive it from the conversation's opening alone, which stayed stable until the harness
-   * compacted - the opening becomes a summary - or rewrote its system prompt, which harnesses do
-   * (date, cwd, model name). Then the id changed, the endpoint had no cache for it, the entire
-   * multi-megabyte transcript had to be read fresh, and past its limit for a cold prompt the
-   * endpoint silently discarded the front of it. From a caller that looks like a working
-   * conversation answered as though it had just been opened - "Hi, how can I help you today?" in
-   * the middle of a task.
-   *
-   * So the id is resolved against the conversations this account has already had: a caller's own
-   * `x-session-id` wins, a request that continues a remembered conversation reuses that
-   * conversation's id, and anything else gets the id derived from its opening. What is remembered
-   * is one digest per message, never the text - `deepai/sessions.js` explains it, and nothing
-   * from that table is sent upstream or injected into a prompt.
-   *
-   * `covered` is the part of this prompt that conversation has already sent, which the endpoint
-   * should have cached; the digest is taken from the messages as forwarded, so it describes what
-   * the endpoint actually saw rather than what arrived before an image was replaced by a note.
+   * The id only tells DeepAI which prompt cache to extend. Nothing about the conversation is
+   * stored here: a caller's own `x-session-id` wins, and otherwise the id is derived from the
+   * first user message. That opening survives the system prompt being rewritten between turns
+   * (date, cwd, model name), so normal turns keep the same cache. A compaction changes the
+   * opening, so it gets a new id and a new cache - which is right, because the prompt prefix
+   * changed too.
    */
-  const session = resolveSession(db, {
-    owner,
-    messages,
-    tools: body.tools,
-    callerSessionId: req.get('x-session-id'),
-  });
-  const sessionId = session.sessionId;
-  /* The transcript this request forwards, kept for the session row. */
-  const sessionMessages = messages;
+  const sessionId = req.get('x-session-id') || conversationId(messages, owner);
 
   const controller = new AbortController();
   res.on('close', () => {
@@ -443,8 +398,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
   const startedAt = Date.now();
 
   /*
-   * What the endpoint has to read FRESH for this request, built and measured before anything is
-   * sent.
+   * How big this request is, built and measured before anything is sent.
    *
    * The budget is not a constant in this file. It comes from the selected model's catalog entry:
    * `contextWindow - maxTokens`, in the same characters-per-token unit the usage meter uses.
@@ -453,11 +407,11 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * still set `PROMPT_BUDGET_BYTES`; the explicit value wins.
    *
    * A model the catalog sent no window for has no local budget. The gateway sends the prompt as
-   * written instead of inventing a limit, and the fallback refusal below stays out of the way.
+   * written instead of inventing a limit, and the refusal below stays out of the way.
    *
-   * A warm conversation is not measured by its size: once the prefix is cached, the endpoint reads
-   * only the new tail, and a conversation of many megabytes costs it a few hundred tokens. So only
-   * the fresh part is counted.
+   * The number is the whole serialized request, not a cache-adjusted tail. The model's window has
+   * to hold the cached prefix too, and the gateway keeps no conversation table to guess what
+   * DeepAI has cached. DeepAI owns the cache; this gateway only decides whether the request fits.
    */
   const windowTokens = contextWindowOf(model);
   const promptBudgetChars = windowTokens === undefined ? undefined : windowTokens * CHARS_PER_TOKEN;
@@ -481,32 +435,16 @@ async function handleChatCompletion(db, req, res, options = {}) {
     signal: undefined,
   };
   const upstreamBytes = upstreamBodyBytes(params, usesResponses);
-  /*
-   * Only a tail this request actually shares counts as cached.
-   *
-   * `resolveSession` can hand back a remembered row for the session id alone - the fallback id is
-   * derived from the first few thousand characters, so two conversations that open identically get
-   * the same id - and treating that row as cached would measure the fresh part as whatever follows
-   * the one message they happen to have in common. `reused` is the answer to "does this request
-   * share a message with that row", and when it is false nothing is known to be cached, so the
-   * whole prompt is fresh. Over-counting fresh only refuses a request that might have fit;
-   * under-counting fresh is the silent truncation this guard exists to prevent.
-   */
-  const covered = session.reused ? session.covered : [];
-  const freshBytes = freshBodyBytes(params, messages, covered, usesResponses);
 
   /*
    * The same facts on the wire, for a caller that never reads a log.
    *
    * `sent` and `received` are the prompt text in bytes - what leaves and what arrived. `body` is
-   * the whole serialized upstream request, tools and framing included. `fresh` is the part of it
-   * the endpoint has to read rather than serve from its prompt cache - on a cold conversation the
-   * whole body, on a warm one just the messages after the covered tail - and it is the number the
+   * the whole serialized upstream request, tools and framing included, and it is the number the
    * budget is measured against. `window` is the token window DeepAI's catalog declares for this
    * model, `budget` that window in characters, and `budget-bytes` the byte budget enforced below
-   * (the model's window less its output allowance, or the operator's explicit override). `reused`
-   * says whether this request continued a session the endpoint should already have cached. A
-   * client cannot learn any of this from DeepAI.
+   * (the model's window less its output allowance, or the operator's explicit override). A client
+   * cannot learn any of this from DeepAI.
    *
    * The refusal below carries the same numbers. Semicolon-separated `key=value`, as it always was.
    */
@@ -514,11 +452,9 @@ async function handleChatCompletion(db, req, res, options = {}) {
     `sent=${promptShape(messages).bytes}`,
     `received=${promptShape(body.messages).bytes}`,
     `body=${upstreamBytes}`,
-    `fresh=${freshBytes}`,
     `window=${windowTokens ?? 'unknown'}`,
     `budget=${promptBudgetChars ?? 'unknown'}`,
     ...(promptBudgetBytes === undefined ? [] : [`budget-bytes=${promptBudgetBytes}`]),
-    `reused=${session.reused ? 'yes' : 'no'}`,
   ].join('; '));
 
   /*
@@ -531,10 +467,10 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * than a different prompt. A model with no catalog window has no budget and is forwarded as
    * written.
    */
-  if (promptBudgetBytes !== undefined && freshBytes > promptBudgetBytes) {
-    const freshText = freshBytes.toLocaleString('en-US');
+  if (promptBudgetBytes !== undefined && upstreamBytes > promptBudgetBytes) {
+    const promptText = upstreamBytes.toLocaleString('en-US');
     const budget = promptBudgetBytes.toLocaleString('en-US');
-    log?.(`v1 ${upstreamModel} refused: ${freshBytes}B fresh over ${promptBudgetBytes}B budget `
+    log?.(`v1 ${upstreamModel} refused: ${upstreamBytes}B prompt over ${promptBudgetBytes}B budget `
       + `session=${sessionId.slice(0, 8)}`);
     record(db, {
       keyId: req.gatewayKey.id,
@@ -559,7 +495,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
     return apiError(
       res,
       400,
-      `This request would ask DeepAI to read ${freshText} bytes of prompt fresh, but this model's `
+      `This request's serialized prompt and tools are ${promptText} bytes, but this model's `
         + `catalog window allows at most ${budget} bytes. The gateway has not shortened it. `
         + `Compact the session or start a new chat, then retry. The x-gateway-prompt header on this `
         + `refusal carries the numbers.`,
@@ -744,7 +680,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
   if (imageRefused) {
     noteMultimodalRejection(upstreamModel);
     /*
-     * The retry carries different messages, so its fresh part is measured too.
+     * The retry carries different messages, so it is measured too.
      *
      * Stripping an image normally shrinks the request - a data URL is replaced by a short note -
      * but the note is a fixed length and a small enough image is shorter than it, so the retry can
@@ -754,14 +690,14 @@ async function handleChatCompletion(db, req, res, options = {}) {
      */
     const retryMessages = withoutImages(body.messages);
     const retryParams = { ...params, messages: retryMessages };
-    const retryBytes = freshBodyBytes(retryParams, retryMessages, covered, usesResponses);
+    const retryBytes = upstreamBodyBytes(retryParams, usesResponses);
     if (promptBudgetBytes !== undefined && retryBytes > promptBudgetBytes) {
       status = 400;
       errorCode = 'context_limit_reached';
       failure = new UpstreamError(
-        `The text-only retry after the image refusal would ask DeepAI to read `
-          + `${retryBytes.toLocaleString('en-US')} bytes of prompt fresh, over this gateway's `
-          + `${promptBudgetBytes.toLocaleString('en-US')}-byte fresh budget. `
+        `The text-only retry after the image refusal is `
+          + `${retryBytes.toLocaleString('en-US')} bytes, over this gateway's `
+          + `${promptBudgetBytes.toLocaleString('en-US')}-byte prompt budget. `
           + 'Compact the session or start a new chat, then send the question without the image.',
         'CONTEXT_LIMIT_REACHED',
         { status: 400 },
@@ -919,51 +855,6 @@ async function handleChatCompletion(db, req, res, options = {}) {
     errorCode: errorCode ?? null,
   });
 
-  /*
-   * The one failure this gateway cannot prevent, made visible instead.
-   *
-   * Every path through this handler keeps a *fresh* prompt under the model's budget, so the
-   * requests that can still exceed the whole budget are the ones where the gateway's idea of the
-   * cache was wrong: an operator raised `PROMPT_BUDGET_BYTES`, or a server-side cache expired
-   * under a conversation this gateway still believes is warm. Either way the endpoint read the
-   * whole body fresh, and nothing in the answer says whether it kept the front. So the signal is
-   * the endpoint's own accounting, not this gateway's expectation: a body past the budget whose
-   * answer reports zero cached tokens. A stream that carries no usage at all is not this case -
-   * the absence of the number is not a zero - and neither is a cache hit. Nothing is retried; an
-   * operator just gets to see it.
-   */
-  const cacheMiss = promptBudgetBytes !== undefined && status === 200 && usage !== undefined
-    && usage.cacheReadTokens === 0 && upstreamBytes > promptBudgetBytes;
-
-  /*
-   * Where this conversation got to, so the next turn continues it.
-   *
-   * Recorded after the answer, not before: the row describes what the endpoint has actually
-   * received, so a request that was refused - or that failed before anything was sent - must not
-   * teach it anything. Digests only; `deepai/sessions.js` says what is stored and why.
-   *
-   * DeepAI owns the cache lifetime. When its own accounting says this over-budget body was read
-   * with no cache hit at all, the remembered tail is no longer a safe hint: forget it, so the next
-   * turn is measured cold instead of trusting a prefix the endpoint may have dropped.
-   */
-  if (status === 200) {
-    if (cacheMiss && session.reused && session.covered.length > 0) {
-      forgetSession(db, { sessionId, owner });
-    } else {
-      rememberSession(db, {
-        sessionId,
-        owner,
-        keyId: req.gatewayKey.id,
-        messages: sessionMessages,
-        tools: body.tools,
-      });
-    }
-  }
-
-  if (cacheMiss) {
-    log?.(`truncation-suspect session=${sessionId.slice(0, 8)} reused=${session.reused ? 'yes' : 'no'} `
-      + `body=${upstreamBytes}B fresh=${freshBytes}B`);
-  }
 }
 
 /**

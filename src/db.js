@@ -16,7 +16,7 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 /** Current schema version. Bump when a migration below is added. */
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 /**
  * Open (creating if needed) the database at `file` and bring it to the current
@@ -80,6 +80,7 @@ export function openDatabase(file) {
   if (current < 6) migrateToV6(db);
   if (current < 7) migrateToV7(db);
   if (current < 8) migrateToV8(db);
+  if (current < 9) migrateToV9(db);
 
   // Only ever move forwards.
   if (current < SCHEMA_VERSION) {
@@ -354,20 +355,12 @@ function migrateToV7(db) {
 }
 
 /**
- * v8 - remember which conversation a session id belongs to.
+ * v8 - the old conversation table.
  *
- * DeepAI serves a conversation from its prompt cache once the prefix is cached, and addresses
- * that cache by the session id. The id used to be derived from how the conversation begins, so a
- * harness compaction - or any rewrite of the system prompt - produced a new id, a cold cache, and
- * a multi-megabyte prompt that the endpoint truncated from the front.
- *
- * `conversation_sessions` lets the gateway recognise the same conversation from its recent
- * messages and reuse its id. `tail` holds one SHA-256 digest per message and an opening
- * fingerprint - a cache key, never the message text - and `owner`
- * keeps one account's conversations from matching another's. There is no local expiry or cap:
- * DeepAI owns the prompt-cache lifetime, the row is removed when the account is deleted or when
- * the endpoint reports a cache miss for an over-budget body. See `src/deepai/sessions.js` for
- * what is stored and why.
+ * DeepAI addresses a conversation's prompt cache by session id. An earlier build stored message
+ * digests here to keep that id stable across a rewritten system prompt; v9 removed the table
+ * because the id can be derived from the opening without storing anything. Kept as a migration
+ * step so a database written by that build still reaches the current schema.
  */
 function migrateToV8(db) {
   db.exec(`
@@ -381,6 +374,17 @@ function migrateToV8(db) {
     CREATE INDEX IF NOT EXISTS conversation_sessions_owner
       ON conversation_sessions (owner, updated_at);
   `);
+}
+
+/**
+ * v9 - no local conversation state.
+ *
+ * The session id is derived from the opening on every request, so there is nothing to remember.
+ * Dropping the table also removes the message digests and last-use timestamps written by v8; a
+ * caller's transcript is the only record of the conversation.
+ */
+function migrateToV9(db) {
+  db.exec('DROP TABLE IF EXISTS conversation_sessions');
 }
 
 /** Short stable digest used to derive a username when DeepAI gives none. */

@@ -220,7 +220,7 @@ const db = openDatabase(':memory:');
 
 check('schema creates the expected tables', () => {
   const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name);
-  for (const table of ['meta', 'accounts', 'sessions', 'api_keys', 'usage', 'settings', 'auth_events', 'conversation_sessions']) {
+  for (const table of ['meta', 'accounts', 'sessions', 'api_keys', 'usage', 'settings', 'auth_events']) {
     assert.ok(names.includes(table), `missing table ${table}`);
   }
   // The pre-multi-user table must be gone, not merely unused.
@@ -353,13 +353,9 @@ check('accounts round-trip per username and never merge', () => {
   // Removal takes the account and its keys, and leaves other users alone.
   db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
               VALUES ('ktester', 'mine', 'sk-x', 'h-x', ?, 'unlimited', '[]', 'tester')`).run(Date.now());
-  db.prepare(`INSERT INTO conversation_sessions (session_id, owner, key_id, tail, updated_at)
-              VALUES ('s-tester', 'tester', 'ktester', '[]', ?)`).run(Date.now());
   clearAccount(db, 'tester');
   assert.equal(readAccount(db, 'tester'), undefined);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM api_keys WHERE owner_username = 'tester'").get().n, 0);
-  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM conversation_sessions WHERE owner = 'tester'").get().n, 0,
-    'and the cache hint goes with the account');
   assert.notEqual(readAccount(db, 'other'), undefined);
 });
 
@@ -2017,9 +2013,9 @@ await checkAsync('a pre-multi-user database migrates without losing anything', a
     'the database must reach the current schema',
   );
   assert.equal(upgraded.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name='account'").get().n, 0, 'the old table is gone');
-  // v8 adds the conversation table; an older database gets it without losing anything.
-  assert.equal(upgraded.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name='conversation_sessions'").get().n, 1,
-    'and the conversation sessions table is there');
+  // v9 leaves no local conversation state behind.
+  assert.equal(upgraded.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name='conversation_sessions'").get().n, 0,
+    'and no conversation table remains');
 
   // The account survived, key and balance included.
   const account = readAccount(upgraded, 'legacy-user');
@@ -4518,19 +4514,16 @@ await checkAsync('the text-only retry after an image refusal is measured too', a
 });
 
 /*
- * ------------------------------------------------- the fresh-prompt budget and sessions
+ * ------------------------------------------------- the prompt budget and stateless sessions
  *
- * The one guard this gateway enforces is on the amount of prompt the endpoint has to read
- * FRESH. DeepAI serves a conversation from its prompt cache once the prefix is cached - this
- * gateway's own recorded traffic has answers with 720,896 cached prompt tokens against 155
- * fresh ones, and the app's session store has 1.7 MB request bodies answered with 291,328
- * cached tokens and 424 fresh - so a warm conversation is forwarded however large it is, and
- * refusing on the size of the whole body would break exactly the conversations the desktop app
- * runs. What is refused is the case nothing can fix: a cold transcript, or a new tail, that is
- * itself past the measured wall.
+ * The one guard this gateway enforces is on the whole serialized prompt. DeepAI's prompt cache
+ * makes a warm prefix cheaper to read, but the cached tokens still occupy the model's context
+ * window, so the honest number is the request that leaves this process - tools and framing
+ * included. The budget comes from the model's catalog entry; nothing here guesses what DeepAI
+ * has cached.
  *
- * These cases therefore also cover the session bookkeeping: it is what makes the difference
- * between the two.
+ * The session id only tells DeepAI which cache to extend. It is derived from the opening on
+ * every request, or taken from the caller, and no conversation row is written anywhere.
  */
 
 /**
@@ -4621,7 +4614,7 @@ async function deepaiGateway({ usernames = ['prompt-user'], budget = TEST_PROMPT
   };
 }
 
-/** The `x-gateway-prompt` header as fields, with `reused` kept as the word it is. */
+/** The `x-gateway-prompt` header as fields. */
 function gatewayPrompt(response) {
   const fields = {};
   for (const pair of String(response.headers.get('x-gateway-prompt')).split('; ')) {
@@ -4631,11 +4624,10 @@ function gatewayPrompt(response) {
   return fields;
 }
 
-await checkAsync('a prompt past the fresh budget is refused with a compact-or-new-chat error', async () => {
+await checkAsync('a prompt past the model budget is refused with a compact-or-new-chat error', async () => {
   /*
-   * A cold conversation has to be read whole, so its whole body is the fresh part. Past the
-   * model's budget DeepAI does not refuse anything - it answers from the part it kept, usually
-   * the tail, with a normal 200 - which from a caller is a model that has forgotten the
+   * Past the model's budget DeepAI does not refuse anything - it answers from the part it kept,
+   * usually the tail, with a normal 200 - which from a caller is a model that has forgotten the
    * conversation. The gateway does not rewrite the transcript to hide that: it refuses, and the
    * caller can compact its own session or start a new chat. The budget here is pinned low by the
    * test fixture; production derives it from the model's catalog entry.
@@ -4648,12 +4640,12 @@ await checkAsync('a prompt past the fresh budget is refused with a compact-or-ne
     assert.equal(refused.status, 400, 'the request is refused before anything leaves');
     assert.equal(gateway.sent.length, 0, 'nothing reaches upstream');
     const header = gatewayPrompt(refused);
-    assert.ok(header.fresh > TEST_PROMPT_BUDGET, `the fresh body is over the budget: ${header.fresh}`);
-    assert.equal(header.fresh, header.body, 'a cold request reads its whole body fresh');
+    assert.ok(header.body > TEST_PROMPT_BUDGET, `the body is over the budget: ${header.body}`);
     assert.equal(header['budget-bytes'], TEST_PROMPT_BUDGET);
     assert.equal(header.window, 1_048_576, 'the catalog window for this model rides along');
     assert.equal(header.budget, 4_194_304, 'beside that window in characters');
-    assert.equal(header.reused, 'no', 'nothing of this prompt is cached');
+    assert.equal(header.fresh, undefined, 'there is no cache estimate to report');
+    assert.equal(header.reused, undefined, 'and no cache state');
     assert.equal(header.trim, undefined, 'there is no shortened prompt to report');
 
     const error = await refused.json();
@@ -4677,195 +4669,39 @@ await checkAsync('a prompt past the fresh budget is refused with a compact-or-ne
   }
 });
 
-await checkAsync('a conversation does not become warm from one repeated message', async () => {
+await checkAsync('the tool catalog counts toward the prompt budget', async () => {
   /*
-   * The fallback session id is derived from the first few thousand characters of the conversation,
-   * so two unrelated conversations that open the same way are handed the same id and the same
-   * remembered row. Treating that row as cached would mean measuring the fresh part as whatever
-   * follows the one message the two happen to share - and a body of hundreds of kilobytes measured
-   * as a few bytes is forwarded, truncated by the endpoint, and reported to the caller as a model
-   * that forgot. So a message in common is not enough: `reused` needs three, and when it is false
-   * the whole prompt is measured as fresh - and refused if that whole prompt is over the budget.
+   * The endpoint reads the tools too, so a tiny message list with a huge catalog is still a huge
+   * request. Measuring only message text would forward a body DeepAI may truncate while the
+   * gateway believes it is small.
    */
-  const gateway = await deepaiGateway();
-  try {
-    // A short conversation, which remembers its tail under the id derived from "hi".
-    const first = await gateway.ask([
-      { role: 'user', content: 'hi' },
-      { role: 'assistant', content: 'hello' },
-    ]);
-    assert.equal(first.status, 200, 'the short conversation is answered');
-
-    /*
-     * Another conversation opening the same way - gigantically - and ending on a message the first
-     * one also ended on. The two messages it has in common are the opening and that echo; three
-     * are required, so it is cold and its whole body is what the budget measures.
-     */
-    const before = gateway.sent.length;
-    const impostor = await gateway.ask([
-      { role: 'user', content: 'hi' },
-      { role: 'user', content: 'y'.repeat(200_000) },
-      { role: 'assistant', content: 'hello' },
-    ]);
-    assert.equal(impostor.status, 400, 'the cold body is refused');
-    assert.equal(gateway.sent.length, before, 'and nothing reaches upstream');
-    const header = gatewayPrompt(impostor);
-    assert.equal(header.reused, 'no', 'two shared messages are not a continuation');
-    assert.equal(header.fresh, header.body, 'so the whole body is counted as fresh');
-    assert.ok(header.fresh > 30_000, `and it is not mistaken for a tiny tail: ${header.fresh}`);
-  } finally {
-    await gateway.close();
-  }
-});
-
-await checkAsync('a warm tail is measured with the tool catalog, not as if tools were free', async () => {
-  /*
-   * The tail is what the endpoint reads fresh, but the request still carries the tool catalog and
-   * framing. Measuring only the tail would let a conversation with a large catalog grow past the
-   * wall while the gateway believed it was tiny. The fresh number is therefore built through the
-   * same body serializer as the real request.
-   */
-  const gateway = await deepaiGateway();
   const tools = [{
     type: 'function',
     function: {
       name: 'probe',
-      description: 'd'.repeat(60_000),
+      description: 'd'.repeat(120_000),
       parameters: { type: 'object', properties: {} },
     },
   }];
+  const gateway = await deepaiGateway({ budget: 100_000 });
   try {
-    const opening = [
-      { role: 'user', content: 'start the task' },
-      { role: 'assistant', content: 'started' },
-      { role: 'user', content: 'next step' },
-    ];
-    const first = await gateway.ask(opening, { body: { tools } });
-    assert.equal(first.status, 200, 'the first turn is served');
-
-    const warm = await gateway.ask([...opening,
-      { role: 'assistant', content: 'done with that step' },
-      { role: 'user', content: 'carry on' }], { body: { tools } });
-    assert.equal(warm.status, 200, 'the warm turn is served');
-    const header = gatewayPrompt(warm);
-    assert.equal(header.reused, 'yes', 'the tail continues the remembered conversation');
-    assert.ok(header.fresh > 60_000,
-      `the tool catalog is counted in the fresh bytes: ${header.fresh}`);
-    assert.ok(Array.isArray(gateway.sent.at(-1).payload.tools), 'the catalog really went upstream');
+    const refused = await gateway.ask([{ role: 'user', content: 'hi' }], { body: { tools } });
+    assert.equal(refused.status, 400, 'the catalog alone pushes the request over budget');
+    assert.equal(gateway.sent.length, 0, 'nothing reaches upstream');
+    const header = gatewayPrompt(refused);
+    assert.ok(header.body > 100_000, `the serialized body includes the catalog: ${header.body}`);
+    assert.ok(header.body > 120_000, 'and the catalog is not invisible to the guard');
   } finally {
     await gateway.close();
   }
 });
 
-await checkAsync('a request the endpoint truncated anyway is visible in the log', async () => {
+await checkAsync('a harness compaction starts a new session and is measured whole', async () => {
   /*
-   * The request that can still be truncated is one where the gateway believes the session is warm
-   * and the endpoint disagrees because its cache expired. The signal is therefore the endpoint's
-   * own accounting - a whole body past the budget answered with no cache hit at all - and not the
-   * `reused` flag. Nothing in the answer says the front was dropped, so the log names it instead:
-   * that is the failure the gateway cannot prevent after the fact, and an operator should find it.
-   */
-  const raisedBudget = 400_000;
-  const expired = await deepaiGateway({
-    budget: raisedBudget,
-    usage: { prompt_tokens: 300, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 0 } },
-  });
-  try {
-    await expired.ask([
-      { role: 'user', content: `read this ${'a'.repeat(149_990)}` },
-      { role: 'assistant', content: `it says ${'b'.repeat(149_990)}` },
-      { role: 'user', content: 'go on' },
-    ]);
-    const warm = await expired.ask([
-      { role: 'user', content: `read this ${'a'.repeat(149_990)}` },
-      { role: 'assistant', content: `it says ${'b'.repeat(149_990)}` },
-      { role: 'user', content: 'go on' },
-      { role: 'assistant', content: `done ${'c'.repeat(59_990)}` },
-      { role: 'user', content: `and then ${'d'.repeat(59_990)}` },
-    ]);
-    assert.equal(warm.status, 200, 'a warm tail inside the raised budget is forwarded');
-    const warmHeader = gatewayPrompt(warm);
-    assert.equal(warmHeader.reused, 'yes', 'the session really was warm');
-    assert.ok(warmHeader.body > raisedBudget, `and the body is past the budget: ${warmHeader.body}`);
-    assert.ok(warmHeader.fresh < raisedBudget, 'while only the new tail is fresh');
-    const expiredLine = expired.lines.find((line) => line.includes('truncation-suspect'));
-    assert.ok(expiredLine !== undefined, `the log names it: ${expired.lines.join(' | ')}`);
-    assert.equal(expiredLine.includes('reused=yes'), true,
-      'and says the gateway expected a cache hit that did not come');
-    assert.equal(expired.db.prepare('SELECT COUNT(*) AS n FROM conversation_sessions').get().n, 0,
-      'the stale hint is forgotten, so the next turn is measured cold');
-  } finally {
-    await expired.close();
-  }
-
-  const cached = await deepaiGateway({
-    budget: 400_000,
-    usage: { prompt_tokens: 300, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 290 } },
-  });
-  try {
-    const answer = await cached.ask([{ role: 'user', content: 'x'.repeat(300_000) }]);
-    assert.equal(answer.status, 200, 'a body past the wall is forwarded');
-    assert.equal(cached.lines.some((line) => line.includes('truncation-suspect')), false,
-      'and a real cache hit is not reported as a truncation');
-  } finally {
-    await cached.close();
-  }
-});
-
-await checkAsync('a warm conversation is forwarded whole however large it is, on one session', async () => {
-  /*
-   * The case the desktop app runs all day: the transcript is hundreds of kilobytes, the endpoint
-   * has the prefix cached, and only the newest turn costs anything. Nothing is refused, nothing
-   * is cut, and the second turn goes out under the same session id as the first - which is what
-   * makes it warm.
-   */
-  const gateway = await deepaiGateway();
-  const system = { role: 'system', content: 'You are a coding agent.' };
-  const turn1 = [
-    system,
-    { role: 'user', content: `read this ${'a'.repeat(79_990)}` },
-    { role: 'assistant', content: `it says ${'b'.repeat(79_990)}` },
-    { role: 'user', content: 'go on' },
-  ];
-  const turn2 = [
-    ...turn1,
-    { role: 'assistant', content: `done ${'c'.repeat(59_990)}` },
-    { role: 'user', content: `and then ${'d'.repeat(59_990)}` },
-  ];
-  try {
-    const first = await gateway.ask(turn1);
-    assert.equal(first.status, 200, 'the first turn is inside the budget');
-    const firstHeader = gatewayPrompt(first);
-    assert.ok(firstHeader.body < TEST_PROMPT_BUDGET, `and its body proves it: ${firstHeader.body}`);
-    assert.equal(firstHeader.reused, 'no', 'there is nothing cached for it yet');
-
-    const second = await gateway.ask(turn2);
-    assert.equal(second.status, 200, 'a body past the budget is answered when the session is warm');
-    const header = gatewayPrompt(second);
-    assert.ok(header.body > TEST_PROMPT_BUDGET,
-      `the body is past the budget (${header.body} > ${TEST_PROMPT_BUDGET})`);
-    assert.ok(header.fresh < TEST_PROMPT_BUDGET,
-      `but only the new tail is fresh (${header.fresh} < ${TEST_PROMPT_BUDGET})`);
-    assert.equal(header.reused, 'yes', 'and the header says the session is warm');
-
-    assert.equal(gateway.sent.length, 2, 'both turns reached DeepAI');
-    assert.equal(gateway.sent[1].session, gateway.sent[0].session,
-      'the conversation kept its session id as it grew');
-    assert.equal(gateway.sent[1].session.length, 32, 'and the id has the shape DeepAI uses');
-    assert.deepEqual(gateway.sent[1].payload.messages, turn2, 'the whole transcript went, untouched');
-  } finally {
-    await gateway.close();
-  }
-});
-
-await checkAsync('a harness compaction keeps the session but is measured as a cold prompt', async () => {
-  /*
-   * A harness compacts by replacing the opening of the conversation with a summary - and may
-   * rewrite its system prompt between turns anyway, since it carries the date, the cwd and the
-   * model name. The session id is kept, so the conversation stays one conversation, but nothing of
-   * the old prefix is in the endpoint's cache for the new opening: the whole prompt is fresh and
-   * must be measured as such. Treating the remembered tail as cached would forward a cold
-   * transcript of hundreds of kilobytes and let the endpoint discard its start.
+   * A harness compacts by replacing the opening of the conversation with a summary. The session
+   * id is derived from that opening, so it changes - and so does the endpoint's cache, because
+   * the prefix changed too. Nothing in the gateway has to be invalidated: there is nothing to
+   * invalidate. The compacted transcript is measured as the request it is.
    */
   const budget = 220_000;
   const gateway = await deepaiGateway({ budget });
@@ -4890,14 +4726,14 @@ await checkAsync('a harness compaction keeps the session but is measured as a co
 
     const header = gatewayPrompt(second);
     assert.ok(header.body > 100_000, `the compacted body is large: ${header.body}`);
-    assert.equal(header.fresh, header.body, 'the changed opening means the whole body is fresh');
-    assert.ok(header.fresh < budget,
-      `it fits the raised budget, so it is forwarded whole (${header.fresh} < ${budget})`);
-    assert.equal(header.reused, 'yes', 'and the session id was kept across the compaction');
+    assert.ok(header.body < budget,
+      `it fits the raised budget, so it is forwarded whole (${header.body} < ${budget})`);
+    assert.equal(header.fresh, undefined, 'there is no cache estimate');
+    assert.equal(header.reused, undefined, 'and no remembered session');
 
     assert.equal(gateway.sent.length, 2);
-    assert.equal(gateway.sent[1].session, gateway.sent[0].session,
-      'the summary continued the conversation instead of opening a new one');
+    assert.notEqual(gateway.sent[1].session, gateway.sent[0].session,
+      'the new opening starts a new session, with a new cache');
     assert.deepEqual(gateway.sent[1].payload.messages, turn2,
       'and the compacted transcript went as the harness wrote it, with nothing injected');
   } finally {
@@ -4905,12 +4741,11 @@ await checkAsync('a harness compaction keeps the session but is measured as a co
   }
 });
 
-await checkAsync('two accounts never continue each other\'s conversations', async () => {
+await checkAsync('two accounts never share a conversation id', async () => {
   /*
-   * Isolation is by account. The same bytes sent by two accounts are two conversations - their
-   * openings are identical, so the derived id must not be, and neither may match the other's
-   * remembered tail. That is the case a shared gateway actually sees: two people pointing the
-   * same harness at it.
+   * Isolation is by account. The same bytes sent by two accounts are two conversations on two
+   * DeepAI accounts, so the derived id is not the same. That is the case a shared gateway actually
+   * sees: two people pointing the same harness at it.
    */
   const gateway = await deepaiGateway({ usernames: ['alice', 'bob'] });
   const transcript = [
@@ -4927,12 +4762,8 @@ await checkAsync('two accounts never continue each other\'s conversations', asyn
     const [aliceSession, bobSession] = gateway.sent.map((call) => call.session);
     assert.notEqual(bobSession, aliceSession,
       'the same transcript under another account is another session');
-    assert.equal(gatewayPrompt(bob).reused, 'no', 'and bob continues nothing of alice\'s');
 
-    const rows = gateway.db.prepare('SELECT owner FROM conversation_sessions ORDER BY rowid').all();
-    assert.deepEqual(rows.map((row) => row.owner), ['alice', 'bob'], 'one row per account');
-
-    /* Each conversation grows in its own way; neither may be pulled onto the other's row. */
+    /* Each conversation grows in its own way; the opening keeps its id stable. */
     const next = (name) => [
       ...transcript,
       { role: 'assistant', content: `${name} answer` },
@@ -4944,14 +4775,9 @@ await checkAsync('two accounts never continue each other\'s conversations', asyn
     assert.equal(gateway.sent[3].session, bobSession, 'and bob kept his');
 
     /*
-     * A caller cannot adopt somebody else's row by naming it either: the id is forwarded as sent
-     * - it is the caller's conversation id, not this gateway's secret - but nothing of the other
-     * account's tail is read or written.
+     * A caller's own id is forwarded as sent - it is not this gateway's secret - and because the
+     * gateway stores nothing, naming alice's id cannot read or write any state of hers.
      */
-    const aliceRow = () => gateway.db.prepare(
-      'SELECT tail, updated_at FROM conversation_sessions WHERE owner = ?',
-    ).get('alice');
-    const before = aliceRow();
     const borrowed = await gateway.ask([
       { role: 'user', content: 'hello from bob' },
       { role: 'assistant', content: 'hi' },
@@ -4959,8 +4785,7 @@ await checkAsync('two accounts never continue each other\'s conversations', asyn
     ], { username: 'bob', headers: { 'x-session-id': aliceSession } });
     assert.equal(borrowed.status, 200);
     assert.equal(gateway.sent[4].session, aliceSession, 'the caller-supplied id wins and is sent verbatim');
-    assert.equal(gatewayPrompt(borrowed).reused, 'no', 'but it is cold: alice\'s tail is not bob\'s');
-    assert.deepEqual(aliceRow(), before, 'and alice\'s row was not touched');
+    assert.equal(gateway.sent.length, 5, 'nothing else was recorded or replayed');
   } finally {
     await gateway.close();
   }
@@ -4993,7 +4818,7 @@ await checkAsync('two conversations of one key, interleaved, never share a sessi
   }
 });
 
-await checkAsync('a caller-supplied x-session-id always wins, and is reused verbatim', async () => {
+await checkAsync('a caller-supplied x-session-id always wins, and is forwarded verbatim', async () => {
   /*
    * A client that names its conversations knows better than any heuristic here - the app does
    * exactly this with its per-thread id, and the endpoint takes that id from the same three
@@ -5011,15 +4836,12 @@ await checkAsync('a caller-supplied x-session-id always wins, and is reused verb
     const first = await gateway.ask(messages, { headers: { 'x-session-id': chosen } });
     assert.equal(first.status, 200);
     assert.equal(gateway.sent[0].session, chosen, 'the id is forwarded exactly as sent');
-    assert.equal(gatewayPrompt(first).reused, 'no', 'and nothing is remembered under it yet');
 
-    /* The same request again: same id, and now the tail is remembered, so nothing is fresh. */
+    /* The same request again: still the caller's id, with no local state to agree with. */
     const again = await gateway.ask(messages, { headers: { 'x-session-id': chosen } });
     assert.equal(again.status, 200);
     assert.equal(gateway.sent[1].session, chosen, 'still verbatim');
-    const header = gatewayPrompt(again);
-    assert.equal(header.reused, 'yes', 'the stored tail is reused');
-    assert.ok(header.fresh < 200, `and only the request envelope is fresh: ${header.fresh}`);
+    assert.ok(gatewayPrompt(again).body > 100, 'the whole body is reported, not a guessed tail');
   } finally {
     await gateway.close();
   }
@@ -5046,7 +4868,7 @@ await checkAsync('a request without an override takes its budget from the model 
   }
 });
 
-await checkAsync('the fresh budget is configured or comes from the model, never a constant', async () => {
+await checkAsync('the prompt budget is configured or comes from the model, never a constant', async () => {
   /*
    * How much of a model's window a deployment is willing to use is an operator question, so it is
    * settable without a code change. Unset is not "the old 176,400": it means the request path uses
@@ -5073,7 +4895,7 @@ await checkAsync('the fresh budget is configured or comes from the model, never 
     assert.equal(over.status, 400, 'and refuses what does not fit');
     const overHeader = gatewayPrompt(over);
     assert.equal(overHeader['budget-bytes'], 2_000, 'the configured budget is the one enforced');
-    assert.ok(overHeader.fresh > 2_000, `the fresh part is over it: ${overHeader.fresh}`);
+    assert.ok(overHeader.body > 2_000, `the body is over it: ${overHeader.body}`);
     assert.equal((await over.json()).error?.code, 'context_limit_reached');
     assert.equal(gateway.sent.length, 1, 'only the request that fit went upstream');
   } finally {
@@ -5081,49 +4903,39 @@ await checkAsync('the fresh budget is configured or comes from the model, never 
   }
 });
 
-await checkAsync('a remembered conversation does not expire by age or count', async () => {
+await checkAsync('a conversation id is derived without storing anything', async () => {
   /*
-   * The row is a cache hint, not a chat lifetime. DeepAI owns the prompt cache, so the gateway no
-   * longer drops a conversation after seven days or after a fixed number of rows: an old chat that
-   * is still being used stays matchable. The hint disappears when the account is deleted, or when
-   * the endpoint itself reports that an over-budget body had no cache hit.
+   * The id has one job: keep the turns of one conversation on one DeepAI cache. It is derived
+   * from the first user message and the account, so rewriting the system prompt does not change
+   * it, growing the transcript does not change it, and another account never shares it. There is
+   * no table to expire, sweep or cap.
    */
-  const sessions = await import('../src/deepai/sessions.js');
+  const { conversationId } = await import('../src/deepai/sessions.js');
+  const opening = { role: 'user', content: 'refactor the login form' };
+  const first = conversationId([
+    { role: 'system', content: 'You are a coding agent. Today is 2026-10-26.' },
+    opening,
+  ], 'alice');
+  const rewritten = conversationId([
+    { role: 'system', content: 'You are a coding agent. Today is 2026-10-27.' },
+    opening,
+    { role: 'assistant', content: 'which file?' },
+    { role: 'user', content: 'src/login.js' },
+  ], 'alice');
+  assert.equal(rewritten, first, 'a rewritten system prompt keeps the conversation warm');
+  assert.equal(first.length, 32, 'the id has the shape DeepAI uses');
+  assert.notEqual(conversationId([opening], 'bob'), first, 'another account is another conversation');
+  assert.notEqual(
+    conversationId([{ role: 'user', content: 'write a changelog' }], 'alice'),
+    first,
+    'another opening is another conversation',
+  );
+
   const db = openDatabase(':memory:');
-  const owner = 'keep-user';
-  const transcript = (label) => [
-    { role: 'user', content: `${label}: one` },
-    { role: 'assistant', content: `${label}: two` },
-    { role: 'user', content: `${label}: three` },
-    { role: 'user', content: `${label}: four` },
-  ];
-  const start = Date.UTC(2026, 9, 26);
-
-  for (let n = 0; n < 40; n += 1) {
-    sessions.rememberSession(db, {
-      sessionId: `session-${n}`,
-      owner,
-      keyId: 'k',
-      messages: transcript(`conversation ${n}`),
-      now: start + n * 1_000,
-    });
-  }
-  const kept = db.prepare('SELECT session_id FROM conversation_sessions WHERE owner = ? ORDER BY updated_at')
-    .all(owner).map((row) => row.session_id);
-  assert.equal(kept.length, 40, 'there is no per-account cap any more');
-
-  /* A row nobody has used for eight days is still the same conversation. */
-  const stale = transcript('stale conversation');
-  sessions.rememberSession(db, { sessionId: 'session-stale', owner, keyId: 'k', messages: stale, now: start });
-  const later = start + 8 * 24 * 60 * 60 * 1000;
-  const resolved = sessions.resolveSession(db, { owner, messages: stale });
-  assert.equal(resolved.sessionId, 'session-stale', 'a week-old conversation is continued');
-  assert.equal(resolved.reused, true, 'and it is still warm');
-  sessions.rememberSession(db, { sessionId: 'session-other', owner, keyId: 'k', messages: transcript('other'), now: later });
   assert.equal(
-    db.prepare('SELECT COUNT(*) AS n FROM conversation_sessions WHERE session_id = ?').get('session-stale').n,
-    1,
-    'and the old row is not swept on the next write',
+    db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'conversation_sessions'").get().n,
+    0,
+    'and the database has no conversation table at all',
   );
 });
 
@@ -5140,10 +4952,10 @@ await checkAsync('every conversation gets its own session, as it does in the app
    * conversation answered as though it had just been opened - "Hi, how can I help you today?"
    * in the middle of a task.
    *
-   * So the id is derived from the conversation's opening - the system prompt and the first
-   * user message - which is stable for every turn of one conversation and different between
-   * conversations. Only a caller that sends its own id overrides it, because then it knows
-   * its conversations better than this does.
+   * So the id is derived from the first user message and the account. That is stable for every
+   * turn of one conversation even when the harness rewrites its system prompt, and different
+   * between conversations. Only a caller that sends its own id overrides it, because then it
+   * knows its conversations better than this does.
    */
   const { openDatabase } = await import('../src/db.js');
   const { saveAccount } = await import('../src/store.js');
@@ -5205,6 +5017,14 @@ await checkAsync('every conversation gets its own session, as it does in the app
     // A caller that knows better wins.
     await ask(turn(0), { 'x-session-id': 'caller-chosen-session' });
     assert.equal(seen[4].session, 'caller-chosen-session', 'an id the caller sends is forwarded as sent');
+
+    // Rewriting the system prompt is not a new conversation.
+    await ask([
+      { role: 'system', content: 'You are a coding agent. The date changed.' },
+      task,
+      { role: 'user', content: 'go on' },
+    ]);
+    assert.equal(seen[5].session, first, 'a rewritten system prompt keeps the conversation id');
 
     // And the transcript reaches DeepAI with its system prompt first, as it arrived.
     assert.equal(seen[1].body.messages[0].role, 'system', 'the system prompt is still first');

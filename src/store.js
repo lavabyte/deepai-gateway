@@ -176,13 +176,12 @@ export function savePro(db, username, isPro) {
  * Remove one account and everything that belongs to it.
  *
  * The DeepAI key goes with the account, because keeping a credential the user
- * asked to forget would be wrong. Keys, browser sessions and conversation cache hints are
- * removed explicitly; usage rows stay so aggregate history does not silently shrink.
+ * asked to forget would be wrong. Keys and browser sessions are removed explicitly;
+ * usage rows stay so aggregate history does not silently shrink.
  */
 export function clearAccount(db, username) {
   const keys = db.prepare('DELETE FROM api_keys WHERE owner_username = ?').run(username).changes;
   db.prepare('DELETE FROM sessions WHERE account_id IN (SELECT id FROM accounts WHERE username = ?)').run(username);
-  db.prepare('DELETE FROM conversation_sessions WHERE owner = ?').run(username);
   const removed = db.prepare('DELETE FROM accounts WHERE username = ?').run(username).changes;
   // Usage rows are deliberately untouched: they carry `key_name`, so history stays
   // attributable to the name it had even though the key is gone.
