@@ -279,7 +279,8 @@ The budget is measured on the whole serialized request: every message in `messag
 catalog and the JSON framing. A cached prefix is cheaper to read, but its
 tokens still occupy the model's context window, so cache state does not change whether the request
 fits. Measuring the whole prompt is also the only number the gateway can know without storing
-anything about the conversation.
+anything about the conversation. It is a pre-flight size guard, not the context meter: once DeepAI
+answers, `usage` and `context` carry the real token count (see below).
 
 A request whose whole prompt is past the budget is refused before it goes upstream, with the
 OpenAI error shape and a code that names the reason:
@@ -315,8 +316,38 @@ The same facts ride on every answer in an `x-gateway-prompt` header, semicolon-s
 | `received` | bytes of prompt text that arrived |
 | `body` | bytes of the serialized upstream body, tools included. What the budget is measured on |
 | `window` | the token window DeepAI's catalog declares for this model, or `unknown` |
-| `budget` | that window in characters, or `unknown` |
+| `budget` | that window at four characters per token, the pre-flight approximation, or `unknown` |
 | `budget-bytes` | the byte budget on the whole prompt: the model's window less its output allowance, or `PROMPT_BUDGET_BYTES` when set |
+
+Those are wire sizes, not context usage. They exist because a request has to be measured before it is
+sent; the real token count arrives with the answer.
+
+#### Context usage comes from DeepAI, and nothing is stored
+
+The `usage` object in an answer is DeepAI's own accounting, relayed unchanged: `prompt_tokens`
+includes cached input, `completion_tokens` is this answer, and `total_tokens` is their sum. The
+gateway does not estimate, pad or remember it. If DeepAI sends no `usage`, the field is absent -
+the gateway will not turn characters divided by four into a number that looks exact.
+
+For callers that want the context window beside it, every answer that has real usage also carries
+a `context` object (in the final SSE chunk when streaming):
+
+```json
+"context": {
+  "used_tokens": 1020,
+  "prompt_tokens": 1000,
+  "completion_tokens": 20,
+  "cached_tokens": 900,
+  "window_tokens": 1048576,
+  "remaining_tokens": 1047556,
+  "used_percent": 0.1
+}
+```
+
+`cached_tokens` is a **subset** of `prompt_tokens`, not an addition to it, so `used_tokens` is
+`prompt_tokens + completion_tokens`. A non-streaming answer also puts the same numbers in an
+`x-gateway-context` header. Nothing here is written to the database: DeepAI is the source of truth
+for every turn, and the next request re-derives the numbers from DeepAI's next `usage`.
 
 The Models page shows the window each model declares, because that page is the catalog;
 `/v1/models` publishes the same per-model number, because it is the one a harness should compact
@@ -939,7 +970,10 @@ totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens
 ```
 
 When the gateway reports usage back to its clients it re-inflates
-`prompt_tokens` so a client's own accounting stays consistent.
+`prompt_tokens` so a client's own accounting stays consistent. If DeepAI sends no `usage` for a
+request, the gateway records zeroes and returns no `usage` or `context`; it never substitutes a
+character-based estimate. The context window and percentage travel with the real usage as the
+`context` object described in [Context usage comes from DeepAI](#context-usage-comes-from-deepai-and-nothing-is-stored).
 
 ## When DeepAI refuses the key as "not enabled for DeepAI Code"
 

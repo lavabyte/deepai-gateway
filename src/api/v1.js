@@ -47,6 +47,7 @@ import {
   completion,
   effortOf,
   requestedEffort,
+  openAIContext,
   openAIFinish,
   openAIUsage,
   stopSequences,
@@ -56,10 +57,9 @@ import {
  * How big a prompt is, in the units that answer different questions.
  *
  * `count` is how many messages the caller sent, `chars` how much text they carry, `bytes` that
- * text in UTF-8. `chars` is the unit the token meter in `estimateUsage` reads: `chars /
- * CHARS_PER_TOKEN` is the same `prompt_tokens` this gateway reports when DeepAI sends no usage.
- * `bytes` is what the log reports, and the serialized body it belongs to is what the context
- * budget is measured on - see `upstreamBodyBytes`.
+ * text in UTF-8. `bytes` is what the log reports, and the serialized body it belongs to is what
+ * the wire-size guard is measured on - see `upstreamBodyBytes`. It is deliberately not called
+ * context usage: the real token usage comes from DeepAI's response, see `openAIContext`.
  *
  * `imageBytes` is the payload of any image parts, counted apart so a log can say how much of a
  * prompt was an image rather than text. It is not subtracted from anything: an image is prompt
@@ -98,6 +98,34 @@ function promptShape(messages) {
   }
   return { count: Array.isArray(messages) ? messages.length : 0, chars, bytes, imageBytes };
 }
+
+/**
+ * The same context usage as {@link openAIContext}, in a response header.
+ *
+ * Only a non-streaming response can carry this: once an SSE stream has started, its headers are
+ * gone and the top-level body cannot grow, so a stream reports the same object in its final usage
+ * chunk instead. Nothing here is remembered: it is a view of DeepAI's `usage` for this one request.
+ *
+ * @param {object|undefined} context - the result of {@link openAIContext}.
+ * @returns {string|undefined}
+ */
+function contextHeader(context) {
+  if (context === undefined) return undefined;
+  return [
+    `used=${context.used_tokens}`,
+    `prompt=${context.prompt_tokens}`,
+    `completion=${context.completion_tokens}`,
+    `cached=${context.cached_tokens}`,
+    ...(context.window_tokens === undefined
+      ? []
+      : [
+          `window=${context.window_tokens}`,
+          `remaining=${context.remaining_tokens}`,
+          `percent=${context.used_percent}`,
+        ]),
+  ].join('; ');
+}
+
 /**
  * The exact size of the request this gateway would send, in bytes.
  *
@@ -122,50 +150,6 @@ function upstreamBodyBytes(params, usesResponses) {
 
 /** Model used when a request omits one. */
 const FALLBACK_MODEL = 'glm-5.3-flash';
-
-/** Per-message structural overhead for role framing and JSON framing. */
-const MESSAGE_OVERHEAD = 10;
-
-/**
- * Estimate token usage when DeepAI does not send `usage` in the stream.
- *
- * DeepAI does not include `usage` in streamed chat-completions chunks, so the
- * gateway would otherwise emit `prompt_tokens: 0, completion_tokens: 0` - which
- * makes every client (including the harness context meter) report ~0% context
- * usage. As a fallback, estimate from the request messages and the generated
- * answer. It is deliberately approximate: better than zeros, never presented as
- * exact upstream accounting.
- *
- * @param {Array<object>} messages - the request messages (OpenAI shape).
- * @param {string[]} text - accumulated answer text deltas.
- * @param {string[]} reasoning - accumulated reasoning deltas.
- * @returns {{inputTokens:number, outputTokens:number, totalTokens:number, cacheReadTokens:number, cacheWriteTokens:number, reasoningTokens:number}}
- */
-function estimateUsage(messages, text, reasoning) {
-    let chars = 0;
-    for (const m of messages) {
-        if (typeof m.content === 'string') chars += m.content.length;
-        else if (Array.isArray(m.content)) {
-            for (const part of m.content) {
-                if (part.type === 'text') chars += part.text.length;
-                else if (part.type === 'image_url') chars += 1024;
-            }
-        }
-        chars += MESSAGE_OVERHEAD;
-    }
-    const inputTokens = Math.max(0, Math.floor(chars / CHARS_PER_TOKEN));
-    const outputText = text.join('');
-    const outputReasoning = reasoning.join('');
-    const outputTokens = Math.max(0, Math.floor((outputText.length + outputReasoning.length) / CHARS_PER_TOKEN));
-    return {
-        inputTokens,
-        outputTokens,
-        totalTokens: inputTokens + outputTokens,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-        reasoningTokens: Math.max(0, Math.floor(outputReasoning.length / CHARS_PER_TOKEN)),
-    };
-}
 
 /**
  * How long a stream may stay silent before a keep-alive comment is written.
@@ -401,10 +385,13 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * How big this request is, built and measured before anything is sent.
    *
    * The budget is not a constant in this file. It comes from the selected model's catalog entry:
-   * `contextWindow - maxTokens`, in the same characters-per-token unit the usage meter uses.
-   * That keeps the gateway aligned with what the desktop app does and with a catalog that can
-   * change without a redeploy. An operator who measured a tighter limit on their own endpoint can
-   * still set `PROMPT_BUDGET_BYTES`; the explicit value wins.
+   * `contextWindow - maxTokens`, converted at four units per token and then compared with the
+   * serialized body's UTF-8 bytes. That keeps the guard aligned with the catalog, which can change
+   * without a redeploy. An operator who measured a tighter limit on their own endpoint can still
+   * set `PROMPT_BUDGET_BYTES`; the explicit value wins.
+   *
+   * This is a wire-size guard, not a context meter. Before the request is sent no exact token
+   * count exists; after it, `openAIContext` reports DeepAI's real usage instead of guessing.
    *
    * A model the catalog sent no window for has no local budget. The gateway sends the prompt as
    * written instead of inventing a limit, and the refusal below stays out of the way.
@@ -766,16 +753,26 @@ async function handleChatCompletion(db, req, res, options = {}) {
     );
   }
 
+  /*
+   * What this answer actually occupied, from DeepAI's own usage and nothing else.
+   *
+   * There is no estimate to fall back on: if DeepAI did not report usage, the honest answer is
+   * that the gateway does not know, so the standard `usage` field stays absent and no `context`
+   * object is invented. The desktop app, the harness and every OpenAI client already know how to
+   * read `usage`; `context` is the same numbers with the model's window and percentage attached.
+   */
+  const context = openAIContext(usage, windowTokens);
+
   if (status === 200 && streamed) {
     write({}, openAIFinish(effectiveFinish));
-    const finalUsage = usage ?? estimateUsage(body.messages, text, reasoning);
     res.write(`data: ${JSON.stringify({
       id,
       object: 'chat.completion.chunk',
       created,
       model: upstreamModel,
       choices: [],
-      usage: openAIUsage(finalUsage),
+      usage: openAIUsage(usage),
+      ...(context === undefined ? {} : { context }),
     })}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
@@ -784,28 +781,33 @@ async function handleChatCompletion(db, req, res, options = {}) {
     const timing = [`gwcatalog;dur=${catalogMs}`];
     if (firstTokenMs !== undefined) timing.push(`gwmodel;dur=${firstTokenMs}`);
     res.setHeader('server-timing', timing.join(', '));
-    res.json(completion({
-      id,
-      model: upstreamModel,
-      created,
-      message: {
-        role: 'assistant',
-        content: text.join('') === '' ? null : text.join(''),
-        ...(reasoning.length > 0 ? { reasoning_content: reasoning.join('') } : {}),
-        ...(toolCalls.length > 0
-          ? {
-              tool_calls: toolCalls.map((call, index) => ({
-                index,
-                id: call.id,
-                type: 'function',
-                function: { name: call.name, arguments: call.args === '' ? '{}' : call.args },
-              })),
-            }
-          : {}),
-      },
-      finishReason: openAIFinish(effectiveFinish),
-      usage: openAIUsage(usage ?? estimateUsage(body.messages, text, reasoning)),
-    }));
+    const header = contextHeader(context);
+    if (header !== undefined) res.setHeader('x-gateway-context', header);
+    res.json({
+      ...completion({
+        id,
+        model: upstreamModel,
+        created,
+        message: {
+          role: 'assistant',
+          content: text.join('') === '' ? null : text.join(''),
+          ...(reasoning.length > 0 ? { reasoning_content: reasoning.join('') } : {}),
+          ...(toolCalls.length > 0
+            ? {
+                tool_calls: toolCalls.map((call, index) => ({
+                  index,
+                  id: call.id,
+                  type: 'function',
+                  function: { name: call.name, arguments: call.args === '' ? '{}' : call.args },
+                })),
+              }
+            : {}),
+        },
+        finishReason: openAIFinish(effectiveFinish),
+        usage: openAIUsage(usage),
+      }),
+      ...(context === undefined ? {} : { context }),
+    });
   } else {
     if (streamed) {
       // A streaming failure still has to look like a stream: without the SSE

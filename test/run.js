@@ -36,6 +36,7 @@ import {
 import { authenticate, keyFromRequest } from '../src/middleware/auth.js';
 import {
   effortOf,
+  openAIContext,
   openAIUsage,
   openAIToResponsesInput,
   stopSequences,
@@ -511,6 +512,29 @@ check('OpenAI usage re-inflates the prompt total', () => {
   assert.equal(usage.prompt_tokens_details.cached_tokens, 40);
   assert.equal(usage.completion_tokens_details.reasoning_tokens, 5);
   assert.equal(openAIUsage(undefined), undefined);
+});
+
+check('OpenAI context usage is real usage plus the window, never an estimate', () => {
+  const context = openAIContext({
+    inputTokens: 50, outputTokens: 20, cacheReadTokens: 40,
+    cacheWriteTokens: 10, reasoningTokens: 5, totalTokens: 120,
+  }, 1000);
+  assert.equal(context.used_tokens, 120, 'prompt (100) plus this answer (20)');
+  assert.equal(context.prompt_tokens, 100, 'cached input is part of the prompt, not extra');
+  assert.equal(context.completion_tokens, 20);
+  assert.equal(context.cached_tokens, 40);
+  assert.equal(context.window_tokens, 1000);
+  assert.equal(context.remaining_tokens, 880);
+  assert.equal(context.used_percent, 12);
+  assert.equal(openAIContext(undefined, 1000), undefined, 'no usage means no context, not zero');
+
+  const unknownWindow = openAIContext(
+    { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 15 },
+    undefined,
+  );
+  assert.equal(unknownWindow.used_tokens, 15);
+  assert.equal('window_tokens' in unknownWindow, false, 'a missing window is not invented');
+  assert.equal('used_percent' in unknownWindow, false);
 });
 
 check('OpenAI messages convert into Responses items', () => {
@@ -2283,12 +2307,25 @@ await checkAsync('a cache hit reaches the client in both streaming and not', asy
       { choices: [], usage: upstreamUsage },
     ]));
 
-    const plain = await (await call(false)).json();
+    const plainResponse = await call(false);
+    const plain = await plainResponse.json();
     assert.equal(plain.usage.prompt_tokens_details.cached_tokens, 900,
       'a non-streaming caller must see the cache hit');
     // The gateway re-inflates prompt_tokens to include the cached part, as OpenAI does.
     assert.equal(plain.usage.prompt_tokens, 1000, 'prompt_tokens must stay the full prompt');
     assert.equal(plain.usage.completion_tokens, 20);
+    // Context usage is the same real numbers, with the window attached. The cached 900 is
+    // already inside prompt_tokens, so adding it again would double-count the context.
+    assert.equal(plain.context.used_tokens, 1020);
+    assert.equal(plain.context.prompt_tokens, 1000);
+    assert.equal(plain.context.completion_tokens, 20);
+    assert.equal(plain.context.cached_tokens, 900);
+    assert.equal(plain.context.window_tokens, 1_048_576);
+    assert.equal(plain.context.remaining_tokens, 1_047_556);
+    assert.equal(plain.context.used_percent, 0.1);
+    const contextHeader = plainResponse.headers.get('x-gateway-context');
+    assert.match(contextHeader, /used=1020; prompt=1000; completion=20; cached=900/);
+    assert.match(contextHeader, /window=1048576; remaining=1047556; percent=0\.1/);
 
     // --- Streaming: the only place usage can appear is the final chunk.
     globalThis.fetch = async (url) => (String(url).includes('deepai_code/models')
@@ -2308,6 +2345,9 @@ await checkAsync('a cache hit reaches the client in both streaming and not', asy
     assert.equal(withUsage[0].usage.prompt_tokens_details.cached_tokens, 900,
       'a streaming caller must see the cache hit in the final chunk');
     assert.equal(withUsage[0].usage.prompt_tokens, 1000);
+    assert.equal(withUsage[0].context.used_tokens, 1020,
+      'a streaming caller gets the same real context usage in the final chunk');
+    assert.equal(withUsage[0].context.window_tokens, 1_048_576);
     // And the gateway asked upstream for it: without this the chunk never arrives.
     assert.ok(body.includes('"content":"ok"'), 'the text still streams');
 
@@ -2340,6 +2380,67 @@ await checkAsync('a cache hit reaches the client in both streaming and not', asy
     })).text();
     assert.match(responsesBody, /"cached_tokens":900/,
       'the Responses transport must report its cache hit too');
+  } finally {
+    globalThis.fetch = realFetch;
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+await checkAsync('missing upstream usage stays unknown instead of being estimated', async () => {
+  /*
+   * The gateway used to fall back to characters / 4 when DeepAI sent no usage. That number
+   * looked exact in the response and silently became the caller's context meter, so a bad
+   * approximation was indistinguishable from real accounting. The honest answer is absence:
+   * no `usage`, no `context`, no header. DeepAI normally sends usage because the gateway asks
+   * for `stream_options.include_usage`, which is the case the test above covers.
+   */
+  const fresh = openDatabase(':memory:');
+  const { createApp } = await import('../server.js');
+  const { hashKey } = await import('../src/keys.js');
+  saveAccount(fresh, { apiKey: 'k', username: 'unknown-user', isPro: false });
+  const plaintext = 'sk-' + 'u'.repeat(40);
+  fresh.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
+                 VALUES ('kunknown', 'unknown', 'sk-uuuu', ?, 1, 'unlimited', '[]', 'unknown-user')`)
+    .run(hashKey(plaintext));
+
+  const app = createApp(fresh, { log: () => {}, logRequests: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const realFetch = globalThis.fetch;
+  const catalog = () => new Response(JSON.stringify(CATALOG_PAYLOAD),
+    { status: 200, headers: { 'content-type': 'application/json' } });
+  const sse = (chunks) => new Response(
+    chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join('') + 'data: [DONE]\n\n',
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  );
+  const upstream = () => sse([
+    { choices: [{ index: 0, delta: { content: 'ok' } }] },
+    { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+  ]);
+  globalThis.fetch = async (url) => (String(url).includes('deepai_code/models') ? catalog() : upstream());
+
+  const call = (stream) => realFetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${plaintext}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'deepseek-v4.1-flash', messages: [{ role: 'user', content: 'hi' }], stream }),
+  });
+
+  try {
+    const response = await call(false);
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal('usage' in body, false, 'no upstream usage means no invented usage');
+    assert.equal('context' in body, false, 'and no invented context object');
+    assert.equal(response.headers.get('x-gateway-context'), null, 'and no invented header');
+
+    const streamed = await (await call(true)).text();
+    const chunks = streamed.split('\n\n')
+      .filter((line) => line.startsWith('data: ') && !line.includes('[DONE]'))
+      .map((line) => JSON.parse(line.slice(6)));
+    assert.equal(chunks.some((c) => c.usage !== undefined || c.context !== undefined), false,
+      'the final chunk may not carry a guess either');
   } finally {
     globalThis.fetch = realFetch;
     await new Promise((resolve) => server.close(resolve));

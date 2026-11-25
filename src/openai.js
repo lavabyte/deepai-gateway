@@ -207,6 +207,42 @@ export function openAIFinish(reason) {
   }
 }
 
+/**
+ * Context usage for one completed answer, in tokens.
+ *
+ * This is not an estimate and nothing about it is stored: every number comes from the
+ * `usage` DeepAI reported for this request. `prompt_tokens` includes cached input, matching
+ * OpenAI's convention, and `used_tokens` adds this answer's output because the next turn has to
+ * carry it too. `used_percent` is therefore the part of the model's published context window
+ * this turn actually occupied when it finished.
+ *
+ * @param {object|undefined} tokens - normalized usage from the upstream response.
+ * @param {number|undefined} window - the model's catalog context window.
+ * @returns {object|undefined} undefined when DeepAI reported no usage.
+ */
+export function openAIContext(tokens, window) {
+  if (tokens === undefined) return undefined;
+  const cacheRead = tokens.cacheReadTokens ?? 0;
+  const cacheWrite = tokens.cacheWriteTokens ?? 0;
+  const prompt = tokens.inputTokens + cacheRead + cacheWrite;
+  const completion = tokens.outputTokens;
+  const used = prompt + completion;
+  const knownWindow = Number.isSafeInteger(window) && window > 0 ? window : undefined;
+  return {
+    used_tokens: used,
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    cached_tokens: cacheRead,
+    ...(knownWindow === undefined
+      ? {}
+      : {
+          window_tokens: knownWindow,
+          remaining_tokens: Math.max(0, knownWindow - used),
+          used_percent: Number(((used / knownWindow) * 100).toFixed(2)),
+        }),
+  };
+}
+
 /** Usage in OpenAI's shape, with cache and reasoning detail preserved. */
 export function openAIUsage(tokens) {
   if (tokens === undefined) return undefined;

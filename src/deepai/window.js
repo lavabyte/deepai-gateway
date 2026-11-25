@@ -20,11 +20,11 @@
  */
 
 /**
- * Characters per token: the estimator used when DeepAI sends no usage.
+ * Characters per token, used only to turn a catalog window into a pre-flight byte guard.
  *
- * This is a meter, not a policy. It is the same four characters per token that fills
- * `prompt_tokens` in `estimateUsage`, so a client's context gauge and this gateway's budget
- * agree about how full a prompt is. It is deliberately not a limit on the model.
+ * It is not a tokenizer and it never produces a `usage` number: real context usage comes from
+ * DeepAI's response. The approximation exists because a request has to be measured before it is
+ * sent, and no exact upstream count is available at that point.
  */
 export const CHARS_PER_TOKEN = 4;
 
