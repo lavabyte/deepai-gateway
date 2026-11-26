@@ -23,6 +23,7 @@ import { startCatalogRefresh, catalogSnapshot, ensureCatalog, CATALOG_KEY_REFUSE
 import { installUpstreamPool } from './src/deepai/transport.js';
 import { initPricing, pricingStatus, startPricingRefresh } from './src/pricing.js';
 import { v1Router } from './src/api/v1.js';
+import { REQUEST_BODY_LIMIT } from './src/limits.js';
 import { attachSession } from './src/middleware/session.js';
 import { listAccounts, clearSessionCookie, destroySession, forgetInactiveAccounts, newestAccountApiKey, recordAuthEvent } from './src/store.js';
 import { parseMaxKeys, totalKeyCount } from './src/keys.js';
@@ -104,7 +105,7 @@ export function createApp(db, options = {}) {
   app.set('etag', false);
   if (options.trustProxy === true) app.set('trust proxy', true);
 
-  app.use(express.json({ limit: '50mb' }));
+  app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
 
   // Every response is JSON unless a route says otherwise; the dashboard sets
   // its own content types.

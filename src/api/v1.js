@@ -32,6 +32,13 @@ import { contextWindowOf } from '../deepai/window.js';
 import { conversationId } from '../deepai/sessions.js';
 import { ConversationHistory, isOneTurn } from '../deepai/history.js';
 import { forgottenReplay } from '../deepai/context.js';
+import {
+  isClientSession,
+  isClientSessionId,
+  newClientSession,
+  pluginManifest,
+  sessionObject,
+} from '../plugin.js';
 import { creditsPerMinute, creditsPerThousand } from '../deepai/pricing.js';
 import { UpstreamError } from '../deepai/wire.js';
 import {
@@ -299,6 +306,53 @@ export function v1Router(db, options = {}) {
   // One map per app (and therefore per process), bounded by count, bytes and idle time.
   const history = options.history ?? new ConversationHistory();
 
+  /*
+   * Plugin protocol discovery. A code-tool adapter fetches this once and learns the
+   * paths, headers and the client-owned history rule without a second copy of them.
+   */
+  router.get('/plugin', authenticate(db), (req, res) => {
+    res.set('cache-control', 'no-store').json(pluginManifest());
+  });
+
+  /*
+   * A session here is an id, not a row. Nothing is written to SQLite or to the replay map;
+   * the caller keeps the transcript and sends it with every completion. The id exists so
+   * all turns of one conversation reach the same DeepAI prompt cache.
+   */
+  router.post('/sessions', authenticate(db), (req, res) => {
+    const session = newClientSession();
+    res.set('cache-control', 'no-store');
+    res.set('location', `/v1/sessions/${session.id}`);
+    res.status(201).json(session);
+  });
+
+  router.get('/sessions/:id', authenticate(db), (req, res) => {
+    if (!isClientSessionId(req.params.id)) {
+      return apiError(res, 404, 'Unknown client-owned session id.', 'session_not_found');
+    }
+    res.set('cache-control', 'no-store').json(sessionObject(req.params.id));
+  });
+
+  router.post('/sessions/:id/fork', authenticate(db), (req, res) => {
+    if (!isClientSessionId(req.params.id)) {
+      return apiError(res, 404, 'Unknown client-owned session id.', 'session_not_found');
+    }
+    const created = newClientSession();
+    res.set('cache-control', 'no-store');
+    res.set('location', `/v1/sessions/${created.id}`);
+    res.status(201).json(sessionObject(created.id, {
+      created: created.created,
+      parent: req.params.id,
+    }));
+  });
+
+  router.delete('/sessions/:id', authenticate(db), (req, res) => {
+    if (!isClientSessionId(req.params.id)) {
+      return apiError(res, 404, 'Unknown client-owned session id.', 'session_not_found');
+    }
+    res.status(204).end();
+  });
+
   // Authenticated, and scoped to the key: a restricted key sees only the
   // models it is allowed to call.
   router.get('/models', authenticate(db), async (req, res) => {
@@ -482,9 +536,13 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * a rewind or a compaction is not merged with the turn it replaced. `x-gateway-history` can
    * make a missing transcript a refusal (`required`), force a replacement (`replace`), or turn
    * replay off entirely (`off`); the default `auto` does the behaviour described here.
+   *
+   * A `dgw_client_` id from `POST /v1/sessions` means the plugin owns the transcript. That
+   * mode is always `off`, regardless of the history header: storing a copy would defeat the
+   * point of the plugin API and would make a restart or another replica observable.
    */
   const explicitSession = callerSession(req);
-  const historyMode = gatewayHistoryMode(req);
+  const historyMode = isClientSession(explicitSession) ? 'off' : gatewayHistoryMode(req);
   const sessionId = explicitSession || conversationId(body.messages, owner);
   const replayable = explicitSession !== undefined
     && historyMode !== 'replace' && historyMode !== 'off';

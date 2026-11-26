@@ -328,6 +328,25 @@ curl ... -H "x-session-id: imported-chat" -d '{
 `required` also needs a session id, because without one the gateway cannot tell a continuation
 from a new chat. An unknown value behaves like `auto`.
 
+#### Client-owned sessions for plugins
+
+A code-tool plugin can keep the transcript itself and use the gateway only as a transport.
+`POST /v1/sessions` returns an id with the `dgw_client_` prefix and writes no conversation. The plugin
+sends that id as `x-session-id` on every completion and sends the **whole transcript** each
+time. The prefix forces `x-gateway-history: off` for that id: there is no replay entry, no
+usage baseline and no dependence on a restart or on sticky routing. A history header is
+ignored for a client-owned id, because there is no server-side transcript it could act on.
+
+`GET /v1/sessions/{id}` returns the state-free descriptor, `POST /v1/sessions/{id}/fork` returns a new id
+with `parent`, and `DELETE /v1/sessions/{id}` returns `204`; none of them has a conversation row
+to read or delete. A fork allocates a new cache key but does not copy a transcript - the plugin copies
+its own messages, because the gateway has none. `GET /v1/plugin` publishes the route table,
+auth header, session header and history rule, so one adapter core can serve several code
+tools instead of carrying a second copy of the contract.
+
+This is the recommended mode for a plugin. The replay above remains for clients that send
+only the newest turn; a plugin that sends the full transcript does not need it.
+
 #### Nothing is refused for its size; a lost replay is caught after the answer
 
 There is no prompt-size setting and no pre-flight byte refusal. A prompt is forwarded as written,
@@ -951,6 +970,22 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 `temperature`, `top_p`, `max_tokens` / `max_completion_tokens`,
 `reasoning_effort` (`none` / `low` / `medium` / `high`), `stop`.
 
+### Plugin surface
+
+Every route below requires the same API key as the OpenAI surface. None of them stores a
+conversation; the session routes are pure functions of the id.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/v1/plugin` | Protocol manifest: routes, auth, session header, history rule, body limit |
+| `POST` | `/v1/sessions` | New client-owned session id; `201`, no conversation row |
+| `GET` | `/v1/sessions/{id}` | Stateless descriptor; `404` for an id not issued in this shape |
+| `POST` | `/v1/sessions/{id}/fork` | New id carrying `parent`; `201`, no transcript copy |
+| `DELETE` | `/v1/sessions/{id}` | Client-side close; `204`, nothing to delete |
+
+The `dgw_client_` prefix is what tells the chat route to send the transcript upstream as
+written and keep no copy. See [client-owned sessions](#client-owned-sessions-for-plugins).
+
 ### Dashboard API
 
 | Method | Path | Purpose |
@@ -1458,6 +1493,8 @@ src/deepai/catalog.js   model catalog, read live from DeepAI on every request
 src/deepai/account.js   key check, owner derivation, account-JSON parsing
 src/deepai/client.js    the two upstream transports
 src/deepai/history.js   bounded in-memory transcript replay
+src/plugin.js           client-owned sessions and the plugin manifest
+src/limits.js           the request body limit shared with the manifest
 src/deepai/transport.js the kept-alive connection both of them use
 src/deepai/wire.js      shared headers, SSE parsing, usage normalization
 public/                 dashboard (no framework, no build step)
@@ -1523,8 +1560,9 @@ export and durability, both usage normalizers, the catalog and the `/v1/models`
 payload, the OpenAI conversions, the `[hidden]` and OS-theme CSS invariants,
 routing (`/` is HTML, `/v1` and `/api` are JSON), the removal of the browser
 sign-in routes, the sign-in card's one route and its copyable instructions,
-`/v1/models` scoping, the 5-key cap, the per-hour window, the SSE splitter, and
-the Responses transport regression.
+`/v1/models` scoping, the 5-key cap, the per-hour window, the SSE splitter, the
+plugin manifest and client-owned sessions (no row, no replay), and the Responses
+transport regression.
 
 A few checks are guards rather than descriptions: the stylesheet may carry no class or
 custom property with no reader, no client code may call `window.confirm`, and the
