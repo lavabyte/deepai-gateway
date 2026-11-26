@@ -96,7 +96,14 @@ export class ConversationHistory {
     this.maxBytes = positive(options.maxBytes, DEFAULT_HISTORY_BYTES);
     this.ttlMs = positive(options.ttlMs, DEFAULT_HISTORY_TTL_MS);
     this.now = typeof options.now === 'function' ? options.now : Date.now;
-    /** @type {Map<string, {messages: unknown[], bytes: number, expiresAt: number}>} */
+    /**
+     * Each entry also keeps the last usage DeepAI reported for that transcript - its prompt
+     * token count, the model that produced it and the text size that was sent. They are not
+     * conversation state: they are the baseline for noticing that a replay was answered from
+     * less than it carried.
+     *
+     * @type {Map<string, {messages: unknown[], bytes: number, expiresAt: number, promptTokens?: number, textBytes?: number, model?: string}>}
+     */
     this.entries = new Map();
     this.bytes = 0;
   }
@@ -130,6 +137,35 @@ export class ConversationHistory {
   }
 
   /**
+   * The usage DeepAI reported for the transcript currently remembered.
+   *
+   * Used for one comparison only: a replay must be read as at least the prompt that was
+   * remembered, so a smaller reported prompt token count means DeepAI answered from a
+   * shortened body. Nothing is returned when the last answer had no usage, or when the caller
+   * switched models, because a different tokenizer makes the two counts incomparable.
+   *
+   * @param {string} owner
+   * @param {string} sessionId
+   * @param {string} model - the model this request will use.
+   * @returns {{promptTokens: number, textBytes: number} | undefined}
+   */
+  lastPrompt(owner, sessionId, model) {
+    const key = this.key(owner, sessionId);
+    const entry = this.entries.get(key);
+    if (entry === undefined) return undefined;
+    if (entry.expiresAt <= this.now()) {
+      this.remove(key);
+      return undefined;
+    }
+    if (entry.model !== model
+      || !Number.isFinite(entry.promptTokens)
+      || !Number.isFinite(entry.textBytes)) {
+      return undefined;
+    }
+    return { promptTokens: entry.promptTokens, textBytes: entry.textBytes };
+  }
+
+  /**
    * Remember the transcript that was just sent, replacing the previous one.
    *
    * A transcript larger than the whole budget is not remembered at all rather than evicting
@@ -138,9 +174,10 @@ export class ConversationHistory {
    * @param {string} owner
    * @param {string} sessionId
    * @param {unknown} messages
+   * @param {{promptTokens?: number, textBytes?: number, model?: string}} [usage]
    * @returns {boolean} whether it was kept.
    */
-  remember(owner, sessionId, messages) {
+  remember(owner, sessionId, messages, usage = {}) {
     if (!Array.isArray(messages) || messages.length === 0) return false;
     const key = this.key(owner, sessionId);
     let bytes;
@@ -159,7 +196,21 @@ export class ConversationHistory {
     this.prune();
     this.remove(key);
     const expiresAt = this.now() + this.ttlMs;
-    this.entries.set(key, { messages: messages.slice(), bytes, expiresAt });
+    const promptTokens = Number.isFinite(usage.promptTokens) && usage.promptTokens > 0
+      ? usage.promptTokens
+      : undefined;
+    const textBytes = Number.isFinite(usage.textBytes) && usage.textBytes > 0
+      ? usage.textBytes
+      : undefined;
+    const model = typeof usage.model === 'string' && usage.model !== '' ? usage.model : undefined;
+    this.entries.set(key, {
+      messages: messages.slice(),
+      bytes,
+      expiresAt,
+      ...(promptTokens === undefined || textBytes === undefined || model === undefined
+        ? {}
+        : { promptTokens, textBytes, model }),
+    });
     this.bytes += bytes;
     while (this.entries.size > this.maxEntries) {
       this.remove(this.entries.keys().next().value);

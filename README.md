@@ -68,7 +68,6 @@ each one; `npm start` reads `.env`, so nothing has to be exported in your shell.
 | `DATABASE` | `./data/deepai.db` | SQLite file |
 | `TRUST_PROXY` | unset | Set `1` behind a TLS proxy: trust `X-Forwarded-*` and set `Secure` cookies |
 | `FORGET_ACCOUNT_AFTER_DAYS` | `0` | Forget accounts nobody has used for this many days - see [Retention](#retention). `0` (the default) forgets nothing |
-| `PROMPT_BUDGET_BYTES` | unset | Optional override for the largest serialized prompt sent upstream. Unset means each model's catalog `contextWindow - maxTokens`; see [the whole prompt](#what-it-enforces-is-the-whole-prompt) |
 | `LOG_REQUESTS` | `1` | Set `0` to silence per-request logging |
 | `PRICING_CACHE` | `./data/pricing.json` | Where the fetched price table is cached |
 
@@ -204,7 +203,7 @@ the start of the prompt only, 170 KB of prose with 45,921 and both markers. What
 does to a long prompt, it does by content - which is exactly why nothing can be *predicted* from the
 size of a body, and why the gateway does not try to guess what survived.
 
-#### The budget is the model's window, not a guess about the cache
+#### The window is the model's, and the gateway does not guess what survived
 
 Every probe above was a single cold request: nothing of it had been seen before, so the whole
 prompt was read and the wall showed up at about 196 KB. That is a backend measurement, not the
@@ -215,7 +214,7 @@ the gateway's own traffic shows requests with **720,896 cached tokens against 15
 The cache makes those tokens cheaper and faster to read, but it does not remove them from the
 model's context window. A prompt does not gain capacity because it is warm.
 
-So there is one published window per model, and one enforced budget derived from it:
+So there is one published window per model, and no enforced byte budget:
 
 | field | value | what it is |
 | --- | --- | --- |
@@ -225,17 +224,20 @@ The desktop app reads that catalog entry and spreads it into its model config un
 compacts at `contextWindow - reserveTokens`. The gateway publishes the same per-model number, so a
 harness applying the app's own rule compacts where the app does. The measured 196 KB behaviour of
 a *cold* request is not a model window and is not published as one: it cannot be derived from the
-catalog, and baking it in made the gateway shorten healthy conversations. It remains a documented
-measurement and an optional operator override, not a default.
+catalog, and the same body size has been read whole on one run and shortened on the next.
 
-**The gateway refuses a prompt that would lose its start.** A caller normally sends its whole
-transcript every turn; a named session may send only the new turn and let the gateway prepend the
-remembered one. Either way the budget is measured on the whole serialized request. The endpoint's
-prompt cache still does its work, and the harness does its own compaction when it decides to. When the
-prompt is past the model's budget, the gateway returns a `400` before sending anything and leaves
-the transcript alone. DeepAI would otherwise answer with a `200` from the tail, silently missing
-the front; the error tells the caller to compact the session or start a new chat, then retry, and
-`x-gateway-prompt` carries the numbers.
+**The gateway does not refuse a prompt for its serialized size, and it does not compact one.** It
+forwards what the caller sent. The only reliable evidence that DeepAI lost the start is the
+`usage` it returns with the answer, after the fact - a byte count before sending is an estimate of
+a limit that is not the catalog's token window and is not stable across content.
+
+For a named session the gateway has a measurement to compare against. It remembers the prompt
+token count DeepAI reported for the transcript it stored; on the next one-turn replay it expects the
+new count not to fall below that number. If the reported count collapses instead, the answer was
+computed from a shortened body. The gateway discards that answer and returns
+`400 context_forgotten` with the two counts and the action to take. A full transcript has no
+baseline to compare, so it is forwarded and its `usage` is reported as usual; the caller remains
+responsible for compacting before the model's real window, using the published `context_window`.
 
 One chat is one session here, and its compaction belongs to the caller. A checkpoint written by
 the gateway would put text on the wire the caller never saw, then make the caller's original
@@ -287,8 +289,10 @@ and the map stays text-only.
 A restart clears the map, and it lives in one process: if you run several gateway replicas, a named
 session must reach the same replica (sticky routing) or replay will miss.
 `x-gateway-history: off` disables replay for a request.
-It also assumes one in-flight turn per session; two parallel turns with the same id race on the
-stored transcript, so give parallel chats distinct ids. There is no `conversation_sessions` table,
+It also keeps the last prompt token count DeepAI reported, only as the in-memory baseline for
+the lost-replay check; that count is not a usage record and is not written down. It also assumes
+one in-flight turn per session; two parallel turns with the same id race on the stored transcript,
+so give parallel chats distinct ids. There is no `conversation_sessions` table,
 no message digests in the database and no seven-day database expiry; the caller's transcript
 remains the authoritative record, and the in-memory copy is only a convenience for the next request.
 
@@ -324,69 +328,64 @@ curl ... -H "x-session-id: imported-chat" -d '{
 `required` also needs a session id, because without one the gateway cannot tell a continuation
 from a new chat. An unknown value behaves like `auto`.
 
-#### What it enforces is the whole prompt
+#### Nothing is refused for its size; a lost replay is caught after the answer
 
-The budget is derived per request from the selected model's catalog entry:
-`(contextWindow - maxTokens) * CHARS_PER_TOKEN`, the same shape the desktop app uses when it
-compacts at `contextWindow - reserveTokens`. There is no gateway constant to update when DeepAI
-changes a model, and no default number to go stale. `PROMPT_BUDGET_BYTES` is an optional explicit
-override for a deployment that measured a tighter limit; unset or invalid means "use the model",
-never "fall back to the old 176,400".
+There is no prompt-size setting and no pre-flight byte refusal. A prompt is forwarded as written,
+including a 100 KB tool result, markers and all. A harness that read a large file knows what it read
+and can summarize or truncate it itself; a proxy guessing which half to keep cannot. The opt-in
+replay is the one thing the gateway adds, and it only prepends a transcript the caller already sent
+in an earlier request; it never drops or summarizes a turn.
 
-The budget is measured on the whole serialized request: every message in `messages`, the tool
-catalog and the JSON framing. A cached prefix is cheaper to read, but its
-tokens still occupy the model's context window, so cache state does not change whether the request
-fits. Measuring the whole prompt is also the only number the gateway can know without asking
-DeepAI for a token count or guessing one. It is a pre-flight size guard, not the context meter:
-once DeepAI answers, `usage` and `context` carry the real token count (see below).
-
-A request whose whole prompt is past the budget is refused before it goes upstream, with the
-OpenAI error shape and a code that names the reason:
+What the gateway can check is the replay it just reconstructed. For a named session it remembers the
+prompt token count DeepAI reported for the stored transcript, the model that produced it, and the
+text size that was sent. On the next one-turn replay, for the same model, it compares the new
+`usage.prompt_tokens` with that baseline. The new prompt still contains the remembered transcript,
+so its count cannot be lower unless the endpoint stopped reading it; a 2% tolerance (at least 256
+tokens) absorbs ordinary accounting noise. A count below that floor is not tokenizer drift; it is
+DeepAI answering from a shortened body. The answer is discarded and the caller gets a `400`:
 
 ```json
 {
   "error": {
-    "message": "This request's serialized prompt and tools are 300,150 bytes, but this model's
-                catalog window allows at most 262,144 bytes. The gateway has not shortened it.
-                Compact the session, undo recent messages, or start a new chat, then retry.
-                The x-gateway-prompt header on this refusal carries the numbers.",
-    "type": "invalid_request_error",
-    "code": "context_limit_reached",
+    "message": "DeepAI reported 100 prompt tokens for this replay, but the transcript it was sent
+                already carried 1,000. The answer was discarded because the beginning of the
+                conversation was not read. Compact the session, undo recent messages, or start a
+                new chat, then retry.",
+    "type": "api_error",
+    "code": "context_forgotten",
     "param": null
   }
 }
 ```
 
-The `400` is deliberate: the alternative is not a refusal from DeepAI but a `200` with the front
-silently gone. The message names the action, so a harness that does not know this code still knows
-what to do; the header carries the bytes and the budget.
+A healthy turn grows the prompt, so the check passes even when tokenization is uneven; a full
+transcript has no stored baseline, so there is nothing to compare. If DeepAI returns no `usage`,
+the gateway does not invent a count and cannot make the comparison. The `400` is deliberate: the
+alternative is a confident `200` answer to a conversation whose front the model never saw.
 
-Nothing under the budget is rewritten **when the caller sends its own transcript**: it arrives
-upstream byte for byte, including a 100 KB tool result, markers and all. A harness that read a large
-file knows what it read and can summarize or truncate it itself; a proxy guessing which half to keep
-cannot. The opt-in replay is the one exception, and it only prepends a transcript the caller
-already sent in an earlier request; it never drops or summarizes a turn.
+A streaming request is the exception forced by the protocol: deltas are already on the wire when the
+final usage arrives. Its HTTP status is therefore already `200`; if the loss is detected, the stream
+ends with an SSE `error` event carrying `context_forgotten` and no `[DONE]`. A streaming client
+must treat an `error` event as a failed turn, exactly as it would a non-200. A non-streaming request
+gets the `400` above.
 
 The same facts ride on every answer in an `x-gateway-prompt` header, semicolon-separated
-`key=value` as it always was, set before the check so a refusal carries them too:
+`key=value`:
 
 | key | value |
 | --- | --- |
 | `sent` | bytes of prompt text leaving the gateway: the caller's transcript, or a named session's replayed transcript plus the new turn |
 | `received` | bytes of prompt text that arrived |
-| `body` | bytes of the serialized upstream body, tools included. What the budget is measured on |
+| `body` | bytes of the serialized upstream body, tools included |
 | `window` | the token window DeepAI's catalog declares for this model, or `unknown` |
-| `budget` | that window at four characters per token, the pre-flight approximation, or `unknown` |
-| `budget-bytes` | the byte budget on the whole prompt: the model's window less its output allowance, or `PROMPT_BUDGET_BYTES` when set |
 
-Those are wire sizes, not context usage. They exist because a request has to be measured before it is
-sent; the real token count arrives with the answer.
+Those are wire sizes, not context usage; the real token count arrives with the answer.
 
-#### Context usage comes from DeepAI, and is never stored
+#### Context usage comes from DeepAI, and is never persisted
 
 The `usage` object in an answer is DeepAI's own accounting, relayed unchanged: `prompt_tokens`
 includes cached input, `completion_tokens` is this answer, and `total_tokens` is their sum. The
-gateway does not estimate, pad or remember it. If DeepAI sends no `usage`, the field is absent -
+gateway does not estimate, infer or pad it. If DeepAI sends no `usage`, the field is absent -
 the gateway will not turn characters divided by four into a number that looks exact.
 
 For callers that want the context window beside it, every answer that has real usage also carries
@@ -419,12 +418,13 @@ keeps a single turn small, but not the transcript: measured on this machine's ow
 transcript of one long chat reached 241,019 prompt tokens over 1,378 model turns before its fifth
 compaction.
 
-The unit tests cover the refusal at the model's budget with `context_limit_reached` and the action
-in its message, the tool catalog counting toward the budget, the harness-compaction case (a new id
-and the whole new prompt measured), account isolation, parallel conversations of one key,
-caller-supplied session headers, a named session replayed from one new turn, the
+The unit tests cover a large prompt and tool catalog being forwarded whole, the harness-compaction
+case (a new id and the whole new prompt forwarded), account isolation, parallel conversations of one
+key, caller-supplied session headers, a named session replayed from one new turn, the
 `required`/`replace`/`off` modes, the fact that a derived id is never replayed, the replay map's
-count, byte and idle-time bounds, and the configurable budget with its fallback.
+count, byte and idle-time bounds, and the `context_forgotten` check: a collapsed replay count is
+rejected, a growing one is answered, and a missing baseline or missing usage is not treated as
+loss.
 
 ### What a paid request costs: an equation on the catalog's price
 
@@ -621,17 +621,16 @@ The price shown is `theosPerRequest`, which is what DeepAI charges per call.
 ### The window published is the one a harness should compact against
 
 `/v1/models` publishes `context_window` as the selected model's own `contextWindow` from the
-catalog, and the gateway enforces that window against the whole serialized prompt.
-`/v1/models/details` carries the same field, because it is a JSON endpoint any key holder can
-call, not a dashboard-only view. There is no local 320,000 fallback: if the catalog did not send a
-window, the field is omitted.
+catalog. `/v1/models/details` carries the same field, because it is a JSON endpoint any key holder
+can call, not a dashboard-only view. There is no local 320,000 fallback: if the catalog did not send
+a window, the field is omitted.
 
-What is refused, on the request path, is any prompt whose whole serialized body is larger than the
-budget derived from that model's window. The gateway does not compact it before sending: it
-returns `context_limit_reached`, rather than handing DeepAI a prompt that may lose its front.
-There is no warm-prompt exemption, because a cached prompt still fills the same window. The
-measurements and the mechanism are in **"What a cold prompt costs: the measured wall at about
-196 KB"** above.
+That number is for the caller's own compaction: the gateway does not enforce it as a byte budget
+and does not rewrite the prompt. The endpoint's body limit and the catalog's token window are
+different things, and the measured cliff is content-dependent. The gateway's only automatic
+protection is the post-answer `context_forgotten` check for a replayed named session; a full
+transcript is forwarded, and its real `usage` is reported. The measurements are in **"What a cold
+prompt costs: the measured wall at about 196 KB"** above.
 
 
 ### Log in / log out
@@ -1036,7 +1035,7 @@ When the gateway reports usage back to its clients it re-inflates
 `prompt_tokens` so a client's own accounting stays consistent. If DeepAI sends no `usage` for a
 request, the gateway records zeroes and returns no `usage` or `context`; it never substitutes a
 character-based estimate. The context window and percentage travel with the real usage as the
-`context` object described in [Context usage comes from DeepAI](#context-usage-comes-from-deepai-and-is-never-stored).
+`context` object described in [Context usage comes from DeepAI](#context-usage-comes-from-deepai-and-is-never-persisted).
 
 ## When DeepAI refuses the key as "not enabled for DeepAI Code"
 
@@ -1195,8 +1194,9 @@ v1 glm-5.3-flash capacity: the model is busy, waiting 2000ms (attempt 2 of 4)
 ### Session affinity, and parallel conversations
 
 DeepAI routes a turn by the session it belongs to (`X-Session-Affinity`), which is how the same
-conversation keeps its prompt cache. The cache makes a prompt cheaper, not larger: the budget is
-still the model's window. This gateway sends the caller's own session header - `x-session-id`,
+conversation keeps its prompt cache. The cache makes a prompt cheaper, not larger: the catalog
+window is still the model's, and the gateway does not turn it into a byte refusal. This gateway
+sends the caller's own session header - `x-session-id`,
 `session_id` or `x-session-affinity` - when it passes one, and otherwise derives an id from the
 account and the first user message. The system prompt is ignored so a harness rewriting it each
 turn does not break the session; a compaction changes the first user message, so a derived id
@@ -1489,10 +1489,11 @@ turn - see [Performance](#performance)).
 - Images are forwarded to models whose catalog entry declares `image` input, and replaced by a
   note in the text for models that do not - or that refused one in the last 15 minutes. See
   [Images](#images).
-- A prompt larger than the selected model's catalog budget is refused with
-  `context_limit_reached` before it is sent. The message asks the caller to compact the session,
-  undo recent messages, or start a new chat. See
-  [the whole prompt](#what-it-enforces-is-the-whole-prompt).
+- A prompt is never refused for its serialized size, and the gateway never compacts it. A replayed
+  named session whose reported prompt count collapses is rejected after the answer with
+  `context_forgotten`; the message asks the caller to compact the session, undo recent messages,
+  or start a new chat. See
+  [the replay check](#nothing-is-refused-for-its-size-a-lost-replay-is-caught-after-the-answer).
 - A continuation marked `x-gateway-history: required` is refused with
   `conversation_history_missing` if the in-memory transcript is gone; without a session id it is
   refused with `session_required`. See

@@ -77,13 +77,6 @@ import {
  * translated string would render as its key and the text assertions below would fail for
  * the wrong reason. The real files are served instead.
  */
-/*
- * The prompt budget these tests pin. Production derives it from each model's catalog entry, but a
- * test needs a small, deterministic number so its conversation is actually over the line; this is
- * a fixture, not a default the gateway falls back to.
- */
-const TEST_PROMPT_BUDGET = 176_400;
-
 const LOCALE_CODES = ['en', 'pl', 'de', 'es', 'hi'];
 const LOCALE_PATH = (code) => new URL(`../public/locales/${code}.json`, import.meta.url);
 
@@ -4493,138 +4486,17 @@ await checkAsync('an image the backend refuses is retried as text, not reported 
   }
 });
 
-await checkAsync('the text-only retry after an image refusal is measured too', async () => {
-  /*
-   * Stripping an image normally shrinks a request: a data URL is replaced by a short note. But the
-   * note is a fixed length and an image can be shorter than it, so the retry after a refusal is a
-   * different body that can be a few dozen bytes *longer* than the one that was measured. The
-   * budget guard only means something if every body that leaves was measured under it, so the
-   * retry is measured as well - and refused rather than sent when it is over.
-   *
-   * The image here is the smallest the wire allows - `data:image/png;base64,AA` - which is the case
-   * where the note is longer than what it replaces. No image is ever this small in practice; the
-   * point is that the invariant does not depend on that.
-   */
-  const multimodal = await import('../src/deepai/multimodal.js');
-  const { openDatabase } = await import('../src/db.js');
-  const { saveAccount } = await import('../src/store.js');
-  const { generateKey } = await import('../src/keys.js');
-  const { createApp } = await import('../server.js');
-
-  const db = openDatabase(':memory:');
-  saveAccount(db, { apiKey: 'upstream', username: 'retry-user', isPro: false });
-  const key = generateKey();
-  db.prepare(`INSERT INTO api_keys (id, name, prefix, key_hash, created_at, limit_window, allowed_models, owner_username)
-    VALUES ('k1', 'k', 'sk-x', ?, 1, 'unlimited', '[]', 'retry-user')`).run(key.hash);
-
-  const realFetch = globalThis.fetch;
-  /** Bytes of every completion body that reached upstream, in order. */
-  let bodies = [];
-  const refuseImage = async (url) => {
-    if (!String(url).includes('api.deepai.org')) return undefined;
-    if (String(url).includes('deepai_code/models')) {
-      return new Response(JSON.stringify(CATALOG_PAYLOAD),
-        { status: 200, headers: { 'content-type': 'application/json' } });
-    }
-    return undefined;
-  };
-
-  const serverFor = async (options) => {
-    const app = createApp(db, { log: () => {}, logRequests: false, ...options });
-    const server = app.listen(0, '127.0.0.1');
-    await new Promise((resolve) => server.once('listening', resolve));
-    return { server, base: `http://127.0.0.1:${server.address().port}` };
-  };
-  const ask = (base) => realFetch(`${base}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${key.plaintext}` },
-    body: JSON.stringify({
-      model: 'deepseek-v4.1-flash',
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'text', text: 'what is in this picture?' },
-          { type: 'image_url', image_url: { url: 'data:image/png;base64,AA' } },
-        ],
-      }],
-    }),
-  });
-
-  try {
-    /*
-     * First: learn the two body sizes from a gateway with room, so the second gateway can be
-     * configured to admit the image but not the note that replaces it.
-     */
-    globalThis.fetch = async (url, init) => {
-      const models = await refuseImage(url);
-      if (models !== undefined) return models;
-      const body = JSON.parse(init.body);
-      bodies.push(Buffer.byteLength(String(init.body), 'utf8'));
-      const hasImage = body.messages.some((message) => Array.isArray(message.content)
-        && message.content.some((part) => part.type === 'image_url'));
-      if (hasImage) {
-        const refusal = { error: { message: 'Received multimodal data but multimodal processing is not enabled.' } };
-        return new Response(`data: ${JSON.stringify(refusal)}\n\n`,
-          { status: 200, headers: { 'content-type': 'text/event-stream' } });
-      }
-      return new Response('data: {"choices":[{"delta":{"content":"words"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-        { status: 200, headers: { 'content-type': 'text/event-stream' } });
-    };
-
-    multimodal.forgetRejections();
-    const roomy = await serverFor({});
-    const first = await ask(roomy.base);
-    await new Promise((resolve) => roomy.server.close(resolve));
-    assert.equal(first.status, 200, 'with room, the retry answers the caller');
-    assert.equal(bodies.length, 2, 'the image attempt and the text retry both went upstream');
-    const [imageBytes, textBytes] = bodies;
-    assert.ok(textBytes > imageBytes,
-      `the note is longer than the image it replaces (${textBytes} > ${imageBytes}), which is why the retry has to be measured`);
-
-    /* And now the same request through a gateway whose budget is the image body exactly. */
-    globalThis.fetch = async (url, init) => {
-      const models = await refuseImage(url);
-      if (models !== undefined) return models;
-      const body = JSON.parse(init.body);
-      bodies.push(Buffer.byteLength(String(init.body), 'utf8'));
-      const hasImage = body.messages.some((message) => Array.isArray(message.content)
-        && message.content.some((part) => part.type === 'image_url'));
-      assert.equal(hasImage, true, 'only the measured image body may be sent');
-      const refusal = { error: { message: 'Received multimodal data but multimodal processing is not enabled.' } };
-      return new Response(`data: ${JSON.stringify(refusal)}\n\n`,
-        { status: 200, headers: { 'content-type': 'text/event-stream' } });
-    };
-
-    multimodal.forgetRejections();
-    bodies = [];
-    const tight = await serverFor({ promptBudgetBytes: imageBytes });
-    const refused = await ask(tight.base);
-    await new Promise((resolve) => tight.server.close(resolve));
-    assert.equal(refused.status, 400, 'a retry over the budget is refused');
-    const error = await refused.json();
-    assert.equal(error.error?.code, 'context_limit_reached');
-    assert.match(error.error?.message ?? '', /text-only retry/,
-      `the message says which body was too large: ${error.error?.message}`);
-    assert.match(error.error?.message ?? '', /Compact the session, undo recent messages, or start a new chat/,
-      'and what the caller can do about it');
-    assert.equal(bodies.length, 1, 'and the oversized retry never left the gateway');
-  } finally {
-    globalThis.fetch = realFetch;
-    multimodal.forgetRejections();
-  }
-});
 
 /*
- * ------------------------------------------------- the prompt budget and stateless sessions
+ * ------------------------------------------------- replay and stateless sessions
  *
- * The one guard this gateway enforces is on the whole serialized prompt. DeepAI's prompt cache
- * makes a warm prefix cheaper to read, but the cached tokens still occupy the model's context
- * window, so the honest number is the request that leaves this process - tools and framing
- * included. The budget comes from the model's catalog entry; nothing here guesses what DeepAI
- * has cached.
+ * No prompt is refused for its size and no prompt is compacted here. The endpoint's real body
+ * limit is not the catalog's token window, so a pre-flight byte estimate can only reject healthy
+ * conversations or let a silently shortened one through. A request goes as written; the answer is
+ * judged afterwards from the usage DeepAI reports.
  *
- * The session id only tells DeepAI which cache to extend. It is derived from the opening on
- * every request, or taken from the caller, and no conversation row is written anywhere.
+ * The session id tells DeepAI which cache to extend. It is derived from the opening on every
+ * request, or taken from the caller, and no conversation row is written anywhere.
  */
 
 /**
@@ -4637,7 +4509,7 @@ await checkAsync('the text-only retry after an image refusal is measured too', a
  * Several accounts can be signed in at once, which is how the isolation cases get two keys on one
  * gateway.
  */
-async function deepaiGateway({ usernames = ['prompt-user'], budget = TEST_PROMPT_BUDGET, usage, respond } = {}) {
+async function deepaiGateway({ usernames = ['prompt-user'], usage, respond } = {}) {
   const { openDatabase } = await import('../src/db.js');
   const { saveAccount } = await import('../src/store.js');
   const { generateKey } = await import('../src/keys.js');
@@ -4685,7 +4557,7 @@ async function deepaiGateway({ usernames = ['prompt-user'], budget = TEST_PROMPT
     { status: 200, headers: { 'content-type': 'text/event-stream' } });
   };
 
-  const app = createApp(db, { log: (message) => lines.push(message), promptBudgetBytes: budget });
+  const app = createApp(db, { log: (message) => lines.push(message) });
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -4725,56 +4597,46 @@ function gatewayPrompt(response) {
   return fields;
 }
 
-await checkAsync('a prompt past the model budget is refused with a compact-or-new-chat error', async () => {
+await checkAsync('a large prompt is forwarded whole instead of being refused by size', async () => {
   /*
-   * Past the model's budget DeepAI does not refuse anything - it answers from the part it kept,
-   * usually the tail, with a normal 200 - which from a caller is a model that has forgotten the
-   * conversation. The gateway does not rewrite the transcript to hide that: it refuses, and the
-   * caller can compact its own session or start a new chat. The budget here is pinned low by the
-   * test fixture; production derives it from the model's catalog entry.
+   * The endpoint's body limit is not the catalog's token window. A gateway that multiplies the
+   * window by an average bytes-per-token and refuses above it rejects conversations DeepAI would
+   * have read, and the caller cannot see which number was used. Size alone is never a refusal now:
+   * the request goes as written, and the answer is judged from the usage DeepAI returns.
    */
   const gateway = await deepaiGateway();
   try {
-    const cold = [{ role: 'user', content: 'x'.repeat(200_000) }];
-    const refused = await gateway.ask(cold);
+    const cold = [{ role: 'user', content: 'x'.repeat(400_000) }];
+    const answered = await gateway.ask(cold);
 
-    assert.equal(refused.status, 400, 'the request is refused before anything leaves');
-    assert.equal(gateway.sent.length, 0, 'nothing reaches upstream');
-    const header = gatewayPrompt(refused);
-    assert.ok(header.body > TEST_PROMPT_BUDGET, `the body is over the budget: ${header.body}`);
-    assert.equal(header['budget-bytes'], TEST_PROMPT_BUDGET);
-    assert.equal(header.window, 1_048_576, 'the catalog window for this model rides along');
-    assert.equal(header.budget, 4_194_304, 'beside that window in characters');
+    assert.equal(answered.status, 200, 'a large body is answered, not refused');
+    assert.equal(gateway.sent.length, 1, 'it reached upstream');
+    assert.equal(gateway.sent[0].payload.messages[0].content.length, 400_000,
+      'and it reached upstream whole');
+
+    const header = gatewayPrompt(answered);
+    assert.equal(header.sent, 400_000, 'the prompt text is reported');
+    assert.ok(header.body > header.sent, `the serialized body is larger: ${header.body}`);
+    assert.equal(header.window, 1_048_576, 'the catalog window rides along');
+    assert.equal(header.budget, undefined, 'there is no byte budget to report');
+    assert.equal(header['budget-bytes'], undefined, 'and no enforced override');
     assert.equal(header.fresh, undefined, 'there is no cache estimate to report');
     assert.equal(header.reused, undefined, 'and no cache state');
     assert.equal(header.trim, undefined, 'there is no shortened prompt to report');
 
-    const error = await refused.json();
-    assert.equal(error.error?.type, 'invalid_request_error');
-    assert.equal(error.error?.code, 'context_limit_reached');
-    assert.match(error.error?.message ?? '', /Compact the session, undo recent messages, or start a new chat/,
-      `the message tells the caller what to do: ${error.error?.message}`);
-    assert.match(error.error?.message ?? '', /x-gateway-prompt/, 'and where the numbers are');
-
-    const row = gateway.db.prepare('SELECT status, ok, error_code FROM usage ORDER BY rowid DESC LIMIT 1').get();
-    assert.equal(row.status, 400, 'the refusal is recorded like any other request');
-    assert.equal(row.ok, 0);
-    assert.equal(row.error_code, 'context_limit_reached');
-
-    // A streaming caller gets the same refusal: the decision is made before the upstream call.
     const streaming = await gateway.ask(cold, { body: { stream: true } });
-    assert.equal(streaming.status, 400, 'a streaming caller is refused too');
-    assert.equal(gateway.sent.length, 0, 'and still nothing reaches upstream');
+    assert.equal(streaming.status, 200, 'a streaming caller is not refused either');
+    assert.equal(gateway.sent.length, 2, 'the streaming body also reached upstream');
   } finally {
     await gateway.close();
   }
 });
 
-await checkAsync('the tool catalog counts toward the prompt budget', async () => {
+await checkAsync('a large tool catalog is forwarded whole', async () => {
   /*
-   * The endpoint reads the tools too, so a tiny message list with a huge catalog is still a huge
-   * request. Measuring only message text would forward a body DeepAI may truncate while the
-   * gateway believes it is small.
+   * The endpoint reads the tools too, so a body can be large with a tiny message list. The catalog
+   * is part of the request and is reported in the body size, but it is not a pre-flight refusal:
+   * the gateway cannot know the endpoint's real limit, so it forwards the tools it was given.
    */
   const tools = [{
     type: 'function',
@@ -4784,28 +4646,27 @@ await checkAsync('the tool catalog counts toward the prompt budget', async () =>
       parameters: { type: 'object', properties: {} },
     },
   }];
-  const gateway = await deepaiGateway({ budget: 100_000 });
+  const gateway = await deepaiGateway();
   try {
-    const refused = await gateway.ask([{ role: 'user', content: 'hi' }], { body: { tools } });
-    assert.equal(refused.status, 400, 'the catalog alone pushes the request over budget');
-    assert.equal(gateway.sent.length, 0, 'nothing reaches upstream');
-    const header = gatewayPrompt(refused);
-    assert.ok(header.body > 100_000, `the serialized body includes the catalog: ${header.body}`);
-    assert.ok(header.body > 120_000, 'and the catalog is not invisible to the guard');
+    const answered = await gateway.ask([{ role: 'user', content: 'hi' }], { body: { tools } });
+    assert.equal(answered.status, 200, 'the catalog is not a refusal');
+    assert.equal(gateway.sent.length, 1);
+    assert.deepEqual(gateway.sent[0].payload.tools, tools, 'it reached upstream whole');
+    const header = gatewayPrompt(answered);
+    assert.ok(header.body > 120_000, `the serialized body includes the catalog: ${header.body}`);
   } finally {
     await gateway.close();
   }
 });
 
-await checkAsync('a harness compaction starts a new session and is measured whole', async () => {
+await checkAsync('a harness compaction starts a new session and is forwarded whole', async () => {
   /*
    * A harness compacts by replacing the opening of the conversation with a summary. The session
    * id is derived from that opening, so it changes - and so does the endpoint's cache, because
    * the prefix changed too. Nothing in the gateway has to be invalidated: there is nothing to
-   * invalidate. The compacted transcript is measured as the request it is.
+   * invalidate. The compacted transcript goes as the harness wrote it.
    */
-  const budget = 220_000;
-  const gateway = await deepaiGateway({ budget });
+  const gateway = await deepaiGateway();
   const system = { role: 'system', content: 'You are a coding agent. Today is 2026-10-26.' };
   const u1 = { role: 'user', content: `read the file ${'1'.repeat(49_990)}` };
   const a1 = { role: 'assistant', content: `it says ${'2'.repeat(49_990)}` };
@@ -4827,8 +4688,7 @@ await checkAsync('a harness compaction starts a new session and is measured whol
 
     const header = gatewayPrompt(second);
     assert.ok(header.body > 100_000, `the compacted body is large: ${header.body}`);
-    assert.ok(header.body < budget,
-      `it fits the raised budget, so it is forwarded whole (${header.body} < ${budget})`);
+    assert.equal(header.budget, undefined, 'there is no byte budget');
     assert.equal(header.fresh, undefined, 'there is no cache estimate');
     assert.equal(header.reused, undefined, 'and no remembered session');
 
@@ -5142,6 +5002,200 @@ await checkAsync('a required replay refuses to answer without its history', asyn
   }
 });
 
+await checkAsync('a replay that DeepAI answered from a shortened prompt is rejected', async () => {
+  /*
+   * The endpoint can answer from only the tail of a body past its real limit, with HTTP 200 and
+   * no error. For a replay the gateway has the previous turn's reported prompt size, so the
+   * second answer's usage is the observable signal: it cannot be smaller than the transcript it
+   * was sent, plus the new turn, by more than ordinary tokenizer tolerance.
+   *
+   * The answer here is discarded with an explicit error. No pre-flight byte count is involved.
+   */
+  let completions = 0;
+  const answer = (content, promptTokens) => new Response(
+    `data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }] })}\n\n`
+      + `data: ${JSON.stringify({
+        choices: [],
+        usage: { prompt_tokens: promptTokens, completion_tokens: 1, total_tokens: promptTokens + 1 },
+      })}\n\n`
+      + 'data: [DONE]\n\n',
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  );
+  const gateway = await deepaiGateway({
+    respond: () => {
+      completions += 1;
+      return completions === 1 ? answer('the first answer', 1_000) : answer('I forgot the start.', 100);
+    },
+  });
+  const session = { 'x-session-id': 'lossy-chat' };
+  const seed = [
+    { role: 'user', content: 'Open the conversation.' },
+    { role: 'assistant', content: 'It is open.' },
+    { role: 'user', content: 'Remember this fact.' },
+  ];
+  try {
+    const first = await gateway.ask(seed, { headers: session });
+    assert.equal(first.status, 200, 'the seed is answered and remembered');
+
+    const lost = await gateway.ask([{ role: 'user', content: 'What was the fact?' }], { headers: session });
+    assert.equal(lost.status, 400, 'a collapsed prompt token count is a failure');
+    const error = await lost.json();
+    assert.equal(error.error?.code, 'context_forgotten');
+    assert.match(error.error?.message ?? '', /1,000/, 'the previous count is named');
+    assert.match(error.error?.message ?? '', /100/, 'and the count DeepAI returned');
+    assert.match(error.error?.message ?? '', /Compact the session, undo recent messages, or start a new chat/,
+      'the caller is told what to do');
+    assert.match(error.error?.message ?? '', /answer was discarded/,
+      'the bad answer is not passed through');
+    assert.equal(gateway.sent.length, 2, 'the replay itself still reached upstream');
+
+    const row = gateway.db.prepare('SELECT status, ok, error_code FROM usage ORDER BY rowid DESC LIMIT 1').get();
+    assert.equal(row.status, 400);
+    assert.equal(row.ok, 0);
+    assert.equal(row.error_code, 'context_forgotten');
+  } finally {
+    await gateway.close();
+  }
+});
+
+await checkAsync('a replay whose prompt count grows normally is answered', async () => {
+  /*
+   * The guard must not fire on a healthy turn: the previous transcript plus the new text is
+   * expected to raise the reported prompt count, and the answer is passed through.
+   */
+  let completions = 0;
+  const answer = (content, promptTokens) => new Response(
+    `data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }] })}\n\n`
+      + `data: ${JSON.stringify({
+        choices: [],
+        usage: { prompt_tokens: promptTokens, completion_tokens: 1, total_tokens: promptTokens + 1 },
+      })}\n\n`
+      + 'data: [DONE]\n\n',
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  );
+  const gateway = await deepaiGateway({
+    respond: () => {
+      completions += 1;
+      return completions === 1 ? answer('the first answer', 1_000) : answer('the second answer', 1_400);
+    },
+  });
+  const session = { 'x-session-id': 'healthy-chat' };
+  try {
+    await gateway.ask([
+      { role: 'user', content: 'Open the conversation.' },
+      { role: 'assistant', content: 'It is open.' },
+      { role: 'user', content: 'Remember this fact.' },
+    ], { headers: session });
+    const second = await gateway.ask([{ role: 'user', content: 'What was the fact?' }], { headers: session });
+    assert.equal(second.status, 200, 'a growing prompt is not a loss');
+    assert.equal((await second.json()).choices?.[0]?.message?.content, 'the second answer');
+  } finally {
+    await gateway.close();
+  }
+});
+
+await checkAsync('a replay is not compared across a model switch', async () => {
+  /*
+   * A different model has a different tokenizer. A lower prompt count after switching models is
+   * not evidence that the transcript was dropped, so the baseline must not be reused.
+   */
+  let completions = 0;
+  const answer = (content, promptTokens) => new Response(
+    `data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }] })}\n\n`
+      + `data: ${JSON.stringify({
+        choices: [],
+        usage: { prompt_tokens: promptTokens, completion_tokens: 1, total_tokens: promptTokens + 1 },
+      })}\n\n`
+      + 'data: [DONE]\n\n',
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  );
+  const gateway = await deepaiGateway({
+    respond: () => {
+      completions += 1;
+      return completions === 1 ? answer('the first answer', 1_000) : answer('the second answer', 100);
+    },
+  });
+  const session = { 'x-session-id': 'switched-model' };
+  try {
+    await gateway.ask([
+      { role: 'user', content: 'Open the conversation.' },
+      { role: 'assistant', content: 'It is open.' },
+      { role: 'user', content: 'Remember this fact.' },
+    ], { headers: session });
+    const second = await gateway.ask([{ role: 'user', content: 'What was the fact?' }], {
+      headers: session,
+      body: { model: 'glm-5.3' },
+    });
+    assert.equal(second.status, 200, 'a different tokenizer is not a forgotten transcript');
+    assert.equal((await second.json()).choices?.[0]?.message?.content, 'the second answer');
+  } finally {
+    await gateway.close();
+  }
+});
+
+await checkAsync('a streaming replay that lost its start ends with an error event', async () => {
+  /*
+   * The protocol has already committed the 200 and the deltas by the time the final usage
+   * arrives. The failure has to be visible as an SSE error event instead, and must not be
+   * followed by [DONE], which would tell a client the truncated answer was complete.
+   */
+  let completions = 0;
+  const answer = (content, promptTokens) => new Response(
+    `data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason: 'stop' }] })}\n\n`
+      + `data: ${JSON.stringify({
+        choices: [],
+        usage: { prompt_tokens: promptTokens, completion_tokens: 1, total_tokens: promptTokens + 1 },
+      })}\n\n`
+      + 'data: [DONE]\n\n',
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  );
+  const gateway = await deepaiGateway({
+    respond: () => {
+      completions += 1;
+      return completions === 1 ? answer('the first answer', 1_000) : answer('I forgot the start.', 100);
+    },
+  });
+  const session = { 'x-session-id': 'streaming-loss' };
+  try {
+    await gateway.ask([
+      { role: 'user', content: 'Open the conversation.' },
+      { role: 'assistant', content: 'It is open.' },
+      { role: 'user', content: 'Remember this fact.' },
+    ], { headers: session });
+    const lost = await gateway.ask([{ role: 'user', content: 'What was the fact?' }], {
+      headers: session,
+      body: { stream: true },
+    });
+    assert.equal(lost.status, 200, 'the stream was already committed');
+    const body = await lost.text();
+    assert.match(body, /"code":"context_forgotten"/, 'the stream ends with the named error');
+    assert.match(body, /answer was discarded/, 'and says the answer was not passed through');
+    assert.doesNotMatch(body, /\[DONE\]/, 'a failed turn is not reported as complete');
+  } finally {
+    await gateway.close();
+  }
+});
+
+await checkAsync('the context loss check needs two reported counts', async () => {
+  const { forgottenReplay } = await import('../src/deepai/context.js');
+  const previous = { promptTokens: 10_000, textBytes: 40_000 };
+
+  assert.equal(forgottenReplay(undefined, 100, 50_000), undefined,
+    'no previous usage means no baseline');
+  assert.equal(forgottenReplay(previous, undefined, 50_000), undefined,
+    'no current usage means no comparison');
+  assert.equal(forgottenReplay(previous, 100, 40_000), undefined,
+    'a prompt that did not grow has nothing to compare');
+  assert.equal(forgottenReplay(previous, 10_400, 44_000), undefined,
+    'normal growth passes');
+  assert.equal(forgottenReplay(previous, 9_900, 44_000), undefined,
+    'a change inside the tolerance passes');
+  assert.deepEqual(forgottenReplay(previous, 100, 44_000), {
+    previousTokens: 10_000,
+    currentTokens: 100,
+  }, 'a collapse is reported with both counts');
+});
+
 await checkAsync('a replayed transcript is private to the account that sent it', async () => {
   /*
    * Session ids are caller-chosen, so two accounts can pick the same one. The map's key includes
@@ -5329,59 +5383,39 @@ await checkAsync('the replay map is bounded by count, bytes and idle time', asyn
   assert.equal(bytes.recall('alice', 'one', [{ role: 'user', content: 'next' }]), undefined);
 });
 
-await checkAsync('a request without an override takes its budget from the model catalog', async () => {
+await checkAsync('the catalog window is reported but never enforced as a byte budget', async () => {
   /*
-   * The production path: no PROMPT_BUDGET_BYTES, no test fixture. The catalog entry for this model
-   * declares 1,048,576 tokens of context and 131,072 of output, so the budget is the remaining
-   * 917,504 tokens in characters. A 200 KB prompt is nowhere near it and must go out untouched -
-   * the old 176,400-byte default would have cut it.
+   * The catalog entry declares 1,048,576 tokens of context. That number is useful in the response
+   * and in `x-gateway-prompt`, but turning it into bytes and refusing above them would cut a body
+   * the endpoint might have read. A 200 KB prompt goes out untouched, and no budget field claims
+   * otherwise.
    */
-  const gateway = await deepaiGateway({ budget: null });
+  const gateway = await deepaiGateway();
   try {
     const answer = await gateway.ask([{ role: 'user', content: 'x'.repeat(200_000) }]);
-    assert.equal(answer.status, 200, 'the model budget accepts what the old fixture cut');
+    assert.equal(answer.status, 200, 'the catalog window does not refuse the body');
     const header = gatewayPrompt(answer);
     assert.equal(header.window, 1_048_576, 'the catalog window rides along');
-    assert.equal(header['budget-bytes'], (1_048_576 - 131_072) * 4,
-      'and the enforced budget is that window less the model output allowance');
+    assert.equal(header.budget, undefined, 'no byte budget is derived from it');
+    assert.equal(header['budget-bytes'], undefined, 'and no override is enforced');
     assert.equal(gateway.sent.length, 1, 'exactly one request reaches upstream');
   } finally {
     await gateway.close();
   }
 });
 
-await checkAsync('the prompt budget is configured or comes from the model, never a constant', async () => {
+await checkAsync('PROMPT_BUDGET_BYTES is not a setting any more', async () => {
   /*
-   * How much of a model's window a deployment is willing to use is an operator question, so it is
-   * settable without a code change. Unset is not "the old 176,400": it means the request path uses
-   * the selected model's catalog entry. A value that is not a positive whole number is ignored for
-   * the same reason - a typo must not replace a fresh catalog window with a stale constant.
+   * The environment variable used to cap the serialized prompt. It is deliberately gone: an
+   * operator cannot know DeepAI's real body limit from here, and the setting only made the gateway
+   * reject conversations. The environment key is ignored rather than kept as a dead override.
    */
   const { config } = await import('../server.js');
 
-  assert.equal(config({}).promptBudgetBytes, undefined,
-    'unset means the selected model supplies the budget');
-  assert.equal(config({ PROMPT_BUDGET_BYTES: '200000' }).promptBudgetBytes, 200_000,
-    'and an operator can set an explicit override');
-  for (const value of ['', '   ', 'abc', '0', '-1', '176400.5', '12 bytes']) {
+  assert.equal(config({}).promptBudgetBytes, undefined, 'there is no budget option');
+  for (const value of ['200000', '', '   ', 'abc', '0', '-1', '176400.5', '12 bytes']) {
     assert.equal(config({ PROMPT_BUDGET_BYTES: value }).promptBudgetBytes, undefined,
-      `PROMPT_BUDGET_BYTES=${JSON.stringify(value)} is not a budget, so the model supplies it`);
-  }
-
-  /* And it is the number that binds, through the same path `createApp` takes it from. */
-  const gateway = await deepaiGateway({ budget: config({ PROMPT_BUDGET_BYTES: '2000' }).promptBudgetBytes });
-  try {
-    assert.equal((await gateway.ask([{ role: 'user', content: 'x'.repeat(1_000) }])).status, 200,
-      'a lowered budget forwards what fits it');
-    const over = await gateway.ask([{ role: 'user', content: 'y'.repeat(3_000) }]);
-    assert.equal(over.status, 400, 'and refuses what does not fit');
-    const overHeader = gatewayPrompt(over);
-    assert.equal(overHeader['budget-bytes'], 2_000, 'the configured budget is the one enforced');
-    assert.ok(overHeader.body > 2_000, `the body is over it: ${overHeader.body}`);
-    assert.equal((await over.json()).error?.code, 'context_limit_reached');
-    assert.equal(gateway.sent.length, 1, 'only the request that fit went upstream');
-  } finally {
-    await gateway.close();
+      'PROMPT_BUDGET_BYTES is ignored');
   }
 });
 

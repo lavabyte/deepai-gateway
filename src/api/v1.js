@@ -28,13 +28,10 @@ import {
   streamChatCompletion,
   streamResponsesCompletion,
 } from '../deepai/client.js';
-import {
-  CHARS_PER_TOKEN,
-  contextWindowOf,
-  promptBudgetFor,
-} from '../deepai/window.js';
+import { contextWindowOf } from '../deepai/window.js';
 import { conversationId } from '../deepai/sessions.js';
 import { ConversationHistory, isOneTurn } from '../deepai/history.js';
+import { forgottenReplay } from '../deepai/context.js';
 import { creditsPerMinute, creditsPerThousand } from '../deepai/pricing.js';
 import { UpstreamError } from '../deepai/wire.js';
 import {
@@ -63,9 +60,10 @@ import {
  * How big a prompt is, in the units that answer different questions.
  *
  * `count` is how many messages the caller sent, `chars` how much text they carry, `bytes` that
- * text in UTF-8. `bytes` is what the log reports, and the serialized body it belongs to is what
- * the wire-size guard is measured on - see `upstreamBodyBytes`. It is deliberately not called
- * context usage: the real token usage comes from DeepAI's response, see `openAIContext`.
+ * text in UTF-8. `bytes` is what the log reports and what the replay baseline compares against;
+ * the serialized body is reported separately by `upstreamBodyBytes`. It is deliberately not
+ * called context usage: the real token usage comes from DeepAI's response, see
+ * `openAIContext`.
  *
  * `imageBytes` is the payload of any image parts, counted apart so a log can say how much of a
  * prompt was an image rather than text. It is not subtracted from anything: an image is prompt
@@ -239,11 +237,9 @@ function contextHeader(context) {
 /**
  * The exact size of the request this gateway would send, in bytes.
  *
- * DeepAI's limit is on what it has to read, not on the prompt text: on a cold session, a body of
- * 195,809 bytes arrived whole and 196,811 did not, on two alphabets with token counts 70% apart.
- * That measurement is why the guard measures the body that would actually leave this process -
- * the serialized JSON, tools and framing included - rather than an estimate of the messages. The
- * measured wall is not a policy constant any more; the budget is the model's catalog entry.
+ * It is reported, not enforced: DeepAI's body limit is content-dependent and is not the catalog's
+ * token window, so a byte count before sending cannot decide whether an answer will lose its start.
+ * The gateway forwards the request and checks the `usage` DeepAI returns afterwards.
  *
  * The two transports reshape the messages differently (`openAIToResponsesInput` drops what the
  * Responses dialect cannot carry and flattens tool wrappers), so the body is built per transport
@@ -402,6 +398,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
     return apiError(res, 400, '"messages" must be a non-empty array.', 'invalid_messages');
   }
   const startedAt = Date.now();
+  const history = options.history ?? new ConversationHistory();
 
   // The key's owner decides which DeepAI account pays for this call. Before
   // multi-user support this read one global row, so every key billed the same
@@ -492,8 +489,12 @@ async function handleChatCompletion(db, req, res, options = {}) {
   const replayable = explicitSession !== undefined
     && historyMode !== 'replace' && historyMode !== 'off';
   const replayed = replayable
-    ? options.history?.recall(owner, sessionId, body.messages)
+    ? history.recall(owner, sessionId, body.messages)
     : undefined;
+  // What DeepAI reported for the transcript just replayed; the baseline for detecting loss.
+  const replayBaseline = replayed === undefined
+    ? undefined
+    : history.lastPrompt(owner, sessionId, upstreamModel);
 
   if (historyMode === 'required' && explicitSession === undefined) {
     return refuseHistory(db, req, res, {
@@ -547,6 +548,8 @@ async function handleChatCompletion(db, req, res, options = {}) {
     : messages;
   // The prompt that was actually sent, for the replay: a text-only image retry replaces it.
   let rememberedMessages = messages;
+  // Text bytes, not the image payload, so an attached image never looks like token growth.
+  let sentTextBytes = promptShape(messages).bytes;
 
   const controller = new AbortController();
   res.on('close', () => {
@@ -554,29 +557,15 @@ async function handleChatCompletion(db, req, res, options = {}) {
   });
 
   /*
-   * How big this request is, built and measured before anything is sent.
+   * How big this request is, on the wire.
    *
-   * The budget is not a constant in this file. It comes from the selected model's catalog entry:
-   * `contextWindow - maxTokens`, converted at four units per token and then compared with the
-   * serialized body's UTF-8 bytes. That keeps the guard aligned with the catalog, which can change
-   * without a redeploy. An operator who measured a tighter limit on their own endpoint can still
-   * set `PROMPT_BUDGET_BYTES`; the explicit value wins.
-   *
-   * This is a wire-size guard, not a context meter. Before the request is sent no exact token
-   * count exists; after it, `openAIContext` reports DeepAI's real usage instead of guessing.
-   *
-   * A model the catalog sent no window for has no local budget. The gateway sends the prompt as
-   * written instead of inventing a limit, and the refusal below stays out of the way.
-   *
-   * The number is the whole serialized request, not a cache-adjusted tail. The model's window has
-   * to hold the cached prefix too, and the gateway keeps no conversation table to guess what
-   * DeepAI has cached. DeepAI owns the cache; this gateway only decides whether the request fits.
+   * Nothing is refused for its size. DeepAI's catalog window is the model's published capacity,
+   * not the endpoint's body limit, and measuring bytes first would refuse conversations that
+   * would have been read. The body size is still reported, because a caller cannot learn it
+   * from DeepAI and it explains what was sent. The real check happens after the answer, from
+   * the usage DeepAI reports - see `forgottenReplay`.
    */
   const windowTokens = contextWindowOf(model);
-  const promptBudgetChars = windowTokens === undefined ? undefined : windowTokens * CHARS_PER_TOKEN;
-  const promptBudgetBytes = Number.isInteger(options.promptBudgetBytes) && options.promptBudgetBytes > 0
-    ? options.promptBudgetBytes
-    : promptBudgetFor(model);
 
   const params = {
     apiKey: account.apiKey,
@@ -599,68 +588,17 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * The same facts on the wire, for a caller that never reads a log.
    *
    * `sent` and `received` are the prompt text in bytes - what leaves and what arrived. `body` is
-   * the whole serialized upstream request, tools and framing included, and it is the number the
-   * budget is measured against. `window` is the token window DeepAI's catalog declares for this
-   * model, `budget` that window in characters, and `budget-bytes` the byte budget enforced below
-   * (the model's window less its output allowance, or the operator's explicit override). A client
-   * cannot learn any of this from DeepAI.
-   *
-   * The refusal below carries the same numbers. Semicolon-separated `key=value`, as it always was.
+   * the whole serialized upstream request, tools and framing included. `window` is the token
+   * window DeepAI's catalog declares for this model. A client cannot learn any of this from
+   * DeepAI. None of it is enforced: the answer is judged by the usage DeepAI reports, not by a
+   * byte count guessed here. Semicolon-separated `key=value`, as it always was.
    */
   res.setHeader('x-gateway-prompt', [
     `sent=${promptShape(messages).bytes}`,
     `received=${promptShape(body.messages).bytes}`,
     `body=${upstreamBytes}`,
     `window=${windowTokens ?? 'unknown'}`,
-    `budget=${promptBudgetChars ?? 'unknown'}`,
-    ...(promptBudgetBytes === undefined ? [] : [`budget-bytes=${promptBudgetBytes}`]),
   ].join('; '));
-
-  /*
-   * A prompt past the model's budget is refused, not rewritten.
-   *
-   * The caller owns the conversation and its compaction: the harness compacts against the same
-   * catalog window, and a checkpoint written here would put text on the wire the caller never saw,
-   * then make the caller's original transcript arrive cold on the next turn. One chat is one
-   * session here, so the honest answer is an error that asks for a compaction or a new chat rather
-   * than a different prompt. A model with no catalog window has no budget and is forwarded as
-   * written.
-   */
-  if (promptBudgetBytes !== undefined && upstreamBytes > promptBudgetBytes) {
-    const promptText = upstreamBytes.toLocaleString('en-US');
-    const budget = promptBudgetBytes.toLocaleString('en-US');
-    log?.(`v1 ${upstreamModel} refused: ${upstreamBytes}B prompt over ${promptBudgetBytes}B budget `
-      + `session=${sessionId.slice(0, 8)}`);
-    record(db, {
-      keyId: req.gatewayKey.id,
-      keyName: req.gatewayKey.name,
-      owner: req.gatewayKey.owner_username ?? '',
-      model: upstreamModel,
-      requestedModel,
-      endpoint: 'chat.completions',
-      status: 400,
-      ok: false,
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      reasoningTokens: 0,
-      totalTokens: 0,
-      durationMs: Date.now() - startedAt,
-      firstTokenMs: null,
-      streamed,
-      errorCode: 'context_limit_reached',
-    });
-    return apiError(
-      res,
-      400,
-      `This request's serialized prompt and tools are ${promptText} bytes, but this model's `
-        + `catalog window allows at most ${budget} bytes. The gateway has not shortened it. `
-        + `Compact the session, undo recent messages, or start a new chat, then retry. `
-        + `The x-gateway-prompt header on this refusal carries the numbers.`,
-      'context_limit_reached',
-    );
-  }
 
   const id = `chatcmpl-${randomUUID().replace(/-/g, '').slice(0, 24)}`;
   const created = Math.floor(Date.now() / 1000);
@@ -838,48 +776,25 @@ async function handleChatCompletion(db, req, res, options = {}) {
     && (isMultimodalRejection(failure.message) || failure.status === 400);
   if (imageRefused) {
     noteMultimodalRejection(upstreamModel);
-    /*
-     * The retry carries different messages, so it is measured too.
-     *
-     * Stripping an image normally shrinks the request - a data URL is replaced by a short note -
-     * but the note is a fixed length and a small enough image is shorter than it, so the retry can
-     * be a few dozen bytes larger per image than the part that was checked. At a model-derived
-     * budget that cannot cross the limit, and an operator who sets `PROMPT_BUDGET_BYTES` must not
-     * lose the one invariant this guard exists for: nothing unmeasured goes upstream.
-     */
     const retryMessages = withoutImages(messages);
     const retryParams = { ...params, messages: retryMessages };
-    const retryBytes = upstreamBodyBytes(retryParams, usesResponses);
-    if (promptBudgetBytes !== undefined && retryBytes > promptBudgetBytes) {
-      status = 400;
-      errorCode = 'context_limit_reached';
-      failure = new UpstreamError(
-        `The text-only retry after the image refusal is `
-          + `${retryBytes.toLocaleString('en-US')} bytes, over this gateway's `
-          + `${promptBudgetBytes.toLocaleString('en-US')}-byte prompt budget. `
-          + 'Compact the session, undo recent messages, or start a new chat, '
-          + 'then send the question without the image.',
-        'CONTEXT_LIMIT_REACHED',
-        { status: 400 },
-      );
-    } else {
-      rememberedMessages = retryMessages;
-      text.length = 0;
-      reasoning.length = 0;
-      calls.clear();
-      usage = undefined;
-      finish = 'stop';
-      firstTokenMs = undefined;
-      status = 200;
-      errorCode = undefined;
-      failure = undefined;
-      try {
-        await runAttempt(retryParams);
-      } catch (retryError) {
-        status = retryError?.code === 'ABORTED' ? 499 : (retryError?.status ?? 502);
-        errorCode = retryError?.code === 'ABORTED' ? 'client_closed' : (retryError?.code ?? 'gateway_error');
-        failure = retryError;
-      }
+    rememberedMessages = retryMessages;
+    sentTextBytes = promptShape(retryMessages).bytes;
+    text.length = 0;
+    reasoning.length = 0;
+    calls.clear();
+    usage = undefined;
+    finish = 'stop';
+    firstTokenMs = undefined;
+    status = 200;
+    errorCode = undefined;
+    failure = undefined;
+    try {
+      await runAttempt(retryParams);
+    } catch (retryError) {
+      status = retryError?.code === 'ABORTED' ? 499 : (retryError?.status ?? 502);
+      errorCode = retryError?.code === 'ABORTED' ? 'client_closed' : (retryError?.code ?? 'gateway_error');
+      failure = retryError;
     }
   }
 
@@ -903,6 +818,36 @@ async function handleChatCompletion(db, req, res, options = {}) {
       + 'This model will be sent text only from now on; send the question as text, or use a model that takes images.',
       'IMAGE_NOT_SUPPORTED',
       { status: 502 },
+    );
+  }
+
+  /*
+   * A replay that DeepAI answered from less than it carried.
+   *
+   * The transcript in the map was already sent once and reported its prompt tokens. This
+   * request carried that same transcript plus a new turn, so the new count cannot be smaller
+   * unless the endpoint stopped reading the transcript. That comparison is made on DeepAI's own
+   * usage, after it answered - never on a byte budget before sending. It catches the silent head
+   * drop at the endpoint's body limit, which otherwise arrives as a confident answer to a
+   * conversation the model never saw the start of.
+   */
+  const reportedPromptTokens = usage === undefined
+    ? undefined
+    : usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0);
+  const forgotten = status === 200
+    ? forgottenReplay(replayBaseline, reportedPromptTokens, sentTextBytes)
+    : undefined;
+  if (forgotten !== undefined) {
+    status = 400;
+    errorCode = 'context_forgotten';
+    failure = new UpstreamError(
+      `DeepAI reported ${forgotten.currentTokens.toLocaleString('en-US')} prompt tokens for this `
+        + `replay, but the transcript it was sent already carried `
+        + `${forgotten.previousTokens.toLocaleString('en-US')}. The answer was discarded because `
+        + 'the beginning of the conversation was not read. Compact the session, undo recent '
+        + 'messages, or start a new chat, then retry.',
+      'CONTEXT_FORGOTTEN',
+      { status: 400 },
     );
   }
 
@@ -1028,8 +973,12 @@ async function handleChatCompletion(db, req, res, options = {}) {
      * assistant message, so the next replay does not lose the question; a later turn sees two
      * consecutive user messages, which is more faithful than dropping one.
      */
-    options.history?.remember(owner, sessionId,
-      assistant === undefined ? remembered : [...remembered, assistant]);
+    history.remember(
+      owner,
+      sessionId,
+      assistant === undefined ? remembered : [...remembered, assistant],
+      { promptTokens: reportedPromptTokens, textBytes: sentTextBytes, model: upstreamModel },
+    );
   }
 
   record(db, {

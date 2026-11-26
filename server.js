@@ -62,39 +62,12 @@ export function config(env = process.env) {
      */
     maxKeys: parseMaxKeys(env.MAX_KEYS),
     /*
-     * An optional override for the largest amount of prompt, in bytes, this gateway asks DeepAI
-     * to read FRESH. By default this is not set: each request uses its selected model's catalog
-     * `contextWindow` less that model's output allowance, so a catalog change needs no redeploy.
-     * A deployment that measured a tighter limit on its own endpoint can set this explicitly.
-     * Unset or invalid means "use the model", never "invent a number".
-     */
-    promptBudgetBytes: promptBudget(env.PROMPT_BUDGET_BYTES),
-    /*
      * DeepAI's own browser sign-in, finishing at `/callback`. Off by default: DeepAI
      * hard-codes `127.0.0.1` as the redirect host, so it only completes when the browser
      * reaches that address as this gateway. The paste-the-JSON route works from anywhere,
      * which is why it is the default.
      */
   };
-}
-
-/**
- * Parse the optional fresh-prompt budget override.
- *
- * Only a positive whole number of bytes is a budget. Everything else - unset, empty, `0`,
- * negative, fractional or nonsense - means "no override", and the request path uses the selected
- * model's catalog window. There is deliberately no default number here: a gateway constant
- * cannot know when DeepAI changes a model, and a typo must not replace the model's own limit with
- * a stale one.
- *
- * @param {string|undefined} value
- * @returns {number|undefined} bytes, or undefined to use the model.
- */
-function promptBudget(value) {
-  if (typeof value !== 'string' || value.trim() === '') return undefined;
-  const bytes = Number(value.trim());
-  if (!Number.isInteger(bytes) || bytes <= 0) return undefined;
-  return bytes;
 }
 
 /**
@@ -124,8 +97,6 @@ export function createApp(db, options = {}) {
     logRequests: options.logRequests !== false,
     // The key cap for this deployment, or `undefined` to fall back to the default.
     maxKeys: options.maxKeys,
-    // The largest amount of fresh prompt this deployment allows, or `undefined` for the measured default.
-    promptBudgetBytes: options.promptBudgetBytes,
   };
 
   const app = express();
