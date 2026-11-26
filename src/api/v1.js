@@ -100,6 +100,25 @@ function promptShape(messages) {
 }
 
 /**
+ * The caller's own name for this conversation, if it gave one.
+ *
+ * The app sends its per-thread id three ways: `session_id` for the OpenAI dialect,
+ * `x-session-affinity` for the OpenRouter dialect, and `x-client-request-id` beside both.
+ * The gateway's own `x-session-id` comes first because it is the explicit override. A blank
+ * value is not a name, so it falls through to the next header and then to the derived id.
+ *
+ * @param {import('express').Request} req
+ * @returns {string | undefined}
+ */
+function callerSession(req) {
+  for (const name of ['x-session-id', 'session_id', 'x-session-affinity']) {
+    const value = req.get(name);
+    if (typeof value === 'string' && value !== '') return value;
+  }
+  return undefined;
+}
+
+/**
  * The same context usage as {@link openAIContext}, in a response header.
  *
  * Only a non-streaming response can carry this: once an SSE stream has started, its headers are
@@ -364,13 +383,20 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * Which session this request belongs to.
    *
    * The id only tells DeepAI which prompt cache to extend. Nothing about the conversation is
-   * stored here: a caller's own `x-session-id` wins, and otherwise the id is derived from the
+   * stored here: a caller's own session header wins, and otherwise the id is derived from the
    * first user message. That opening survives the system prompt being rewritten between turns
    * (date, cwd, model name), so normal turns keep the same cache. A compaction changes the
    * opening, so it gets a new id and a new cache - which is right, because the prompt prefix
    * changed too.
+   *
+   * The app's OpenAI client sends its per-thread id as `session_id`,
+   * `x-client-request-id` and `x-session-affinity`; clients modelled on other providers send
+   * the last one, or the gateway's own `x-session-id`. All three names are accepted, in that
+   * order, so a harness that already knows its conversation keeps it across a compaction
+   * instead of being re-keyed from the first message. `x-client-request-id` is deliberately
+   * not read: some clients use it for one request, not one conversation.
    */
-  const sessionId = req.get('x-session-id') || conversationId(messages, owner);
+  const sessionId = callerSession(req) || conversationId(messages, owner);
 
   const controller = new AbortController();
   res.on('close', () => {

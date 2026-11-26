@@ -249,7 +249,8 @@ one job: keep the turns of one conversation on one DeepAI cache. It is not a con
 
 Resolution is stateless:
 
-1. the caller's own `x-session-id`, which always wins and is forwarded verbatim;
+1. the caller's own session header - `x-session-id`, `session_id` or
+   `x-session-affinity`, in that order - which wins and is forwarded verbatim;
 2. otherwise a hash of the account and the **first user message**.
 
 The system prompt is deliberately not part of that hash, because a harness rewrites it at least
@@ -259,7 +260,7 @@ changes and DeepAI starts a new cache. That is correct: the prompt prefix change
 
 Two conversations that open with a byte-identical first user message would get the same id, since
 nothing is stored to tell them apart. A caller running parallel chats can always separate them by
-sending its own `x-session-id`, which wins over the derived one.
+sending its own session header, which wins over the derived one.
 
 There is no `conversation_sessions` table, no message digests, no last-use timestamp, no seven-day
 expiry and no per-account cap. There is nothing to prune, and nothing to invalidate when DeepAI's
@@ -362,7 +363,7 @@ compaction.
 The unit tests cover the refusal at the model's budget with `context_limit_reached` and the action
 in its message, the tool catalog counting toward the budget, the harness-compaction case (a new id
 and the whole new prompt measured), account isolation, parallel conversations of one key, a
-caller-supplied `x-session-id`, the configurable budget with its fallback, and the fact that a
+caller-supplied session headers, the configurable budget with its fallback, and the fact that a
 conversation id is derived without writing anything to the database.
 
 ### What a paid request costs: an equation on the catalog's price
@@ -1132,11 +1133,12 @@ v1 glm-5.3-flash capacity: the model is busy, waiting 2000ms (attempt 2 of 4)
 
 DeepAI routes a turn by the session it belongs to (`X-Session-Affinity`), which is how the same
 conversation keeps its prompt cache. The cache makes a prompt cheaper, not larger: the budget is
-still the model's window. This gateway sends `x-session-id` from the request when the caller
-passes one, and otherwise derives one from the account and the first user message. The system
-prompt is ignored so a harness rewriting it each turn does not break the session; a compaction
-changes the first user message, so it starts a new one. Nothing is stored - see **"One session per
-conversation, without storing anything"** above.
+still the model's window. This gateway sends the caller's own session header - `x-session-id`,
+`session_id` or `x-session-affinity` - when it passes one, and otherwise derives an id from the
+account and the first user message. The system prompt is ignored so a harness rewriting it each
+turn does not break the session; a compaction changes the first user message, so a derived id
+starts a new one. A caller that sends its own id keeps it across that compaction. Nothing is
+stored - see **"One session per conversation, without storing anything"** above.
 
 So a client that runs several conversations or subagents in parallel through one key gets a
 distinct session for each, as the desktop app does with its per-thread session id. A caller that

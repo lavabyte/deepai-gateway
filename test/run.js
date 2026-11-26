@@ -4948,6 +4948,54 @@ await checkAsync('a caller-supplied x-session-id always wins, and is forwarded v
   }
 });
 
+await checkAsync('the app session headers name the session too', async () => {
+  /*
+   * The desktop app's OpenAI client sends its per-thread id as `session_id`, and the
+   * OpenRouter-shaped one sends `x-session-affinity`. Accepting only this gateway's own
+   * `x-session-id` re-keyed those clients from the first message, so a compaction - exactly
+   * when a caller already knows its conversation - started a new DeepAI session. The app's
+   * header wins over the derived id, and the explicit gateway header wins over both.
+   */
+  const gateway = await deepaiGateway();
+  const messages = [
+    { role: 'system', content: 'You are a coding agent.' },
+    { role: 'user', content: 'list the files' },
+    { role: 'assistant', content: 'a.js, b.js' },
+    { role: 'user', content: 'open a.js' },
+  ];
+  try {
+    const app = await gateway.ask(messages, { headers: { session_id: 'app-session-1' } });
+    assert.equal(app.status, 200);
+    assert.equal(gateway.sent[0].session, 'app-session-1',
+      'the app OpenAI header is forwarded verbatim');
+
+    const affinity = await gateway.ask(messages, { headers: { 'x-session-affinity': 'affinity-1' } });
+    assert.equal(affinity.status, 200);
+    assert.equal(gateway.sent[1].session, 'affinity-1',
+      'the OpenRouter-shaped header is forwarded verbatim too');
+
+    const explicit = await gateway.ask(messages, {
+      headers: {
+        'x-session-id': 'gateway-wins',
+        session_id: 'app-loses',
+        'x-session-affinity': 'affinity-loses',
+      },
+    });
+    assert.equal(explicit.status, 200);
+    assert.equal(gateway.sent[2].session, 'gateway-wins',
+      'the gateway override has first claim');
+
+    const blank = await gateway.ask(messages, {
+      headers: { session_id: '', 'x-session-affinity': 'affinity-after-blank' },
+    });
+    assert.equal(blank.status, 200);
+    assert.equal(gateway.sent[3].session, 'affinity-after-blank',
+      'a blank header is not a name and falls through');
+  } finally {
+    await gateway.close();
+  }
+});
+
 await checkAsync('a request without an override takes its budget from the model catalog', async () => {
   /*
    * The production path: no PROMPT_BUDGET_BYTES, no test fixture. The catalog entry for this model

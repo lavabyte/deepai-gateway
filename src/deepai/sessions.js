@@ -3,9 +3,10 @@
  *
  * DeepAI addresses a conversation's cache by the session id this gateway sends (`session_id`,
  * `x-client-request-id`, `x-session-affinity`). The gateway does not need to remember anything
- * to choose that id: a caller's own `x-session-id` wins, and otherwise the id is derived from
- * the conversation's opening. The opening is the first user message, not the system prompt,
- * because harnesses rewrite the system prompt between turns (date, cwd, model name).
+ * to choose that id: a caller's own `x-session-id`, `session_id` or `x-session-affinity` wins,
+ * and otherwise the id is derived from the conversation's opening. The opening is the first user
+ * message, not the system prompt, because harnesses rewrite the system prompt between turns
+ * (date, cwd, model name).
  *
  * This is deliberately stateless. There is no conversation table, no expiry and no per-account
  * cap. DeepAI owns the prompt cache and its lifetime; the gateway only sends a stable id so
