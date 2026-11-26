@@ -4991,6 +4991,17 @@ await checkAsync('the app session headers name the session too', async () => {
     assert.equal(blank.status, 200);
     assert.equal(gateway.sent[3].session, 'affinity-after-blank',
       'a blank header is not a name and falls through');
+
+    /* The opening changed under a compaction, but the caller's id did not. */
+    const compacted = await gateway.ask([
+      { role: 'system', content: 'You are a coding agent.' },
+      { role: 'user', content: 'Summary: we listed and opened a.js.' },
+      { role: 'assistant', content: 'What next?' },
+      { role: 'user', content: 'add a test' },
+    ], { headers: { session_id: 'app-session-1' } });
+    assert.equal(compacted.status, 200);
+    assert.equal(gateway.sent[4].session, 'app-session-1',
+      'the caller id survives a compaction that changed the opening');
   } finally {
     await gateway.close();
   }
