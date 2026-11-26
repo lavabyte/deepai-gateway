@@ -510,8 +510,8 @@ async function handleChatCompletion(db, req, res, options = {}) {
       400,
       `This request's serialized prompt and tools are ${promptText} bytes, but this model's `
         + `catalog window allows at most ${budget} bytes. The gateway has not shortened it. `
-        + `Compact the session or start a new chat, then retry. The x-gateway-prompt header on this `
-        + `refusal carries the numbers.`,
+        + `Compact the session, undo recent messages, or start a new chat, then retry. `
+        + `The x-gateway-prompt header on this refusal carries the numbers.`,
       'context_limit_reached',
     );
   }
@@ -711,7 +711,8 @@ async function handleChatCompletion(db, req, res, options = {}) {
         `The text-only retry after the image refusal is `
           + `${retryBytes.toLocaleString('en-US')} bytes, over this gateway's `
           + `${promptBudgetBytes.toLocaleString('en-US')}-byte prompt budget. `
-          + 'Compact the session or start a new chat, then send the question without the image.',
+          + 'Compact the session, undo recent messages, or start a new chat, '
+          + 'then send the question without the image.',
         'CONTEXT_LIMIT_REACHED',
         { status: 400 },
       );

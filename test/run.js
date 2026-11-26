@@ -4605,7 +4605,7 @@ await checkAsync('the text-only retry after an image refusal is measured too', a
     assert.equal(error.error?.code, 'context_limit_reached');
     assert.match(error.error?.message ?? '', /text-only retry/,
       `the message says which body was too large: ${error.error?.message}`);
-    assert.match(error.error?.message ?? '', /Compact the session or start a new chat/,
+    assert.match(error.error?.message ?? '', /Compact the session, undo recent messages, or start a new chat/,
       'and what the caller can do about it');
     assert.equal(bodies.length, 1, 'and the oversized retry never left the gateway');
   } finally {
@@ -4752,7 +4752,7 @@ await checkAsync('a prompt past the model budget is refused with a compact-or-ne
     const error = await refused.json();
     assert.equal(error.error?.type, 'invalid_request_error');
     assert.equal(error.error?.code, 'context_limit_reached');
-    assert.match(error.error?.message ?? '', /Compact the session or start a new chat/,
+    assert.match(error.error?.message ?? '', /Compact the session, undo recent messages, or start a new chat/,
       `the message tells the caller what to do: ${error.error?.message}`);
     assert.match(error.error?.message ?? '', /x-gateway-prompt/, 'and where the numbers are');
 

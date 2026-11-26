@@ -291,8 +291,8 @@ OpenAI error shape and a code that names the reason:
   "error": {
     "message": "This request's serialized prompt and tools are 300,150 bytes, but this model's
                 catalog window allows at most 262,144 bytes. The gateway has not shortened it.
-                Compact the session or start a new chat, then retry. The x-gateway-prompt
-                header on this refusal carries the numbers.",
+                Compact the session, undo recent messages, or start a new chat, then retry.
+                The x-gateway-prompt header on this refusal carries the numbers.",
     "type": "invalid_request_error",
     "code": "context_limit_reached",
     "param": null
@@ -1423,8 +1423,9 @@ turn - see [Performance](#performance)).
   note in the text for models that do not - or that refused one in the last 15 minutes. See
   [Images](#images).
 - A prompt larger than the selected model's catalog budget is refused with
-  `context_limit_reached` before it is sent. The message asks the caller to compact the session or
-  start a new chat. See [the whole prompt](#what-it-enforces-is-the-whole-prompt).
+  `context_limit_reached` before it is sent. The message asks the caller to compact the session,
+  undo recent messages, or start a new chat. See
+  [the whole prompt](#what-it-enforces-is-the-whole-prompt).
 - At most 5 gateway keys per account.
 - The dashboard has no password of its own: authentication *is* the DeepAI account,
   proven by a key only DeepAI could have issued. Anyone who can reach the port and
