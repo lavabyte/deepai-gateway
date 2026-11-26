@@ -70,6 +70,14 @@ import {
   refreshPrices,
   resetPricing,
 } from '../src/pricing.js';
+import {
+  GatewayError as ClientGatewayError,
+  closeSession as closeClientSession,
+  createSession as createClientSession,
+  forkSession as forkClientSession,
+  sendMessage as sendClientMessage,
+  sendMessageStream as sendClientMessageStream,
+} from '../client/session.js';
 
 /*
  * The client loads its strings from `public/locales/<code>.json`. A stub that answered
@@ -4868,133 +4876,254 @@ await checkAsync('the app session headers name the session too', async () => {
   }
 });
 
-await checkAsync('a plugin manifest names the stateless client-owned session protocol', async () => {
+await checkAsync('the gateway has no session control surface', async () => {
   /*
-   * A code-tool adapter needs the route table, the session header and the history rule once,
-   * from the gateway, instead of copying them into every plugin. The manifest is scoped to a
-   * key like the rest of /v1.
+   * Session lifecycle belongs to the caller. A plugin that asks the gateway to create,
+   * inspect, fork or delete a session gets an ordinary 404; there is nothing to keep in
+   * sync and nothing to migrate.
    */
   const gateway = await deepaiGateway();
   const authorization = `Bearer ${gateway.keys.get('prompt-user').plaintext}`;
   try {
-    const anonymous = await fetch(`${gateway.base}/v1/plugin`);
-    assert.equal(anonymous.status, 401, 'the manifest is not public');
-
-    const response = await fetch(`${gateway.base}/v1/plugin`, { headers: { authorization } });
-    assert.equal(response.status, 200);
-    assert.equal(response.headers.get('cache-control'), 'no-store', 'discovery is not cached');
-    const manifest = await response.json();
-    assert.equal(manifest.object, 'gateway.plugin');
-    assert.equal(manifest.version, 1);
-    assert.equal(manifest.api, '/v1');
-    assert.equal(manifest.session.mode, 'client');
-    assert.equal(manifest.session.storage, 'client');
-    assert.equal(manifest.session.server_state, 'none');
-    assert.equal(manifest.session.header, 'x-session-id');
-    assert.equal(manifest.session.history, 'full', 'the plugin sends the whole transcript');
-    assert.equal(manifest.endpoints.new_session.method, 'POST');
-    assert.equal(manifest.endpoints.new_session.path, '/v1/sessions');
-    assert.equal(manifest.endpoints.fork_session.path, '/v1/sessions/{id}/fork');
-    assert.equal(manifest.endpoints.chat_completions.path, '/v1/chat/completions');
-    assert.equal(manifest.limits.request_body_bytes, 50 * 1024 * 1024);
+    for (const [method, path] of [
+      ['GET', '/v1/plugin'],
+      ['POST', '/v1/sessions'],
+      ['GET', '/v1/sessions/example'],
+      ['POST', '/v1/sessions/example/fork'],
+      ['DELETE', '/v1/sessions/example'],
+    ]) {
+      const response = await fetch(`${gateway.base}${path}`, {
+        method,
+        headers: { authorization },
+      });
+      assert.equal(response.status, 404, `${method} ${path} is not a route`);
+    }
   } finally {
     await gateway.close();
   }
 });
 
-await checkAsync('a new session is an id, and no session endpoint writes a usage row', async () => {
+await checkAsync('a client session is local and sends the whole transcript with replay off', async () => {
   /*
-   * There is no conversation table behind these routes. POST returns an id the plugin can
-   * keep, GET and fork work after a restart because they only inspect the id, and DELETE is
-   * a client-side discard rather than a database delete. Authentication still touches the
-   * key's last-used time, but session management is not a completion and writes no usage row.
+   * The session mechanics live in client/session.js: createSession is local, sendMessage
+   * carries the complete transcript and always asks the gateway not to keep a replay copy.
+   * The gateway has no /v1/sessions endpoint to call.
    */
   const gateway = await deepaiGateway();
-  const authorization = `Bearer ${gateway.keys.get('prompt-user').plaintext}`;
-  const headers = { authorization };
+  const seen = [];
+  const fetchImpl = (url, init) => {
+    seen.push({ url: String(url), headers: init.headers });
+    return fetch(url, init);
+  };
+  const session = createClientSession({
+    baseUrl: `${gateway.base}/v1`,
+    apiKey: gateway.keys.get('prompt-user').plaintext,
+    model: 'glm-5.3-flash',
+    system: 'You are a coding agent.',
+    fetch: fetchImpl,
+  });
   try {
-    const before = gateway.db.prepare('SELECT COUNT(*) AS n FROM usage').get().n;
-    const created = await fetch(`${gateway.base}/v1/sessions`, { method: 'POST', headers });
-    assert.equal(created.status, 201);
-    const session = await created.json();
-    assert.match(session.id, /^dgw_client_[0-9a-f]{32}$/);
-    assert.equal(session.object, 'session');
-    assert.equal(session.mode, 'client');
-    assert.equal(session.storage, 'client', 'the caller owns the transcript');
-    assert.equal(session.history, 'client');
-    assert.equal(typeof session.created, 'number');
-    assert.equal(created.headers.get('location'), `/v1/sessions/${session.id}`);
+    assert.match(session.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      'a UUID is generated locally');
+    assert.equal(session.messages.length, 1, 'only the system prompt is local at first');
+    assert.equal(seen.length, 0, 'createSession did not call the gateway');
+    assert.equal(gateway.sent.length, 0, 'and no completion was sent');
 
-    const fetched = await fetch(`${gateway.base}/v1/sessions/${session.id}`, { headers });
-    assert.equal(fetched.status, 200);
-    assert.deepEqual(await fetched.json(), {
-      object: 'session',
-      id: session.id,
-      mode: 'client',
-      storage: 'client',
-      history: 'client',
-    });
-
-    const forked = await fetch(`${gateway.base}/v1/sessions/${session.id}/fork`, {
-      method: 'POST',
-      headers,
-    });
-    assert.equal(forked.status, 201);
-    const child = await forked.json();
-    assert.match(child.id, /^dgw_client_[0-9a-f]{32}$/);
-    assert.notEqual(child.id, session.id, 'a fork gets its own cache key');
-    assert.equal(child.parent, session.id);
-    assert.equal(typeof child.created, 'number');
-
-    const closed = await fetch(`${gateway.base}/v1/sessions/${session.id}`, {
-      method: 'DELETE',
-      headers,
-    });
-    assert.equal(closed.status, 204, 'closing is accepted even though nothing was stored');
-    assert.equal(await closed.text(), '');
-
-    const missing = await fetch(`${gateway.base}/v1/sessions/not-a-session`, { headers });
-    assert.equal(missing.status, 404);
-    assert.equal((await missing.json()).error?.code, 'session_not_found');
-
-    const after = gateway.db.prepare('SELECT COUNT(*) AS n FROM usage').get().n;
-    assert.equal(after, before, 'session management does not become a completion row');
-  } finally {
-    await gateway.close();
-  }
-});
-
-await checkAsync('a client-owned session is never stored or replayed', async () => {
-  /*
-   * This is the plugin contract: the caller keeps the transcript, so the gateway has no reason
-   * to keep a copy. The prefix disables replay even when the caller also sends `required`;
-   * otherwise a plugin could accidentally reintroduce the state it was designed to avoid.
-   */
-  const gateway = await deepaiGateway();
-  const sessionId = `dgw_client_${'a'.repeat(32)}`;
-  const opening = [
-    { role: 'user', content: 'start here' },
-    { role: 'assistant', content: 'started' },
-    { role: 'user', content: 'first question' },
-  ];
-  try {
-    const seeded = await gateway.ask(opening, { headers: { 'x-session-id': sessionId } });
-    assert.equal(seeded.status, 200);
-    assert.deepEqual(gateway.sent[0].payload.messages, opening, 'the full transcript is forwarded');
-    assert.equal(gateway.sent[0].session, sessionId, 'the id reaches DeepAI for prompt affinity');
-
-    const next = await gateway.ask([{ role: 'user', content: 'second question' }], {
-      headers: { 'x-session-id': sessionId, 'x-gateway-history': 'required' },
-    });
-    assert.equal(next.status, 200, 'client-owned sessions ignore the replay header');
-    assert.equal(gateway.sent[1].payload.messages.length, 1,
-      'the previous transcript was not replayed because it was never stored');
-    assert.deepEqual(gateway.sent[1].payload.messages, [
-      { role: 'user', content: 'second question' },
+    const first = await sendClientMessage(session, 'first question');
+    assert.equal(first.message.content, 'ok');
+    assert.equal(session.messages.length, 3, 'system, user and answer are kept');
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].headers['x-gateway-history'], 'off', 'the client opts out of server replay');
+    assert.equal(seen[0].headers['x-session-id'], session.id);
+    assert.deepEqual(gateway.sent[0].payload.messages, [
+      { role: 'system', content: 'You are a coding agent.' },
+      { role: 'user', content: 'first question' },
     ]);
+    assert.equal(gateway.sent[0].session, session.id, 'the id reaches DeepAI for prompt affinity');
+
+    await sendClientMessage(session, 'second question');
+    assert.equal(gateway.sent[1].payload.messages.length, 4, 'the whole transcript is sent again');
+    assert.deepEqual(gateway.sent[1].payload.messages.at(-1), {
+      role: 'user',
+      content: 'second question',
+    });
+    assert.deepEqual(gateway.sent[1].payload.messages.slice(0, 3),
+      [...gateway.sent[0].payload.messages, first.message]);
   } finally {
     await gateway.close();
   }
+});
+
+await checkAsync('a client session forks and closes without touching the server', async () => {
+  /*
+   * A branch is a local copy: the plugin chooses the messages, the new id and the model. Closing
+   * only releases the array. Neither operation has a gateway request, because the server keeps
+   * no session record to copy or delete.
+   */
+  let calls = 0;
+  const session = createClientSession({
+    baseUrl: 'http://gateway.invalid/v1',
+    apiKey: 'sk-test',
+    model: 'glm-5.3-flash',
+    messages: [
+      { role: 'system', content: 'You are a coding agent.' },
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi' },
+    ],
+    fetch: async () => {
+      calls += 1;
+      throw new Error('no network expected');
+    },
+  });
+  assert.equal(typeof session.sendMessage, 'function', 'the session carries the mechanics');
+  const forked = forkClientSession(session, { model: 'other-model' });
+  const viaMethod = session.fork({ model: 'method-model' });
+  assert.equal(viaMethod.model, 'method-model');
+  viaMethod.close();
+  assert.equal(viaMethod.closed, true, 'the method and the function are the same close');
+  assert.notEqual(forked.id, session.id, 'the branch gets its own cache key');
+  assert.equal(forked.model, 'other-model');
+  assert.deepEqual(forked.messages, session.messages);
+  assert.notEqual(forked.messages, session.messages, 'the transcript is copied, not shared');
+  forked.messages[1].content = 'changed';
+  assert.equal(session.messages[1].content, 'hello', 'a branch cannot mutate its parent');
+
+  closeClientSession(session);
+  assert.equal(session.closed, true);
+  assert.deepEqual(session.messages, [], 'closing releases the transcript');
+  assert.equal(forked.closed, false, 'the branch stays usable');
+  assert.equal(calls, 0, 'create, fork and close made no request');
+});
+
+await checkAsync('a streamed client message becomes the next full transcript', async () => {
+  /*
+   * Streaming is the normal path for a code tool. The SDK accumulates text and tool-call
+   * fragments, yields them as they arrive, and only commits the turn after the stream ends.
+   */
+  const gateway = await deepaiGateway();
+  const session = createClientSession({
+    baseUrl: `${gateway.base}/v1`,
+    apiKey: gateway.keys.get('prompt-user').plaintext,
+    model: 'glm-5.3-flash',
+  });
+  try {
+    const events = [];
+    for await (const event of sendClientMessageStream(session, 'stream this')) events.push(event);
+    assert.equal(gateway.sent[0].payload.stream, true);
+    assert.ok(events.some((event) => event.type === 'delta' && event.text === 'ok'));
+    const done = events.find((event) => event.type === 'done');
+    assert.equal(done.message.content, 'ok');
+    assert.equal(session.messages.length, 2);
+    assert.deepEqual(session.messages[1], { role: 'assistant', content: 'ok' });
+  } finally {
+    await gateway.close();
+  }
+});
+
+await checkAsync('a streamed tool call is reassembled in the transcript', async () => {
+  /*
+   * Code tools stream tool calls in fragments: the id and name arrive once, the arguments in
+   * pieces. The SDK joins them before the assistant message enters the transcript.
+   */
+  const chunks = [
+    {
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: 'call_1',
+            type: 'function',
+            function: { name: 'read', arguments: '{"pa' },
+          }],
+        },
+        finish_reason: null,
+      }],
+    },
+    {
+      choices: [{
+        delta: { tool_calls: [{ index: 0, function: { arguments: 'th":"a"}' } }] },
+        finish_reason: 'tool_calls',
+      }],
+    },
+    { choices: [], usage: { prompt_tokens: 4, completion_tokens: 5, total_tokens: 9 } },
+  ];
+  const sse = chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join('')
+    + 'data: [DONE]\n\n';
+  const session = createClientSession({
+    baseUrl: 'http://gateway.invalid/v1',
+    apiKey: 'sk-test',
+    model: 'glm-5.3-flash',
+    fetch: async () => new Response(sse, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    }),
+  });
+  const events = [];
+  for await (const event of sendClientMessageStream(session, 'read a')) events.push(event);
+  const done = events.find((event) => event.type === 'done');
+  assert.equal(done.finishReason, 'tool_calls');
+  assert.deepEqual(done.message.tool_calls, [{
+    id: 'call_1',
+    type: 'function',
+    function: { name: 'read', arguments: '{"path":"a"}' },
+  }]);
+  assert.equal(done.usage.total_tokens, 9);
+  assert.equal(done.message.content, null);
+  assert.deepEqual(session.messages.at(-1), done.message);
+});
+
+await checkAsync('a truncated client stream does not become a turn', async () => {
+  /*
+   * A dropped connection is not an answer. Without `[DONE]` or a finish reason the SDK
+   * refuses to commit the partial text, so the next request cannot resend it as history.
+   */
+  const session = createClientSession({
+    baseUrl: 'http://gateway.invalid/v1',
+    apiKey: 'sk-test',
+    model: 'glm-5.3-flash',
+    fetch: async () => new Response('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    }),
+  });
+  let failure;
+  try {
+    for await (const event of sendClientMessageStream(session, 'question')) {
+      assert.equal(event.type, 'delta');
+    }
+  } catch (error) {
+    failure = error;
+  }
+  assert.ok(failure instanceof ClientGatewayError, 'the stream fails instead of ending silently');
+  assert.equal(failure.code, 'incomplete_stream');
+  assert.deepEqual(session.messages, [], 'the partial answer was not remembered');
+});
+
+await checkAsync('a failed client message leaves the transcript untouched', async () => {
+  /*
+   * A refusal is not a turn. The user message is added only with a successful answer, so a
+   * retry does not send the same question twice.
+   */
+  const session = createClientSession({
+    baseUrl: 'http://gateway.invalid/v1',
+    apiKey: 'sk-test',
+    model: 'missing-model',
+    fetch: async () => new Response(JSON.stringify({
+      error: { message: 'no such model', code: 'model_not_found' },
+    }), {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    }),
+  });
+  const before = structuredClone(session.messages);
+  await assert.rejects(
+    () => sendClientMessage(session, 'question'),
+    (error) => error instanceof ClientGatewayError
+      && error.status === 400
+      && error.code === 'model_not_found'
+      && error.message === 'no such model',
+  );
+  assert.deepEqual(session.messages, before, 'the failed question was not remembered');
 });
 
 await checkAsync('a named session replays a conversation the caller sends one turn at a time', async () => {

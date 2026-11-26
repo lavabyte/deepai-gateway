@@ -330,22 +330,31 @@ from a new chat. An unknown value behaves like `auto`.
 
 #### Client-owned sessions for plugins
 
-A code-tool plugin can keep the transcript itself and use the gateway only as a transport.
-`POST /v1/sessions` returns an id with the `dgw_client_` prefix and writes no conversation. The plugin
-sends that id as `x-session-id` on every completion and sends the **whole transcript** each
-time. The prefix forces `x-gateway-history: off` for that id: there is no replay entry, no
-usage baseline and no dependence on a restart or on sticky routing. A history header is
-ignored for a client-owned id, because there is no server-side transcript it could act on.
+The session mechanics live in [`client/session.js`](client/session.js), not in a gateway
+endpoint. `createSession()` generates a UUID locally and returns a plain object; it makes no
+request. `sendMessage()` sends the **whole transcript** to `/v1/chat/completions` with that id
+as `x-session-id` and with `x-gateway-history: off`, so the gateway neither replays nor stores
+anything. `forkSession()` copies the messages and gives the branch a new id; `closeSession()`
+only releases the array. The session also carries the same four mechanics as methods:
+`session.sendMessage()`, `session.sendMessageStream()`, `session.fork()` and `session.close()`.
+No row, restart, sticky route or server-side session registry is involved.
 
-`GET /v1/sessions/{id}` returns the state-free descriptor, `POST /v1/sessions/{id}/fork` returns a new id
-with `parent`, and `DELETE /v1/sessions/{id}` returns `204`; none of them has a conversation row
-to read or delete. A fork allocates a new cache key but does not copy a transcript - the plugin copies
-its own messages, because the gateway has none. `GET /v1/plugin` publishes the route table,
-auth header, session header and history rule, so one adapter core can serve several code
-tools instead of carrying a second copy of the contract.
+```js
+import { createSession, sendMessage } from './client/session.js';
 
-This is the recommended mode for a plugin. The replay above remains for clients that send
-only the newest turn; a plugin that sends the full transcript does not need it.
+const session = createSession({
+  baseUrl: 'http://127.0.0.1:8080/v1',
+  apiKey: process.env.DEEPAI_GATEWAY_KEY,
+  model: 'glm-5.3-flash',
+  system: 'You are a coding agent.',
+});
+
+const { message, usage, context } = await session.sendMessage('Explain the build.');
+console.log(message.content, usage, context);
+```
+
+The replay above remains for clients that send only the newest turn; the client SDK never
+uses it. A plugin that sends the full transcript does not need the gateway to remember one.
 
 #### Nothing is refused for its size; a lost replay is caught after the answer
 
@@ -970,21 +979,13 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 `temperature`, `top_p`, `max_tokens` / `max_completion_tokens`,
 `reasoning_effort` (`none` / `low` / `medium` / `high`), `stop`.
 
-### Plugin surface
+### Client sessions
 
-Every route below requires the same API key as the OpenAI surface. None of them stores a
-conversation; the session routes are pure functions of the id.
-
-| Method | Path | Notes |
-| --- | --- | --- |
-| `GET` | `/v1/plugin` | Protocol manifest: routes, auth, session header, history rule, body limit |
-| `POST` | `/v1/sessions` | New client-owned session id; `201`, no conversation row |
-| `GET` | `/v1/sessions/{id}` | Stateless descriptor; `404` for an id not issued in this shape |
-| `POST` | `/v1/sessions/{id}/fork` | New id carrying `parent`; `201`, no transcript copy |
-| `DELETE` | `/v1/sessions/{id}` | Client-side close; `204`, nothing to delete |
-
-The `dgw_client_` prefix is what tells the chat route to send the transcript upstream as
-written and keep no copy. See [client-owned sessions](#client-owned-sessions-for-plugins).
+There is no session control surface. `/v1/chat/completions` is the only completion route,
+and `x-session-id` is an opaque affinity id, not a handle to server state. The optional
+helper in [`client/session.js`](client/session.js) implements create, send, fork and close
+locally, then posts the whole transcript with `x-gateway-history: off`. See
+[client-owned sessions](#client-owned-sessions-for-plugins).
 
 ### Dashboard API
 
@@ -1493,9 +1494,9 @@ src/deepai/catalog.js   model catalog, read live from DeepAI on every request
 src/deepai/account.js   key check, owner derivation, account-JSON parsing
 src/deepai/client.js    the two upstream transports
 src/deepai/history.js   bounded in-memory transcript replay
-src/plugin.js           client-owned sessions and the plugin manifest
-src/limits.js           the request body limit shared with the manifest
+src/limits.js           the request body limit
 src/deepai/transport.js the kept-alive connection both of them use
+client/session.js       local create / send / fork / close for plugins
 src/deepai/wire.js      shared headers, SSE parsing, usage normalization
 public/                 dashboard (no framework, no build step)
 public/locales/         UI strings, one JSON per language (en is the fallback)
@@ -1561,8 +1562,8 @@ payload, the OpenAI conversions, the `[hidden]` and OS-theme CSS invariants,
 routing (`/` is HTML, `/v1` and `/api` are JSON), the removal of the browser
 sign-in routes, the sign-in card's one route and its copyable instructions,
 `/v1/models` scoping, the 5-key cap, the per-hour window, the SSE splitter, the
-plugin manifest and client-owned sessions (no row, no replay), and the Responses
-transport regression.
+client session SDK (local create / fork / close, full transcript, replay off), and
+the Responses transport regression.
 
 A few checks are guards rather than descriptions: the stylesheet may carry no class or
 custom property with no reader, no client code may call `window.confirm`, and the
