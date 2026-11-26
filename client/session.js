@@ -2,9 +2,10 @@
  * Client-owned sessions for OpenAI-compatible code-tool plugins.
  *
  * A session lives entirely in the caller: it owns the transcript, the id and any branch.
- * Nothing here calls a gateway session endpoint, because there is none. Every completion
- * carries the whole transcript, `x-gateway-history: off` and the session id for DeepAI
- * prompt affinity. The gateway forwards it and keeps no copy.
+ * Every completion carries the whole transcript, `x-gateway-history: off` and the session id
+ * for DeepAI prompt affinity. The default transport uses the ordinary chat route; the
+ * `sessions` transport uses the stateless session route. The gateway forwards the request
+ * and keeps no copy either way.
  *
  * The module uses only `fetch`, `crypto.randomUUID` and `structuredClone`, so it runs in
  * Node and in a browser without a build step.
@@ -13,6 +14,7 @@
  */
 
 const DEFAULT_MODEL = 'glm-5.3-flash';
+const TRANSPORTS = new Set(['chat', 'sessions']);
 
 /** A gateway refusal, with the HTTP status and the gateway's error code. */
 export class GatewayError extends Error {
@@ -35,7 +37,19 @@ function clone(value) {
 
 function newId() {
   if (globalThis.crypto?.randomUUID !== undefined) return globalThis.crypto.randomUUID();
-  return `sess_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues !== undefined) {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-`
+    + `${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function requireString(value, name) {
@@ -45,9 +59,13 @@ function requireString(value, name) {
   return value;
 }
 
-function chatUrl(baseUrl) {
-  const base = baseUrl.replace(/\/+$/, '');
-  return base.endsWith('/chat/completions') ? base : `${base}/chat/completions`;
+function chatUrl(session) {
+  const base = session.baseUrl.replace(/\/+$/, '');
+  if (base.endsWith('/chat/completions') || base.endsWith('/messages')) return base;
+  if (session.transport === 'sessions') {
+    return `${base}/sessions/${encodeURIComponent(session.id)}/messages`;
+  }
+  return `${base}/chat/completions`;
 }
 
 function normalizeMessage(message) {
@@ -92,7 +110,7 @@ function requestBody(session, messages, stream, options) {
 
 async function post(session, body, options) {
   const fetchImpl = options.fetch ?? session.fetch;
-  const response = await fetchImpl(chatUrl(session.baseUrl), {
+  const response = await fetchImpl(chatUrl(session), {
     method: 'POST',
     headers: {
       ...session.headers,
@@ -152,6 +170,7 @@ async function errorFromResponse(response) {
  * @param {string} config.apiKey - gateway API key
  * @param {string} [config.model] - model id, default `glm-5.3-flash`
  * @param {string} [config.id] - caller-chosen session id; a UUID is generated otherwise
+ * @param {'chat'|'sessions'} [config.transport] - standard chat route (default) or session route
  * @param {Array<object>} [config.messages] - an existing transcript to continue
  * @param {string|Array<object>} [config.system] - system prompt, prepended
  * @param {object} [config.params] - extra completion fields (temperature, tools, ...)
@@ -165,6 +184,10 @@ export function createSession(config = {}) {
   const apiKey = requireString(config.apiKey, 'apiKey');
   const model = requireString(config.model ?? DEFAULT_MODEL, 'model');
   const id = requireString(config.id ?? newId(), 'id');
+  const transport = config.transport ?? 'chat';
+  if (!TRANSPORTS.has(transport)) {
+    throw new TypeError("transport must be 'chat' or 'sessions'.");
+  }
   const fetchImpl = config.fetch ?? globalThis.fetch;
   if (typeof fetchImpl !== 'function') {
     throw new TypeError('fetch is not available; pass config.fetch explicitly.');
@@ -187,6 +210,7 @@ export function createSession(config = {}) {
     baseUrl,
     apiKey,
     model,
+    transport,
     messages,
     params,
     headers: { ...(config.headers ?? {}) },

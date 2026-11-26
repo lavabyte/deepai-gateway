@@ -328,16 +328,62 @@ curl ... -H "x-session-id: imported-chat" -d '{
 `required` also needs a session id, because without one the gateway cannot tell a continuation
 from a new chat. An unknown value behaves like `auto`.
 
-#### Client-owned sessions for plugins
+#### Two session surfaces: ordinary chat and session routes
 
-The session mechanics live in [`client/session.js`](client/session.js), not in a gateway
-endpoint. `createSession()` generates a UUID locally and returns a plain object; it makes no
-request. `sendMessage()` sends the **whole transcript** to `/v1/chat/completions` with that id
-as `x-session-id` and with `x-gateway-history: off`, so the gateway neither replays nor stores
-anything. `forkSession()` copies the messages and gives the branch a new id; `closeSession()`
-only releases the array. The session also carries the same four mechanics as methods:
-`session.sendMessage()`, `session.sendMessageStream()`, `session.fork()` and `session.close()`.
-No row, restart, sticky route or server-side session registry is involved.
+Both are available. The ordinary OpenAI route stays exactly as it is:
+
+```http
+POST /v1/chat/completions
+```
+
+Beside it, a plugin can use session-shaped mechanics. These routes are **stateless** too:
+there is no conversation table, no replay map and no registry. A session is an id, and the
+caller keeps the transcript. Send the whole conversation with every message.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/v1/sessions` | Create an id and return `201`; writes no conversation state |
+| `GET` | `/v1/sessions/{id}` | The state-free descriptor of an id |
+| `POST` | `/v1/sessions/{id}/messages` | Send a completion; `messages` is the whole transcript, `message` appends one turn |
+| `POST` | `/v1/sessions/{id}/fork` | Return a new id for a branch; the caller copies the transcript |
+| `DELETE` | `/v1/sessions/{id}` | Accept the client's discard; there is nothing to delete |
+| `GET` | `/v1/plugin` | Discovery manifest naming both surfaces |
+
+The session route forces the path id as `x-session-id` and forces `x-gateway-history: off`.
+A `required` header cannot turn it into a replay request, and neither can a body field. The
+body is the same OpenAI body:
+
+```bash
+SESSION=$(curl -s -H "Authorization: Bearer $KEY" -X POST \
+  http://127.0.0.1:8080/v1/sessions | jq -r .id)
+
+curl -s -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -X POST "http://127.0.0.1:8080/v1/sessions/$SESSION/messages" -d '{
+    "model": "glm-5.3-flash",
+    "messages": [
+      {"role": "system", "content": "You are a coding agent."},
+      {"role": "user", "content": "Explain the build."}
+    ]
+  }'
+```
+
+Because the endpoint is stateless, the next call must carry the previous turns again. That is
+the same contract as `/v1/chat/completions`; the session path only gives the turns a stable
+affinity id. An imported conversation, including one DeepAI has never seen, works on the first
+call because its full transcript is in `messages`.
+
+#### Client SDK
+
+[`client/session.js`](client/session.js) wraps the same contract for plugins that want a
+session object instead of hand-built requests. `createSession()` generates a UUID locally and
+makes no request. By default `sendMessage()` posts the **whole transcript** to
+`/v1/chat/completions`; with `transport: 'sessions'` it posts to
+`/v1/sessions/{id}/messages` instead. Either way it sends `x-gateway-history: off`, so the
+gateway neither replays nor stores anything. `forkSession()` copies the messages and gives the
+branch a new id; `closeSession()` only releases the array. The session also carries the same
+four mechanics as methods: `session.sendMessage()`, `session.sendMessageStream()`,
+`session.fork()` and `session.close()`. No row, restart, sticky route or server-side session
+registry is involved.
 
 ```js
 import { createSession, sendMessage } from './client/session.js';
@@ -347,14 +393,16 @@ const session = createSession({
   apiKey: process.env.DEEPAI_GATEWAY_KEY,
   model: 'glm-5.3-flash',
   system: 'You are a coding agent.',
+  // transport: 'sessions', // use /v1/sessions/{id}/messages instead
 });
 
 const { message, usage, context } = await session.sendMessage('Explain the build.');
 console.log(message.content, usage, context);
 ```
 
-The replay above remains for clients that send only the newest turn; the client SDK never
-uses it. A plugin that sends the full transcript does not need the gateway to remember one.
+The optional one-turn replay above remains for clients that send only the newest turn; the
+client SDK never uses it. A plugin that sends the full transcript does not need the gateway to
+remember one.
 
 #### Nothing is refused for its size; a lost replay is caught after the answer
 
@@ -949,6 +997,20 @@ Only **Forget this account** removes them.
 | `GET` | `/v1/models/details` | Richer catalog, same scoping |
 | `POST` | `/v1/chat/completions` | Streaming and non-streaming, native tools |
 
+### Session surface
+
+These routes are stateless; the caller keeps the transcript. See
+["Two session surfaces"](#two-session-surfaces-ordinary-chat-and-session-routes).
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/v1/plugin` | Discovery manifest for both surfaces |
+| `POST` | `/v1/sessions` | Creates an id, not a stored conversation |
+| `GET` | `/v1/sessions/{id}` | State-free descriptor |
+| `POST` | `/v1/sessions/{id}/messages` | Completion with the whole transcript; `message` appends one turn |
+| `POST` | `/v1/sessions/{id}/fork` | New id for a branch |
+| `DELETE` | `/v1/sessions/{id}` | Accepts the client's discard |
+
 `/v1/models` refuses an anonymous request with `401 missing_api_key`, and a
 restricted key only ever sees the models it is allowed to call - so a client
 cannot discover, or attempt, a model its key is not entitled to.
@@ -979,13 +1041,16 @@ Supported request fields: `model`, `messages`, `stream`, `tools`, `tool_choice`,
 `temperature`, `top_p`, `max_tokens` / `max_completion_tokens`,
 `reasoning_effort` (`none` / `low` / `medium` / `high`), `stop`.
 
-### Client sessions
+### Sessions
 
-There is no session control surface. `/v1/chat/completions` is the only completion route,
-and `x-session-id` is an opaque affinity id, not a handle to server state. The optional
+There are two session surfaces, both stateless. `/v1/chat/completions` accepts an opaque
+`x-session-id` for DeepAI prompt affinity. The session routes
+(`POST /v1/sessions`, `POST /v1/sessions/{id}/messages`, and the descriptor/fork/delete
+helpers) expose the same completion under a session-shaped path, always with replay off.
+Neither stores a transcript; the caller sends the whole conversation every time. The optional
 helper in [`client/session.js`](client/session.js) implements create, send, fork and close
-locally, then posts the whole transcript with `x-gateway-history: off`. See
-[client-owned sessions](#client-owned-sessions-for-plugins).
+locally and can target either surface. See
+[two session surfaces](#two-session-surfaces-ordinary-chat-and-session-routes).
 
 ### Dashboard API
 
@@ -1494,7 +1559,8 @@ src/deepai/catalog.js   model catalog, read live from DeepAI on every request
 src/deepai/account.js   key check, owner derivation, account-JSON parsing
 src/deepai/client.js    the two upstream transports
 src/deepai/history.js   bounded in-memory transcript replay
-src/limits.js           the request body limit
+src/limits.js           the request body limit, shared with the manifest
+src/sessions.js         stateless session ids and the plugin manifest
 src/deepai/transport.js the kept-alive connection both of them use
 client/session.js       local create / send / fork / close for plugins
 src/deepai/wire.js      shared headers, SSE parsing, usage normalization
@@ -1562,8 +1628,9 @@ payload, the OpenAI conversions, the `[hidden]` and OS-theme CSS invariants,
 routing (`/` is HTML, `/v1` and `/api` are JSON), the removal of the browser
 sign-in routes, the sign-in card's one route and its copyable instructions,
 `/v1/models` scoping, the 5-key cap, the per-hour window, the SSE splitter, the
-client session SDK (local create / fork / close, full transcript, replay off), and
-the Responses transport regression.
+stateless session routes and their manifest, the client session SDK (local create /
+fork / close, full transcript, replay off, both transports), and the Responses
+transport regression.
 
 A few checks are guards rather than descriptions: the stylesheet may carry no class or
 custom property with no reader, no client code may call `window.confirm`, and the

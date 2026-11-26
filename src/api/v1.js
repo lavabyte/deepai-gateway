@@ -43,6 +43,12 @@ import {
 import { isMultimodalRejection, noteMultimodalRejection, rejectsImages } from '../deepai/multimodal.js';
 import { allowsModel } from '../keys.js';
 import { authenticate, enforceModel, apiError } from '../middleware/auth.js';
+import {
+  isSessionId,
+  newSession,
+  pluginManifest,
+  sessionObject,
+} from '../sessions.js';
 import { readAccount } from '../store.js';
 import { record } from '../usage.js';
 import {
@@ -144,6 +150,30 @@ function gatewayHistoryMode(req) {
   if (typeof value !== 'string' || value === '') return 'auto';
   const mode = value.trim().toLowerCase();
   return mode === 'required' || mode === 'replace' || mode === 'off' ? mode : 'auto';
+}
+
+/**
+ * Turn the session endpoint's optional `message` shortcut into ordinary chat messages.
+ *
+ * The endpoint is stateless, so `messages` is still the whole transcript. `message` is only
+ * sugar for appending one more turn to it; without `messages` it is a first turn.
+ *
+ * @param {object} body
+ * @returns {object[] | undefined} the new array, or undefined when `message` is malformed
+ */
+function sessionMessages(body) {
+  const raw = body.message === undefined
+    ? []
+    : (typeof body.message === 'string' ? [{ role: 'user', content: body.message }] : body.message);
+  const added = Array.isArray(raw) ? raw : [raw];
+  if (!added.every((message) => message !== null
+    && typeof message === 'object'
+    && !Array.isArray(message)
+    && typeof message.role === 'string'
+    && message.role !== '')) {
+    return undefined;
+  }
+  return [...body.messages, ...added];
 }
 
 /**
@@ -298,6 +328,84 @@ export function v1Router(db, options = {}) {
   const router = express.Router();
   // One map per app (and therefore per process), bounded by count, bytes and idle time.
   const history = options.history ?? new ConversationHistory();
+
+  /*
+   * Protocol discovery for a code-tool adapter. The manifest describes both surfaces: the
+   * ordinary OpenAI route and the stateless session route table.
+   */
+  router.get('/plugin', authenticate(db), (req, res) => {
+    res.set('cache-control', 'no-store').json(pluginManifest());
+  });
+
+  /*
+   * A session is an id, not a row. Nothing is written to SQLite or to the replay map; the caller
+   * keeps the transcript and sends it with every completion. The id exists so all turns of one
+   * conversation reach the same DeepAI prompt cache.
+   */
+  router.post('/sessions', authenticate(db), (req, res) => {
+    const session = newSession();
+    res.set('cache-control', 'no-store');
+    res.set('location', `/v1/sessions/${session.id}`);
+    res.status(201).json(session);
+  });
+
+  router.get('/sessions/:id', authenticate(db), (req, res) => {
+    if (!isSessionId(req.params.id)) {
+      return apiError(res, 404, 'Unknown session id.', 'session_not_found');
+    }
+    res.set('cache-control', 'no-store').json(sessionObject(req.params.id));
+  });
+
+  /*
+   * Send a message to a session. This is the session-shaped spelling of the same completion:
+   * the body carries the whole transcript, the path supplies the affinity id, and replay is
+   * always off. The optional `message` field is appended as a user turn.
+   */
+  router.post('/sessions/:id/messages', authenticate(db), enforceModel(FALLBACK_MODEL), (req, res, next) => {
+    if (!isSessionId(req.params.id)) {
+      return apiError(res, 404, 'Unknown session id.', 'session_not_found');
+    }
+    if (req.body === null || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      return apiError(res, 400, 'The request body must be a JSON object.', 'invalid_body');
+    }
+    if (req.body.messages !== undefined && !Array.isArray(req.body.messages)) {
+      return apiError(res, 400, '"messages" must be an array.', 'invalid_messages');
+    }
+    req.body.messages ??= [];
+    const messages = sessionMessages(req.body);
+    if (messages === undefined) {
+      return apiError(res, 400, '"message" must be a message object or an array of them.',
+        'invalid_message');
+    }
+    req.body.messages = messages;
+    delete req.body.message;
+    return handleChatCompletion(db, req, res, {
+      ...options,
+      history,
+      fixedSession: req.params.id,
+      fixedHistoryMode: 'off',
+    }).catch(next);
+  });
+
+  router.post('/sessions/:id/fork', authenticate(db), (req, res) => {
+    if (!isSessionId(req.params.id)) {
+      return apiError(res, 404, 'Unknown session id.', 'session_not_found');
+    }
+    const created = newSession();
+    res.set('cache-control', 'no-store');
+    res.set('location', `/v1/sessions/${created.id}`);
+    res.status(201).json(sessionObject(created.id, {
+      created: created.created,
+      parent: req.params.id,
+    }));
+  });
+
+  router.delete('/sessions/:id', authenticate(db), (req, res) => {
+    if (!isSessionId(req.params.id)) {
+      return apiError(res, 404, 'Unknown session id.', 'session_not_found');
+    }
+    res.status(204).end();
+  });
 
   // Authenticated, and scoped to the key: a restricted key sees only the
   // models it is allowed to call.
@@ -484,10 +592,12 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * replay off entirely (`off`); the default `auto` does the behaviour described here.
    *
    * The client SDK (client/session.js) always sends `off`: it owns the transcript and does
-   * not want a copy here that a restart or another replica could make observable.
+   * not want a copy here that a restart or another replica could make observable. The
+   * session endpoint pins both the id and `off` in options, so a body or header cannot
+   * reintroduce server state.
    */
-  const explicitSession = callerSession(req);
-  const historyMode = gatewayHistoryMode(req);
+  const explicitSession = options.fixedSession ?? callerSession(req);
+  const historyMode = options.fixedHistoryMode ?? gatewayHistoryMode(req);
   const sessionId = explicitSession || conversationId(body.messages, owner);
   const replayable = explicitSession !== undefined
     && historyMode !== 'replace' && historyMode !== 'off';
