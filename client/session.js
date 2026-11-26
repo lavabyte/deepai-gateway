@@ -1,5 +1,5 @@
 /**
- * Client-owned sessions for OpenAI-compatible code-tool plugins.
+ * Client-owned sessions for OpenAI-compatible code-tool clients.
  *
  * A session lives entirely in the caller: it owns the transcript, the id and any branch.
  * Every completion carries the whole transcript, `x-gateway-history: off` and the session id
@@ -218,7 +218,7 @@ export function createSession(config = {}) {
     closed: false,
   };
 
-  // The same mechanics are available as methods, so a plugin can hold one object.
+  // The same mechanics are available as methods, so a client can hold one object.
   session.sendMessage = (message, options) => sendMessage(session, message, options);
   session.sendMessageStream = (message, options) => sendMessageStream(session, message, options);
   session.fork = (overrides) => forkSession(session, overrides);
