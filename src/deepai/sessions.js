@@ -8,9 +8,9 @@
  * message, not the system prompt, because harnesses rewrite the system prompt between turns
  * (date, cwd, model name).
  *
- * This is deliberately stateless. There is no conversation table, no expiry and no per-account
- * cap. DeepAI owns the prompt cache and its lifetime; the gateway only sends a stable id so
- * turns of one conversation land on the same cache. If the caller compacts, the first user
+ * This module is deliberately stateless. It keeps no conversation table, no expiry and no
+ * per-account cap. DeepAI owns the prompt cache and its lifetime; the gateway only sends a stable
+ * id so turns of one conversation land on the same cache. If the caller compacts, the first user
  * message changes, the id changes with it, and the endpoint starts a new cache for the new
  * transcript - which is exactly what happened to the transcript itself.
  *

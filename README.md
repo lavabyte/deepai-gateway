@@ -228,9 +228,10 @@ a *cold* request is not a model window and is not published as one: it cannot be
 catalog, and baking it in made the gateway shorten healthy conversations. It remains a documented
 measurement and an optional operator override, not a default.
 
-**The gateway refuses a prompt that would lose its start.** A caller sends its whole transcript
-every turn, and the budget is measured on that whole serialized request. The endpoint's prompt
-cache still does its work, and the harness does its own compaction when it decides to. When the
+**The gateway refuses a prompt that would lose its start.** A caller normally sends its whole
+transcript every turn; a named session may send only the new turn and let the gateway prepend the
+remembered one. Either way the budget is measured on the whole serialized request. The endpoint's
+prompt cache still does its work, and the harness does its own compaction when it decides to. When the
 prompt is past the model's budget, the gateway returns a `400` before sending anything and leaves
 the transcript alone. DeepAI would otherwise answer with a `200` from the tail, silently missing
 the front; the error tells the caller to compact the session or start a new chat, then retry, and
@@ -241,13 +242,14 @@ the gateway would put text on the wire the caller never saw, then make the calle
 transcript arrive cold on the next turn. The gateway can measure the prompt; it cannot decide which
 part of somebody else's conversation is safe to forget.
 
-#### One session per conversation, without storing anything
+#### One session per conversation, and an optional in-memory replay
 
-The cache is addressed by the session id this gateway sends - `session_id`,
-`x-client-request-id` and `x-session-affinity`, the same three headers the app sends. The id has
-one job: keep the turns of one conversation on one DeepAI cache. It is not a conversation record.
+The cache is addressed by the session headers this gateway sends upstream - `session_id`,
+`x-client-request-id` and `x-session-affinity`, the same three the app sends. The id keeps the
+turns of one conversation on one DeepAI cache, and it is the key for the optional replay below.
+It is not a row in a database.
 
-Resolution is stateless:
+Resolution:
 
 1. the caller's own session header - `x-session-id`, `session_id` or
    `x-session-affinity`, in that order - which wins and is forwarded verbatim;
@@ -255,17 +257,72 @@ Resolution is stateless:
 
 The system prompt is deliberately not part of that hash, because a harness rewrites it at least
 once a turn (date, working directory, model name); ignoring it keeps the id stable while the
-conversation grows. When the harness compacts, the first user message becomes a summary, so the id
-changes and DeepAI starts a new cache. That is correct: the prompt prefix changed too.
+conversation grows. When the harness compacts, the first user message becomes a summary, so a
+derived id changes and DeepAI starts a new cache. That is correct: the prompt prefix changed too.
 
-Two conversations that open with a byte-identical first user message would get the same id, since
-nothing is stored to tell them apart. A caller running parallel chats can always separate them by
-sending its own session header, which wins over the derived one.
+A derived id is still completely stateless: nothing is read or written for it. Two conversations
+that open with a byte-identical first user message still get the same id, and a caller running
+parallel chats can always separate them by sending its own session header.
 
-There is no `conversation_sessions` table, no message digests, no last-use timestamp, no seven-day
-expiry and no per-account cap. There is nothing to prune, and nothing to invalidate when DeepAI's
-cache expires: DeepAI owns the cache, and the next turn simply starts a new one. The caller's
-transcript is the only record of the conversation.
+Naming the session also enables an **optional replay** for clients that send only the newest turn.
+DeepAI's completion endpoint is stateless, so without this a client that drops the transcript is
+asking the model to answer from one message. The replay is opt-in by the session header:
+
+- the first request with `x-session-id`, `session_id` or `x-session-affinity` carries the
+  whole transcript - an imported chat, a resumed chat, or the opening turn;
+- the gateway keeps that transcript and the assistant reply in a bounded **in-memory** map, keyed
+  by account and session id. It writes nothing to SQLite and nothing to disk;
+- a later request with the same id may carry only the new user (or tool) turn. The gateway puts
+  the remembered transcript in front of it and sends the whole conversation upstream. DeepAI still
+  receives a complete stateless prompt; it is never asked to remember anything;
+- a request with more than one conversational message, or with an assistant message, is treated as
+  a full transcript. It **replaces** the remembered one. That is how a rewind, a compaction or a
+  fresh import resets the replay without a special endpoint;
+- the newest system/developer prompt wins, so a harness rewriting it does not duplicate the old one.
+
+The map is deliberately disposable: at most **128 conversations**, **32 MiB** of transcripts and
+**7 days** of idle time, with least-recently-used eviction. An image payload is never kept: an
+image-bearing turn is remembered with each image replaced by a note, so the turn keeps its place
+and the map stays text-only.
+A restart clears the map, and it lives in one process: if you run several gateway replicas, a named
+session must reach the same replica (sticky routing) or replay will miss.
+`x-gateway-history: off` disables replay for a request.
+It also assumes one in-flight turn per session; two parallel turns with the same id race on the
+stored transcript, so give parallel chats distinct ids. There is no `conversation_sessions` table,
+no message digests in the database and no seven-day database expiry; the caller's transcript
+remains the authoritative record, and the in-memory copy is only a convenience for the next request.
+
+For an imported conversation, the first call seeds the map and the rest can be one turn at a time:
+
+```bash
+# 1. the whole imported transcript, once
+curl ... -H "x-session-id: imported-chat" -d '{
+  "model": "glm-5.3-flash",
+  "messages": [
+    {"role": "user", "content": "This chat started elsewhere."},
+    {"role": "assistant", "content": "Understood."},
+    {"role": "user", "content": "Explain the build."}
+  ]
+}'
+
+# 2. only the new turn; the gateway replays the rest
+curl ... -H "x-session-id: imported-chat" -d '{
+  "model": "glm-5.3-flash",
+  "messages": [{"role": "user", "content": "And the tests?"}]
+}'
+```
+
+`x-gateway-history` chooses how a named session behaves:
+
+| value | meaning |
+| --- | --- |
+| `auto` (default) | replay a remembered transcript if there is one, otherwise start and remember a new conversation |
+| `required` | this one-turn request is a continuation; if the transcript is gone, refuse with `conversation_history_missing` instead of silently answering from one message |
+| `replace` | ignore what is remembered and treat this request as a fresh transcript - the explicit way to rewind when the replacement is one message |
+| `off` | never read or write the replay map; the messages are forwarded without replay |
+
+`required` also needs a session id, because without one the gateway cannot tell a continuation
+from a new chat. An unknown value behaves like `auto`.
 
 #### What it enforces is the whole prompt
 
@@ -279,9 +336,9 @@ never "fall back to the old 176,400".
 The budget is measured on the whole serialized request: every message in `messages`, the tool
 catalog and the JSON framing. A cached prefix is cheaper to read, but its
 tokens still occupy the model's context window, so cache state does not change whether the request
-fits. Measuring the whole prompt is also the only number the gateway can know without storing
-anything about the conversation. It is a pre-flight size guard, not the context meter: once DeepAI
-answers, `usage` and `context` carry the real token count (see below).
+fits. Measuring the whole prompt is also the only number the gateway can know without asking
+DeepAI for a token count or guessing one. It is a pre-flight size guard, not the context meter:
+once DeepAI answers, `usage` and `context` carry the real token count (see below).
 
 A request whose whole prompt is past the budget is refused before it goes upstream, with the
 OpenAI error shape and a code that names the reason:
@@ -304,16 +361,18 @@ The `400` is deliberate: the alternative is not a refusal from DeepAI but a `200
 silently gone. The message names the action, so a harness that does not know this code still knows
 what to do; the header carries the bytes and the budget.
 
-Nothing under the budget is rewritten: it arrives upstream byte for byte, including a 100 KB tool
-result, markers and all. A harness that read a large file knows what it read and can summarize or
-truncate it itself; a proxy guessing which half to keep cannot.
+Nothing under the budget is rewritten **when the caller sends its own transcript**: it arrives
+upstream byte for byte, including a 100 KB tool result, markers and all. A harness that read a large
+file knows what it read and can summarize or truncate it itself; a proxy guessing which half to keep
+cannot. The opt-in replay is the one exception, and it only prepends a transcript the caller
+already sent in an earlier request; it never drops or summarizes a turn.
 
 The same facts ride on every answer in an `x-gateway-prompt` header, semicolon-separated
 `key=value` as it always was, set before the check so a refusal carries them too:
 
 | key | value |
 | --- | --- |
-| `sent` | bytes of prompt text leaving the gateway, unchanged |
+| `sent` | bytes of prompt text leaving the gateway: the caller's transcript, or a named session's replayed transcript plus the new turn |
 | `received` | bytes of prompt text that arrived |
 | `body` | bytes of the serialized upstream body, tools included. What the budget is measured on |
 | `window` | the token window DeepAI's catalog declares for this model, or `unknown` |
@@ -323,7 +382,7 @@ The same facts ride on every answer in an `x-gateway-prompt` header, semicolon-s
 Those are wire sizes, not context usage. They exist because a request has to be measured before it is
 sent; the real token count arrives with the answer.
 
-#### Context usage comes from DeepAI, and nothing is stored
+#### Context usage comes from DeepAI, and is never stored
 
 The `usage` object in an answer is DeepAI's own accounting, relayed unchanged: `prompt_tokens`
 includes cached input, `completion_tokens` is this answer, and `total_tokens` is their sum. The
@@ -362,9 +421,10 @@ compaction.
 
 The unit tests cover the refusal at the model's budget with `context_limit_reached` and the action
 in its message, the tool catalog counting toward the budget, the harness-compaction case (a new id
-and the whole new prompt measured), account isolation, parallel conversations of one key, a
-caller-supplied session headers, the configurable budget with its fallback, and the fact that a
-conversation id is derived without writing anything to the database.
+and the whole new prompt measured), account isolation, parallel conversations of one key,
+caller-supplied session headers, a named session replayed from one new turn, the
+`required`/`replace`/`off` modes, the fact that a derived id is never replayed, the replay map's
+count, byte and idle-time bounds, and the configurable budget with its fallback.
 
 ### What a paid request costs: an equation on the catalog's price
 
@@ -816,7 +876,9 @@ The dashboard's **Export CSV** button uses the same endpoint.
 - **`auth_events`** - append-only login/logout/refresh/denied trail, per account.
 
 Conversations have no table: the session id sent to DeepAI is derived from the first user
-message on every request (or supplied by the caller), so there is nothing to expire or prune.
+message on every request (or supplied by the caller). A named session may also keep a bounded
+transcript in process memory for replay, but that copy never reaches SQLite and disappears on
+restart; the database has nothing to expire or prune.
 
 ## How keys are stored
 
@@ -974,7 +1036,7 @@ When the gateway reports usage back to its clients it re-inflates
 `prompt_tokens` so a client's own accounting stays consistent. If DeepAI sends no `usage` for a
 request, the gateway records zeroes and returns no `usage` or `context`; it never substitutes a
 character-based estimate. The context window and percentage travel with the real usage as the
-`context` object described in [Context usage comes from DeepAI](#context-usage-comes-from-deepai-and-nothing-is-stored).
+`context` object described in [Context usage comes from DeepAI](#context-usage-comes-from-deepai-and-is-never-stored).
 
 ## When DeepAI refuses the key as "not enabled for DeepAI Code"
 
@@ -1068,9 +1130,10 @@ that model are filtered before they are sent for the next **15 minutes**; after 
 image is tried again, because a refusal is one request's evidence and a long conversation
 produces the same bare `HTTP 400`.
 
-Nothing is deleted or stored. An image is never written anywhere by this gateway, and the
-filtered message list is a copy built for one call: the caller's own request and history are
-untouched, and the next request carries whatever the caller sends again. Changing a limit
+The image itself is never deleted or stored. An image is never written anywhere by this gateway,
+and the filtered message list is a copy built for one call: the caller's own request and history
+are untouched, and the next request carries whatever the caller sends again. The optional replay
+keeps only a text note in place of each image. Changing a limit
 (key count, request limit, allowance) has no bearing on images at all - if an image stops
 reaching a model, the two things to look at are the catalog's `input` list and this 15-minute
 memory, and the memory is the only one that goes away by itself.
@@ -1138,7 +1201,8 @@ still the model's window. This gateway sends the caller's own session header - `
 account and the first user message. The system prompt is ignored so a harness rewriting it each
 turn does not break the session; a compaction changes the first user message, so a derived id
 starts a new one. A caller that sends its own id keeps it across that compaction. Nothing is
-stored - see **"One session per conversation, without storing anything"** above.
+stored in the database. A caller that sends only the newest turn opts into the bounded in-memory
+replay described in **"One session per conversation, and an optional in-memory replay"** above.
 
 So a client that runs several conversations or subagents in parallel through one key gets a
 distinct session for each, as the desktop app does with its per-thread session id. A caller that
@@ -1149,7 +1213,9 @@ curl ... -H "x-session-id: conversation-42" ...
 ```
 
 Reusing one id for unrelated conversations does not fail loudly: the endpoint treats a session as
-one conversation, and its `409 session_busy` only makes sense that way.
+one conversation, its `409 session_busy` only makes sense that way, and a named session's replay
+will prepend the old transcript to the new chat. Use a distinct id per conversation, or send
+`x-gateway-history: replace` to start that id over.
 
 ## The machine header, and `machine_required`
 
@@ -1391,6 +1457,7 @@ src/api/admin.js        /api dashboard surface
 src/deepai/catalog.js   model catalog, read live from DeepAI on every request
 src/deepai/account.js   key check, owner derivation, account-JSON parsing
 src/deepai/client.js    the two upstream transports
+src/deepai/history.js   bounded in-memory transcript replay
 src/deepai/transport.js the kept-alive connection both of them use
 src/deepai/wire.js      shared headers, SSE parsing, usage normalization
 public/                 dashboard (no framework, no build step)
@@ -1426,6 +1493,10 @@ turn - see [Performance](#performance)).
   `context_limit_reached` before it is sent. The message asks the caller to compact the session,
   undo recent messages, or start a new chat. See
   [the whole prompt](#what-it-enforces-is-the-whole-prompt).
+- A continuation marked `x-gateway-history: required` is refused with
+  `conversation_history_missing` if the in-memory transcript is gone; without a session id it is
+  refused with `session_required`. See
+  [the replay contract](#one-session-per-conversation-and-an-optional-in-memory-replay).
 - At most 5 gateway keys per account.
 - The dashboard has no password of its own: authentication *is* the DeepAI account,
   proven by a key only DeepAI could have issued. Anyone who can reach the port and

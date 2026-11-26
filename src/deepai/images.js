@@ -51,6 +51,14 @@ export function countImages(messages) {
 export const OMITTED_IMAGE_TEXT = '[image omitted: this model does not accept images]';
 
 /**
+ * The text that stands in for an image in the replay cache.
+ *
+ * The model may well have seen the image; the cache did not keep it. Saying so is more honest
+ * than reusing the "model does not accept images" note on a later turn.
+ */
+export const REPLAY_IMAGE_TEXT = '[image omitted from the replay cache]';
+
+/**
  * Remove the image parts from a request, leaving a note where they were.
  *
  * Every other part is passed through untouched, and a message that was a plain string is
@@ -58,9 +66,10 @@ export const OMITTED_IMAGE_TEXT = '[image omitted: this model does not accept im
  * "the screenshot above" still reads in the order it was written.
  *
  * @param {Array<object>} messages
+ * @param {string} [note] - what replaces each image; defaults to `OMITTED_IMAGE_TEXT`
  * @returns {Array<object>} a new list; the input is not changed.
  */
-export function withoutImages(messages) {
+export function withoutImages(messages, note = OMITTED_IMAGE_TEXT) {
   if (!Array.isArray(messages)) return messages;
   let noted = false;
   return messages.map((message) => {
@@ -69,7 +78,7 @@ export function withoutImages(messages) {
     for (const part of message.content) {
       if (part !== null && typeof part === 'object' && IMAGE_PART_TYPES.has(part.type)) {
         // One note per image, so a caller can tell how many were dropped.
-        parts.push({ type: 'text', text: OMITTED_IMAGE_TEXT });
+        parts.push({ type: 'text', text: note });
         continue;
       }
       parts.push(part);

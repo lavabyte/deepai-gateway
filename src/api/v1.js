@@ -34,9 +34,15 @@ import {
   promptBudgetFor,
 } from '../deepai/window.js';
 import { conversationId } from '../deepai/sessions.js';
+import { ConversationHistory, isOneTurn } from '../deepai/history.js';
 import { creditsPerMinute, creditsPerThousand } from '../deepai/pricing.js';
 import { UpstreamError } from '../deepai/wire.js';
-import { acceptsImages, countImages, withoutImages } from '../deepai/images.js';
+import {
+  REPLAY_IMAGE_TEXT,
+  acceptsImages,
+  countImages,
+  withoutImages,
+} from '../deepai/images.js';
 import { isMultimodalRejection, noteMultimodalRejection, rejectsImages } from '../deepai/multimodal.js';
 import { allowsModel } from '../keys.js';
 import { authenticate, enforceModel, apiError } from '../middleware/auth.js';
@@ -116,6 +122,91 @@ function callerSession(req) {
     if (typeof value === 'string' && value !== '') return value;
   }
   return undefined;
+}
+
+/**
+ * How the caller wants the replay to behave.
+ *
+ * - `auto` (the default): replay a remembered transcript when there is one, otherwise treat the
+ *   request as a new conversation and remember its result.
+ * - `required`: the caller is continuing a conversation and sent only the new turn. If the
+ *   transcript is gone (expired, evicted or a restart), fail with `conversation_history_missing`
+ *   instead of silently answering without it.
+ * - `replace`: ignore what is remembered and treat this request as a fresh transcript. This is
+ *   how a rewind can be explicit even when the shortened transcript is one message.
+ * - `off`: never read or write the replay map.
+ *
+ * An unknown value falls back to `auto`; the header is an opt-in, not a new required field.
+ *
+ * @param {import('express').Request} req
+ * @returns {'auto'|'required'|'replace'|'off'}
+ */
+function gatewayHistoryMode(req) {
+  const value = req.get('x-gateway-history');
+  if (typeof value !== 'string' || value === '') return 'auto';
+  const mode = value.trim().toLowerCase();
+  return mode === 'required' || mode === 'replace' || mode === 'off' ? mode : 'auto';
+}
+
+/**
+ * Refuse a request whose replay could not be assembled.
+ *
+ * Recording the refusal keeps the dashboard honest: it is a request that reached the gateway and
+ * was rejected before any DeepAI call, not a silent success with one message of context.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {import('express').Request} req
+ * @param {import('express').Response} res
+ * @param {{code: string, message: string, model: string, requestedModel: string,
+ *   sessionId: string, startedAt: number, streamed: boolean, log?: (message: string) => void}} refusal
+ */
+function refuseHistory(db, req, res, refusal) {
+  refusal.log?.(`v1 ${refusal.model} refused: ${refusal.code} `
+    + `session=${refusal.sessionId.slice(0, 8)}`);
+  record(db, {
+    keyId: req.gatewayKey.id,
+    keyName: req.gatewayKey.name,
+    owner: req.gatewayKey.owner_username ?? '',
+    model: refusal.model,
+    requestedModel: refusal.requestedModel,
+    endpoint: 'chat.completions',
+    status: 400,
+    ok: false,
+    durationMs: Date.now() - refusal.startedAt,
+    streamed: refusal.streamed,
+    errorCode: refusal.code,
+  });
+  return apiError(res, 400, refusal.message, refusal.code);
+}
+
+/**
+ * The assistant turn to remember after a successful completion.
+ *
+ * It is the same shape the caller just received, minus `reasoning_content`: reasoning is not
+ * needed to continue a conversation, and replaying it would send tokens the model already spent.
+ * A tool call keeps its id, name and arguments, because the next request may be its result.
+ *
+ * @param {string[]} text
+ * @param {Map<string, {id: string, name: string, args: string}>} calls
+ * @returns {{role: 'assistant', content: string|null, tool_calls?: object[]} | undefined}
+ */
+function assistantTurn(text, calls) {
+  const content = text.join('');
+  const toolCalls = [...calls.values()].filter((call) => call.name !== '');
+  if (content === '' && toolCalls.length === 0) return undefined;
+  return {
+    role: 'assistant',
+    content: content === '' ? null : content,
+    ...(toolCalls.length > 0
+      ? {
+          tool_calls: toolCalls.map((call) => ({
+            id: call.id,
+            type: 'function',
+            function: { name: call.name, arguments: call.args === '' ? '{}' : call.args },
+          })),
+        }
+      : {}),
+  };
 }
 
 /**
@@ -209,6 +300,8 @@ const CAPACITY_TOTAL_WAIT_MS = 60_000;
  */
 export function v1Router(db, options = {}) {
   const router = express.Router();
+  // One map per app (and therefore per process), bounded by count, bytes and idle time.
+  const history = options.history ?? new ConversationHistory();
 
   // Authenticated, and scoped to the key: a restricted key sees only the
   // models it is allowed to call.
@@ -293,7 +386,7 @@ export function v1Router(db, options = {}) {
   });
 
   router.post('/chat/completions', authenticate(db), enforceModel(FALLBACK_MODEL), (req, res, next) => {
-    handleChatCompletion(db, req, res, options).catch(next);
+    handleChatCompletion(db, req, res, { ...options, history }).catch(next);
   });
 
   return router;
@@ -308,6 +401,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
   if (!Array.isArray(body.messages) || body.messages.length === 0) {
     return apiError(res, 400, '"messages" must be a non-empty array.', 'invalid_messages');
   }
+  const startedAt = Date.now();
 
   // The key's owner decides which DeepAI account pays for this call. Before
   // multi-user support this read one global row, so every key billed the same
@@ -351,11 +445,84 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * outside otherwise.
    */
   res.setHeader('server-timing', `gwcatalog;dur=${catalogMs}`);
+  /*
+   * The catalog read is reported separately, so first-token and `gwmodel` measure the model
+   * call itself. The usage row's duration still covers the whole request, catalog included.
+   */
+  const modelStartedAt = Date.now();
   const model = findModel(models, requestedModel);
   const upstreamModel = model?.id ?? requestedModel;
   const usesResponses = model?.api === 'openai-responses';
 
   const streamed = body.stream === true;
+  const log = options.logRequests !== false
+    ? (options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`)))
+    : undefined;
+
+  /*
+   * Which session this request belongs to.
+   *
+   * The id tells DeepAI which prompt cache to extend, and it is also the key for the optional
+   * replay below. A caller's own session header wins, and otherwise the id is derived from the
+   * first user message. That opening survives the system prompt being rewritten between turns
+   * (date, cwd, model name), so normal turns keep the same cache. A compaction changes the
+   * opening, so it gets a new id and a new cache - which is right, because the prompt prefix
+   * changed too.
+   *
+   * The app's OpenAI client sends its per-thread id as `session_id`,
+   * `x-client-request-id` and `x-session-affinity`; clients modelled on other providers send
+   * the last one, or the gateway's own `x-session-id`. The accepted names are `x-session-id`,
+   * `session_id` and `x-session-affinity`, in that order, so a harness that already knows its
+   * conversation keeps it across a compaction instead of being re-keyed from the first message.
+   * `x-client-request-id` is deliberately not read: some clients use it for one request, not one
+   * conversation.
+   *
+   * Replay is opt-in by naming the session. A caller that sends only the newest turn and an
+   * explicit session id gets the remembered transcript in front of it, which is the only way a
+   * stateless endpoint can see a conversation it was never sent. A caller without a session
+   * header keeps the old behaviour exactly: the id is derived, no transcript is stored, and the
+   * request is forwarded as written. A full transcript always replaces the remembered one, so
+   * a rewind or a compaction is not merged with the turn it replaced. `x-gateway-history` can
+   * make a missing transcript a refusal (`required`), force a replacement (`replace`), or turn
+   * replay off entirely (`off`); the default `auto` does the behaviour described here.
+   */
+  const explicitSession = callerSession(req);
+  const historyMode = gatewayHistoryMode(req);
+  const sessionId = explicitSession || conversationId(body.messages, owner);
+  const replayable = explicitSession !== undefined
+    && historyMode !== 'replace' && historyMode !== 'off';
+  const replayed = replayable
+    ? options.history?.recall(owner, sessionId, body.messages)
+    : undefined;
+
+  if (historyMode === 'required' && explicitSession === undefined) {
+    return refuseHistory(db, req, res, {
+      code: 'session_required',
+      message: 'x-gateway-history: required needs a session id. Send x-session-id, '
+        + 'session_id or x-session-affinity with the conversation, or use auto.',
+      model: upstreamModel,
+      requestedModel,
+      sessionId,
+      startedAt,
+      streamed,
+      log,
+    });
+  }
+  if (historyMode === 'required' && isOneTurn(body.messages) && replayed === undefined) {
+    return refuseHistory(db, req, res, {
+      code: 'conversation_history_missing',
+      message: 'This session has no remembered transcript to replay. Send the whole '
+        + 'conversation again, start a new session, or omit x-gateway-history: required '
+        + 'to begin a new conversation.',
+      model: upstreamModel,
+      requestedModel,
+      sessionId,
+      startedAt,
+      streamed,
+      log,
+    });
+  }
+  let messages = replayed ?? body.messages;
 
   /*
    * An image is only sent to a model that can actually take one.
@@ -371,41 +538,20 @@ async function handleChatCompletion(db, req, res, options = {}) {
    * Either way the image is replaced by a note in the text, so the rest of the prompt still
    * reaches the model.
    */
-  const imageCount = countImages(body.messages);
+  const imageCount = countImages(messages);
   const catalogAcceptsImages = acceptsImages(model);
   const recentlyRefused = imageCount > 0 && catalogAcceptsImages && rejectsImages(upstreamModel);
   const imagesSupported = catalogAcceptsImages && !recentlyRefused;
-  let messages = imageCount > 0 && !imagesSupported
-    ? withoutImages(body.messages)
-    : body.messages;
-
-  /*
-   * Which session this request belongs to.
-   *
-   * The id only tells DeepAI which prompt cache to extend. Nothing about the conversation is
-   * stored here: a caller's own session header wins, and otherwise the id is derived from the
-   * first user message. That opening survives the system prompt being rewritten between turns
-   * (date, cwd, model name), so normal turns keep the same cache. A compaction changes the
-   * opening, so it gets a new id and a new cache - which is right, because the prompt prefix
-   * changed too.
-   *
-   * The app's OpenAI client sends its per-thread id as `session_id`,
-   * `x-client-request-id` and `x-session-affinity`; clients modelled on other providers send
-   * the last one, or the gateway's own `x-session-id`. All three names are accepted, in that
-   * order, so a harness that already knows its conversation keeps it across a compaction
-   * instead of being re-keyed from the first message. `x-client-request-id` is deliberately
-   * not read: some clients use it for one request, not one conversation.
-   */
-  const sessionId = callerSession(req) || conversationId(messages, owner);
+  messages = imageCount > 0 && !imagesSupported
+    ? withoutImages(messages)
+    : messages;
+  // The prompt that was actually sent, for the replay: a text-only image retry replaces it.
+  let rememberedMessages = messages;
 
   const controller = new AbortController();
   res.on('close', () => {
     if (!res.writableEnded) controller.abort();
   });
-  const log = options.logRequests !== false
-    ? (options.log ?? ((message) => console.log(`[deepai-gateway] ${message}`)))
-    : undefined;
-  const startedAt = Date.now();
 
   /*
    * How big this request is, built and measured before anything is sent.
@@ -567,7 +713,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
         }
         continue;
       }
-      if (firstTokenMs === undefined) firstTokenMs = Date.now() - startedAt;
+      if (firstTokenMs === undefined) firstTokenMs = Date.now() - modelStartedAt;
       if (event.type === 'text') {
         text.push(event.text);
         if (write !== undefined) write({ content: event.text });
@@ -688,7 +834,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
    *    while the same prompt as text is answered - so on a request that carried an image, a
    *    400 is the image.
    */
-  const imageRefused = failure !== undefined && imageCount > 0
+  const imageRefused = failure !== undefined && imageCount > 0 && imagesSupported
     && (isMultimodalRejection(failure.message) || failure.status === 400);
   if (imageRefused) {
     noteMultimodalRejection(upstreamModel);
@@ -701,7 +847,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
      * budget that cannot cross the limit, and an operator who sets `PROMPT_BUDGET_BYTES` must not
      * lose the one invariant this guard exists for: nothing unmeasured goes upstream.
      */
-    const retryMessages = withoutImages(body.messages);
+    const retryMessages = withoutImages(messages);
     const retryParams = { ...params, messages: retryMessages };
     const retryBytes = upstreamBodyBytes(retryParams, usesResponses);
     if (promptBudgetBytes !== undefined && retryBytes > promptBudgetBytes) {
@@ -717,6 +863,7 @@ async function handleChatCompletion(db, req, res, options = {}) {
         { status: 400 },
       );
     } else {
+      rememberedMessages = retryMessages;
       text.length = 0;
       reasoning.length = 0;
       calls.clear();
@@ -859,6 +1006,30 @@ async function handleChatCompletion(db, req, res, options = {}) {
         'api_error',
       );
     }
+  }
+
+  /*
+   * Remember the turn only after it succeeded, and only for a session the caller named.
+   *
+   * A failed or aborted turn is not evidence of a transcript that can be replayed: it did not
+   * happen. An image-bearing turn is remembered as text, with the payload replaced by a note, so
+   * the turn keeps its place without holding base64 in memory. The remembered transcript is what
+   * was actually sent - including a replay - plus the reply, so the next one-turn request
+   * rebuilds the same conversation.
+   */
+  if (status === 200 && explicitSession !== undefined && historyMode !== 'off'
+    && !controller.signal.aborted) {
+    const assistant = assistantTurn(text, calls);
+    const remembered = imageCount === 0
+      ? rememberedMessages
+      : withoutImages(rememberedMessages, REPLAY_IMAGE_TEXT);
+    /*
+     * An empty reply still consumed the user's turn. Remember the prompt without inventing an
+     * assistant message, so the next replay does not lose the question; a later turn sees two
+     * consecutive user messages, which is more faithful than dropping one.
+     */
+    options.history?.remember(owner, sessionId,
+      assistant === undefined ? remembered : [...remembered, assistant]);
   }
 
   record(db, {

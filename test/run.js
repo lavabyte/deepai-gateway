@@ -5007,6 +5007,328 @@ await checkAsync('the app session headers name the session too', async () => {
   }
 });
 
+await checkAsync('a named session replays a conversation the caller sends one turn at a time', async () => {
+  /*
+   * Some clients keep only the newest message and rely on a session to hold the rest. DeepAI's
+   * completion endpoint is stateless, so the gateway is the only place that can rebuild the
+   * transcript. The caller opts in by naming the session; a derived id stays stateless, and a
+   * full transcript always replaces what is remembered instead of being appended to it.
+   */
+  const gateway = await deepaiGateway();
+  const imported = [
+    { role: 'system', content: 'You are a coding agent.' },
+    { role: 'user', content: 'This conversation started in another client.' },
+    { role: 'assistant', content: 'Understood. What should we do next?' },
+    { role: 'user', content: 'Explain the build.' },
+  ];
+  try {
+    const seeded = await gateway.ask(imported, { headers: { 'x-session-id': 'imported-chat' } });
+    assert.equal(seeded.status, 200);
+    assert.deepEqual(gateway.sent[0].payload.messages, imported,
+      'the imported transcript goes upstream whole on the first turn');
+
+    const next = await gateway.ask([{ role: 'user', content: 'And the tests?' }], {
+      headers: { 'x-session-id': 'imported-chat' },
+    });
+    assert.equal(next.status, 200);
+    assert.deepEqual(gateway.sent[1].payload.messages, [
+      ...imported,
+      { role: 'assistant', content: 'ok' },
+      { role: 'user', content: 'And the tests?' },
+    ], 'the one new turn is sent with the remembered conversation in front of it');
+    const header = gatewayPrompt(next);
+    assert.ok(header.sent > header.received,
+      `the header reports the replayed prompt, not just the new turn: ${header.sent} > ${header.received}`);
+
+    /* A rewritten system prompt wins over the remembered one; the conversation does not. */
+    const rewritten = await gateway.ask([
+      { role: 'system', content: 'The date is tomorrow.' },
+      { role: 'user', content: 'Continue.' },
+    ], { headers: { 'x-session-id': 'imported-chat' } });
+    assert.equal(rewritten.status, 200);
+    const replayed = gateway.sent[2].payload.messages;
+    assert.equal(replayed[0].content, 'The date is tomorrow.', 'the newest system prompt is the one sent');
+    assert.equal(replayed.filter((message) => message.role === 'system').length, 1,
+      'and the old system prompt is not duplicated');
+
+    /* A full transcript is a rewind or a new import, so it replaces the remembered one. */
+    const replaced = [
+      { role: 'user', content: 'A different import starts here.' },
+      { role: 'assistant', content: 'Okay.' },
+      { role: 'user', content: 'First question.' },
+    ];
+    await gateway.ask(replaced, { headers: { 'x-session-id': 'imported-chat' } });
+    assert.deepEqual(gateway.sent[3].payload.messages, replaced,
+      'a full transcript is not merged with the one it replaces');
+
+    await gateway.ask([{ role: 'user', content: 'Second question.' }], {
+      headers: { 'x-session-id': 'imported-chat' },
+    });
+    assert.deepEqual(gateway.sent[4].payload.messages, [
+      ...replaced,
+      { role: 'assistant', content: 'ok' },
+      { role: 'user', content: 'Second question.' },
+    ], 'later turns replay the replacement, not the older import');
+  } finally {
+    await gateway.close();
+  }
+});
+
+await checkAsync('a derived session is not replayed', async () => {
+  /*
+   * The opt-in is the caller's session header. Without one, two chats that share an opening would
+   * otherwise be merged into one conversation, which is exactly the kind of local state the derived
+   * id was designed to avoid.
+   */
+  const gateway = await deepaiGateway();
+  try {
+    const opening = [
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi' },
+      { role: 'user', content: 'one' },
+    ];
+    await gateway.ask(opening);
+    await gateway.ask([{ role: 'user', content: 'two' }]);
+    assert.equal(gateway.sent[1].payload.messages.length, 1,
+      'the second request is forwarded as written, with no transcript added');
+  } finally {
+    await gateway.close();
+  }
+});
+
+await checkAsync('a required replay refuses to answer without its history', async () => {
+  /*
+   * A one-message continuation is indistinguishable from a first message. "required" is the
+   * caller saying that it is a continuation, so a missing transcript must be a clear 400 rather
+   * than a silent new conversation - the exact amnesia this replay exists to prevent.
+   */
+  const gateway = await deepaiGateway();
+  const headers = { 'x-session-id': 'lost-chat', 'x-gateway-history': 'required' };
+  try {
+    const lost = await gateway.ask([{ role: 'user', content: 'continue' }], { headers });
+    assert.equal(lost.status, 400, 'the request is refused');
+    assert.equal(gateway.sent.length, 0, 'nothing reaches upstream');
+    const error = await lost.json();
+    assert.equal(error.error?.code, 'conversation_history_missing');
+    assert.match(error.error?.message ?? '', /whole conversation again/,
+      'the caller is told to resend the transcript');
+    const row = gateway.db.prepare('SELECT status, ok, error_code FROM usage ORDER BY rowid DESC LIMIT 1').get();
+    assert.equal(row.status, 400);
+    assert.equal(row.ok, 0);
+    assert.equal(row.error_code, 'conversation_history_missing');
+
+    const noSession = await gateway.ask([{ role: 'user', content: 'continue' }], {
+      headers: { 'x-gateway-history': 'required' },
+    });
+    assert.equal(noSession.status, 400, 'required also needs a session id');
+    assert.equal((await noSession.json()).error?.code, 'session_required');
+    assert.equal(gateway.sent.length, 0);
+
+    const seed = [
+      { role: 'user', content: 'Start here.' },
+      { role: 'assistant', content: 'Started.' },
+      { role: 'user', content: 'First question.' },
+    ];
+    await gateway.ask(seed, { headers: { 'x-session-id': 'lost-chat' } });
+    const continued = await gateway.ask([{ role: 'user', content: 'Second question.' }], { headers });
+    assert.equal(continued.status, 200, 'a remembered session satisfies required');
+    assert.deepEqual(gateway.sent[1].payload.messages, [
+      ...seed,
+      { role: 'assistant', content: 'ok' },
+      { role: 'user', content: 'Second question.' },
+    ], 'and the replay still carries the whole conversation');
+  } finally {
+    await gateway.close();
+  }
+});
+
+await checkAsync('a replayed transcript is private to the account that sent it', async () => {
+  /*
+   * Session ids are caller-chosen, so two accounts can pick the same one. The map's key includes
+   * the owner; this pins that the handler passes the authenticated owner through, not just the
+   * header value.
+   */
+  const gateway = await deepaiGateway({ usernames: ['alice', 'bob'] });
+  const session = { 'x-session-id': 'shared-name' };
+  try {
+    await gateway.ask([
+      { role: 'user', content: 'Alice opens.' },
+      { role: 'assistant', content: 'Alice reply.' },
+      { role: 'user', content: 'Alice question.' },
+    ], { headers: session });
+    const stolen = await gateway.ask([{ role: 'user', content: 'Continue.' }], {
+      username: 'bob',
+      headers: { ...session, 'x-gateway-history': 'required' },
+    });
+    assert.equal(stolen.status, 400, 'Bob cannot replay Alice\'s transcript');
+    assert.equal((await stolen.json()).error?.code, 'conversation_history_missing');
+    assert.equal(gateway.sent.length, 1, 'only Alice\'s seed reached upstream');
+  } finally {
+    await gateway.close();
+  }
+});
+
+await checkAsync('an image turn is replayed as a note, not as its payload', async () => {
+  /*
+   * The model may see the image, but the replay map should not hold its base64 for days. The
+   * turn keeps its place with a note, so a later question still sees that a screenshot existed.
+   */
+  const gateway = await deepaiGateway();
+  const session = { 'x-session-id': 'image-chat' };
+  const image = 'data:image/png;base64,' + 'A'.repeat(2048);
+  const first = [
+    { role: 'user', content: 'Look at this.' },
+    { role: 'assistant', content: 'I see it.' },
+    { role: 'user', content: [
+      { type: 'text', text: 'What is in this screenshot?' },
+      { type: 'image_url', image_url: { url: image } },
+    ] },
+  ];
+  try {
+    await gateway.ask(first, { headers: session });
+    assert.ok(JSON.stringify(gateway.sent[0].payload.messages).includes('data:image/png'),
+      'the model itself did see the image');
+    await gateway.ask([{ role: 'user', content: 'And now?' }], { headers: session });
+    const replayed = JSON.stringify(gateway.sent[1].payload.messages);
+    assert.match(replayed, /image omitted from the replay cache/,
+      'the remembered turn says the image is not in the cache');
+    assert.ok(!replayed.includes('data:image/png'), 'the payload is not kept in memory');
+    assert.equal(gateway.sent[1].payload.messages.length, first.length + 2,
+      'the image turn keeps its place in the conversation');
+  } finally {
+    await gateway.close();
+  }
+});
+
+await checkAsync('an image retry keeps the replayed transcript', async () => {
+  /*
+   * The retry after a backend image refusal must strip the image from the whole prompt, not just
+   * from the newest turn: a replayed conversation would otherwise lose every earlier message.
+   */
+  const multimodal = await import('../src/deepai/multimodal.js');
+  multimodal.forgetRejections();
+  const gateway = await deepaiGateway({
+    respond: ({ payload }) => {
+      const hasImage = payload.messages.some((message) => Array.isArray(message.content)
+        && message.content.some((part) => part.type === 'image_url'));
+      if (!hasImage) return undefined;
+      const refusal = { error: {
+        message: 'DeepAI Code error: ValueError: Received multimodal data but multimodal processing is not enabled.',
+        type: 'api_error',
+        code: 'PROVIDER_ERROR',
+      } };
+      return new Response(`data: ${JSON.stringify(refusal)}\n\n`,
+        { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    },
+  });
+  const session = { 'x-session-id': 'image-retry-chat' };
+  const seed = [
+    { role: 'user', content: 'Opening.' },
+    { role: 'assistant', content: 'Reply.' },
+    { role: 'user', content: 'Keep this.' },
+  ];
+  try {
+    await gateway.ask(seed, { headers: session });
+    await gateway.ask([{ role: 'user', content: [
+      { type: 'text', text: 'What is this?' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,AA' } },
+    ] }], { headers: session });
+    assert.equal(gateway.sent.length, 3, 'the image request was retried once');
+    const retry = gateway.sent[2].payload.messages;
+    assert.equal(retry.length, 5, 'the retry still carries the whole conversation');
+    assert.equal(retry[0].content, 'Opening.', 'including the first turn');
+    assert.equal(retry[1].content, 'Reply.');
+    assert.equal(retry[2].content, 'Keep this.');
+    assert.ok(!JSON.stringify(retry).includes('data:image'), 'with no image payload');
+  } finally {
+    multimodal.forgetRejections();
+    await gateway.close();
+  }
+});
+
+await checkAsync('replace starts a new transcript, off leaves the old one alone', async () => {
+  /*
+   * A rewind can arrive as a single message, so "replace" is the explicit way to say that the
+   * old transcript is gone. "off" is the escape hatch for a caller that always sends full history
+   * and does not want the gateway to remember anything.
+   */
+  const gateway = await deepaiGateway();
+  const session = { 'x-session-id': 'rewind-chat' };
+  const first = [
+    { role: 'user', content: 'Original opening.' },
+    { role: 'assistant', content: 'Original reply.' },
+    { role: 'user', content: 'Original question.' },
+  ];
+  const replacement = [{ role: 'user', content: 'Rewound opening.' }];
+  try {
+    await gateway.ask(first, { headers: session });
+    await gateway.ask(replacement, { headers: { ...session, 'x-gateway-history': 'replace' } });
+    assert.deepEqual(gateway.sent[1].payload.messages, replacement,
+      'replace does not merge the old transcript into the new one');
+
+    await gateway.ask([{ role: 'user', content: 'After the rewind.' }], { headers: session });
+    assert.deepEqual(gateway.sent[2].payload.messages, [
+      ...replacement,
+      { role: 'assistant', content: 'ok' },
+      { role: 'user', content: 'After the rewind.' },
+    ], 'the replacement is what later turns replay');
+
+    const beforeOff = gateway.sent.length;
+    await gateway.ask([{ role: 'user', content: 'Do not remember me.' }], {
+      headers: { ...session, 'x-gateway-history': 'off' },
+    });
+    assert.equal(gateway.sent[beforeOff].payload.messages.length, 1,
+      'off forwards the request as written');
+    await gateway.ask([{ role: 'user', content: 'What comes next?' }], { headers: session });
+    assert.equal(gateway.sent[beforeOff + 1].payload.messages[0].content, 'Rewound opening.',
+      'off did not overwrite the transcript it declined to read');
+    assert.equal(gateway.sent[beforeOff + 1].payload.messages.length, 5,
+      'the old transcript is still the one replayed');
+  } finally {
+    await gateway.close();
+  }
+});
+
+await checkAsync('the replay map is bounded by count, bytes and idle time', async () => {
+  const { ConversationHistory } = await import('../src/deepai/history.js');
+  let now = 1_000;
+  const history = new ConversationHistory({
+    maxEntries: 2, maxBytes: 10_000, ttlMs: 100, now: () => now,
+  });
+  const turn = (n) => [{ role: 'user', content: 'turn ' + n }];
+  history.remember('alice', 'a', turn(1));
+  history.remember('alice', 'b', turn(2));
+  history.remember('bob', 'a', turn(3));
+  assert.equal(history.size, 2, 'the least recently used conversation is evicted');
+  assert.equal(history.recall('alice', 'a', [{ role: 'user', content: 'next' }]), undefined,
+    'the evicted conversation cannot be replayed');
+  assert.ok(history.recall('bob', 'a', [{ role: 'user', content: 'next' }]),
+    'another account using the same session id is untouched');
+
+  now += 101;
+  assert.equal(history.recall('bob', 'a', [{ role: 'user', content: 'next' }]), undefined,
+    'an idle conversation expires');
+  history.prune();
+  assert.equal(history.size, 0, 'and its bytes are released');
+
+  const tiny = new ConversationHistory({ maxEntries: 1, maxBytes: 32, ttlMs: 100, now: () => now });
+  assert.equal(tiny.remember('alice', 'big', [{ role: 'user', content: 'x'.repeat(100) }]), false,
+    'one oversized transcript is not kept');
+  assert.equal(tiny.size, 0);
+  assert.equal(tiny.remember('alice', 'kept', [{ role: 'user', content: '' }]), true,
+    'a transcript that fits is kept');
+  assert.equal(tiny.remember('alice', 'kept', [{ role: 'user', content: 'x'.repeat(100) }]), false,
+    'but an oversized replacement is not');
+  assert.equal(tiny.recall('alice', 'kept', [{ role: 'user', content: 'next' }]), undefined,
+    'and it does not leave the older transcript to be replayed as the new one');
+
+  const bytes = new ConversationHistory({ maxEntries: 10, maxBytes: 120, ttlMs: 100, now: () => now });
+  assert.equal(bytes.remember('alice', 'one', [{ role: 'user', content: 'a'.repeat(50) }]), true);
+  assert.equal(bytes.remember('alice', 'two', [{ role: 'user', content: 'b'.repeat(50) }]), true);
+  assert.equal(bytes.size, 1, 'the byte ceiling evicts the oldest transcript');
+  assert.equal(bytes.recall('alice', 'one', [{ role: 'user', content: 'next' }]), undefined);
+});
+
 await checkAsync('a request without an override takes its budget from the model catalog', async () => {
   /*
    * The production path: no PROMPT_BUDGET_BYTES, no test fixture. The catalog entry for this model
